@@ -11,6 +11,10 @@ itself. The balance can then be swept automatically, on a threshold, to the stor
 wallet, to a fixed Bitcoin address, or cross-chain to a stablecoin at an address you control on an EVM
 chain; and it can be held in USDB between sweeps.
 
+> [!WARNING]
+> Flint is still in development and thinly proven in production. Use it with caution and amounts you
+> can afford to lose, and read [Known limitations](docs/limitations.md) before putting money through it.
+
 ## Trust model
 
 **What you are trusting, in one paragraph.** Spark is a 2-of-3 statechain operated by Lightspark, Breez
