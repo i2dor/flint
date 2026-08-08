@@ -8,7 +8,7 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
-## [0.1.0] — unreleased
+## [0.1.0] — 2026-08-08
 
 The first release under the name **Flint**, and the first from this repository.
 
