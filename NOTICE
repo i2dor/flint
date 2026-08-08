@@ -1,0 +1,56 @@
+Third-party notices for Flint
+=============================
+
+This plugin is greenfield. The notices below cover work whose shape, structure or ideas it
+deliberately reuses, so the debt is recorded rather than implied.
+
+This repository is licensed under the MIT Licence; see LICENSE. Copyright (c) 2026 Seth For Privacy.
+
+Everything below this line is somebody else's copyright and stays exactly as it is. Removing an
+entry does not remove the obligation it records — for Breez in particular, the MIT Licence requires
+their notice to travel with the binaries this plugin redistributes, so deleting entry 1 would make
+the packaged artifact non-redistributable.
+
+
+1. Breez SDK - Spark (Breez.Sdk.Spark) — MIT
+--------------------------------------------
+Copyright (c) 2025 Breez
+https://github.com/breez/spark-sdk
+
+Unlike the other entries below, this is not a pattern debt: the packaged plugin (.btcpay)
+**redistributes Breez's compiled binaries** — Breez.Sdk.Spark.dll and the native
+breez_sdk_spark_bindings libraries for each supported runtime. The MIT Licence requires that
+Breez's copyright notice and permission notice travel with those binaries, which is what this
+entry records. The licence text is identical in substance to this repository's own LICENSE.
+
+
+2. Kukks' BTCPayServerPlugins — MIT
+-----------------------------------
+Copyright (c) Andrew Camilleri (Kukks)
+https://github.com/Kukks/BTCPayServerPlugins
+
+The BTCPay plugin patterns this repository follows descend from these plugins — specifically the
+Breez, Blink and MicroNode ones: per-store Lightning client lifecycle, the Lightning
+connection-string handler, the LN payment-method setup-tab UI extension points, the plugin-owned EF
+schema and migrations layout, the csproj/PluginPacker packaging recipe, and the
+`GetInfo -> NotSupportedException` approach for a receive-only ILightningClient.
+
+Additionally, the *shape* of the auto-sweep settings and history UI added in Wave 4 —
+Views/Spark/Sweep.cshtml and the sweep settings/record data shapes — was informed by
+`TreasurySettings`, `TreasurySweepRecord` and `Treasury.cshtml` in
+https://github.com/aljazceru/btcpayserver-breez-nodeless-spark, which is itself an unattributed
+derivative of Kukks' MIT-licensed plugin and carries no licence file of its own. Only the
+settings/UI shape was harvested. None of its sweep execution logic was used: that implementation
+probes for a workable amount by trial and error, which is not an acceptable way to move money.
+Attribution is recorded here to Kukks as the upstream copyright holder.
+
+
+3. BoltzExchange btcpay-plugin-liquid — MIT
+-------------------------------------------
+Copyright (c) Boltz
+https://github.com/BoltzExchange/btcpay-plugin-liquid
+
+The sweep destination pattern is theirs: reserve a fresh, labelled address from the store's own BTC
+derivation scheme via `BTCPayWallet.ReserveAddressAsync(storeId, derivation.AccountDerivation,
+label)`, and rotate it per sweep. See Services/BTCPayWalletSweepAddressSource.cs. No Boltz code is
+included.

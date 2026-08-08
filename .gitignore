@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+*.user
+.DS_Store
+.idea/
+.vs/
+packages/
+
+# Agent worktrees: transient, and each is its own git repo.
+.claude/worktrees/

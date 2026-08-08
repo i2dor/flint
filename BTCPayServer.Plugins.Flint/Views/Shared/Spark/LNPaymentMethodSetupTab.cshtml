@@ -1,0 +1,54 @@
+@using BTCPayServer.Client
+@using BTCPayServer.Plugins.Flint.Services
+@using Microsoft.AspNetCore.Mvc.TagHelpers
+@model BTCPayServer.Models.StoreViewModels.LightningNodeViewModel
+@inject SparkService SparkService
+@*
+    Injected at "ln-payment-method-setup-tab": the body of the pill LNPaymentMethodSetupTabhead adds.
+
+    Only rendered as a real tab when the store has a Spark wallet — the head links straight to the plugin's
+    setup page otherwise — so this pane's job is to say what pressing Save will do, and to point at the
+    plugin's own pages for everything else. It deliberately shows no connection string: the head fills core's
+    field in, and there is nothing here for a merchant to copy.
+*@
+@if (Model.CryptoCode != "BTC")
+{
+    return;
+}
+@{
+    // Awaited, not blocked on: the service's startup gate is a Task, and a Razor view is already async.
+    var running = await SparkService.GetClient(Model.StoreId) is not null;
+    var configured = await SparkService.GetConnectionString(Model.StoreId) is not null;
+}
+<div id="SparkSetup" class="pt-3 tab-pane fade" role="tabpanel" aria-labelledby="LightningNodeType-Spark">
+    @if (!configured)
+    {
+        <p class="text-secondary">
+            This store has no Spark wallet yet.
+            <a asp-controller="Spark" asp-action="Setup" asp-route-storeId="@Model.StoreId"
+               permission="@Policies.CanModifyStoreSettings">Set one up</a>
+            and BTCPay's Lightning configuration is written for you — there is no connection string to copy.
+        </p>
+    }
+    else
+    {
+        <p class="text-secondary">
+            Saving with <strong>Use Flint</strong> selected points this store's Lightning payments at its
+            Spark wallet. Nodeless: nothing to run and nothing to keep online.
+        </p>
+        @if (!running)
+        {
+            <p class="text-danger">
+                This store's Spark wallet is not running at the moment, so saving now would leave Lightning
+                payments failing.
+                <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@Model.StoreId"
+                   permission="@Policies.CanViewStoreSettings">Check its status</a>.
+            </p>
+        }
+        <p class="text-secondary mb-0">
+            Balance, network health and removal live on the store's
+            <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@Model.StoreId"
+               permission="@Policies.CanViewStoreSettings">Flint page</a>.
+        </p>
+    }
+</div>

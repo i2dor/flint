@@ -1,0 +1,222 @@
+@model SparkStableBalanceViewModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.StableBalance, "Spark Stable Balance"));
+
+    // A trail back to the plugin root, so the heading below is not the only entry in it. With no parent,
+    // TitleHeader synthesises a single crumb equal to the title and prints it twice.
+    //
+    // Fully qualified rather than imported: SetBreadcrumbs lives in the BTCPayServer namespace, and
+    // pulling that into _ViewImports would make the bare `Constants` these views use ambiguous between
+    // ours and core's. Controller is "Spark" because TitleHeader strips the "Controller" suffix itself.
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+    var view = Model.View;
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+    <a id="page-primary" asp-action="Status" asp-route-storeId="@Model.StoreId"
+       class="btn btn-secondary text-nowrap">
+        Back to status
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+
+        @if (view.MainnetOnly)
+        {
+            <div class="alert alert-warning" role="alert">
+                <strong>Stable Balance only works on Bitcoin mainnet.</strong>
+                USDB has no deployment on this server's network, so switching it on here would store a setting
+                that never converts anything. Saving it is refused rather than accepted and ignored.
+            </div>
+        }
+
+        @if (!view.WalletRunning)
+        {
+            <div class="alert alert-danger" role="alert">
+                This store's Spark wallet is not running, so nothing here can be changed.
+            </div>
+        }
+        else if (view.WalletError is { } walletError)
+        {
+            <div class="alert alert-warning" role="alert">
+                The wallet is running but its Stable Balance state could not be read: @walletError
+            </div>
+        }
+
+        @if (view.NeedsReapply)
+        {
+            @*
+                Shown rather than fixed. Converging the two means converting the store's whole balance one way
+                or the other, and a page load is not allowed to decide that.
+            *@
+            <div class="alert alert-warning" role="alert">
+                <strong>The setting and the wallet disagree.</strong>
+                This store is configured for Stable Balance <strong>@(view.DesiredActive ? "on" : "off")</strong>,
+                but its wallet reports it as
+                <strong>@(view.ActuallyActive ? $"on ({view.ActiveLabel})" : "off")</strong>. Spark caches this
+                per wallet, so a replaced recovery phrase starts switched off whatever the setting says.
+                <form method="post" asp-action="ReapplyStableBalance" asp-route-storeId="@Model.StoreId"
+                      class="mt-2" permission="@Policies.CanModifyStoreSettings">
+                    <button type="submit" class="btn btn-warning btn-sm" id="SparkReapplyStableBalance">
+                        Apply the setting to the wallet
+                    </button>
+                    <div class="form-text">
+                        This converts the balance. It runs in the background and reports nothing when it
+                        finishes.
+                    </div>
+                </form>
+            </div>
+        }
+
+        @if (view.HoldingAfterDisable)
+        {
+            <div class="alert alert-info" role="alert">
+                Stable Balance is off, but this store still holds @view.Balance!.Describe(). Spark converts it
+                back to Bitcoin on its own background worker; nothing reports when that finishes, so check back
+                rather than waiting here.
+            </div>
+        }
+
+        <h3 class="mb-3">Balance</h3>
+        <table class="table">
+            <tbody>
+                <tr>
+                    <th class="w-50">Held in stablecoin</th>
+                    <td>
+                        @if (view.Balance is { } balance)
+                        {
+                            <span id="SparkStableBalanceAmount">@balance.Describe()</span>
+                            @if (balance.IsFreezable)
+                            {
+                                <div class="form-text text-warning">
+                                    The issuer of @balance.Ticker can freeze this balance.
+                                </div>
+                            }
+                        }
+                        else
+                        {
+                            <span class="text-secondary">None</span>
+                        }
+                    </td>
+                </tr>
+                <tr>
+                    <th>Wallet reports</th>
+                    <td id="SparkStableBalanceActive">
+                        @(view.ActuallyActive ? $"Active as {view.ActiveLabel}" : "Not active")
+                    </td>
+                </tr>
+                @if (view.ConversionMinimumSats is { } minimum)
+                {
+                    <tr>
+                        <th>Spark will not convert less than</th>
+                        <td>
+                            @minimum.ToString("N0") sats
+                            <div class="form-text">
+                                A threshold below this is raised to it rather than honoured.
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        <h3 class="mt-4 mb-3">What you are agreeing to</h3>
+        <div class="alert alert-warning" role="alert">
+            <p>
+                Holding this store's balance in USDB adds a <strong>regulated stablecoin issuer</strong> to the
+                parties who can affect your money. The token is <strong>freezable</strong>: the issuer can
+                freeze the balance, and if they do, this plugin cannot move it, sweep it or convert it back.
+            </p>
+            <p class="mb-0">
+                That is on top of Spark itself, which is a 2-of-3 statechain the store already depends on. It is
+                also not a prerequisite for sweeping to a stablecoin on another chain — a cross-chain sweep
+                converts Bitcoin directly, in one hop with one spread, while going through Stable Balance first
+                is two hops with two. Stable Balance earns its place only if you want to <em>hold</em> dollars
+                between sweeps.
+            </p>
+        </div>
+
+        <form method="post" asp-action="StableBalance" asp-route-storeId="@Model.StoreId"
+              permission="@Policies.CanModifyStoreSettings">
+            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+            <div class="form-check mb-3">
+                <input asp-for="Settings.Enabled" type="checkbox" class="form-check-input"
+                       id="SparkStableBalanceEnabled" />
+                <label asp-for="Settings.Enabled" class="form-check-label">
+                    Hold this store's balance in a stablecoin
+                </label>
+                <span asp-validation-for="Settings.Enabled" class="text-danger"></span>
+                <div class="form-text">
+                    Switching this on converts the Bitcoin balance to the token below. Switching it off converts
+                    back. Both take a spread and both happen in the background.
+                </div>
+            </div>
+
+            <div class="form-check mb-3">
+                <input asp-for="Settings.DisclosureAcknowledged" type="checkbox" class="form-check-input"
+                       id="SparkStableBalanceDisclosure" />
+                <label asp-for="Settings.DisclosureAcknowledged" class="form-check-label">
+                    I understand that the issuer can freeze this balance
+                </label>
+                <span asp-validation-for="Settings.DisclosureAcknowledged" class="text-danger"></span>
+            </div>
+
+            <div class="form-group">
+                <label asp-for="Settings.Label" class="form-label"></label>
+                <input asp-for="Settings.Label" class="form-control" />
+                <span asp-validation-for="Settings.Label" class="text-danger"></span>
+                <div class="form-text">
+                    A name for the token inside this wallet. It has no meaning to Spark or to anyone else.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label asp-for="Settings.TokenIdentifier" class="form-label"></label>
+                <input asp-for="Settings.TokenIdentifier" class="form-control font-monospace" />
+                <span asp-validation-for="Settings.TokenIdentifier" class="text-danger"></span>
+                <div class="form-text">
+                    The mainnet USDB identifier, which the plugin supplies because Spark ships no default for it.
+                    Change this only if you know a different token you want to hold; it is checked against Spark
+                    before it is stored.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label asp-for="Settings.MaxSlippageBps" class="form-label"></label>
+                <input asp-for="Settings.MaxSlippageBps" type="number" min="0" class="form-control" />
+                <span asp-validation-for="Settings.MaxSlippageBps" class="text-danger"></span>
+                <div class="form-text">
+                    How far the conversion may move against you before it is refused, in hundredths of a percent.
+                    @StableBalanceSettings.DefaultMaxSlippageBps is Spark's own default. This is a
+                    <em>different</em> setting from the cross-chain slippage on the sweep page, and the two do
+                    not share a value.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label asp-for="Settings.AutoConvertThresholdSats" class="form-label">
+                    Convert once the Bitcoin balance passes, in sats (optional)
+                </label>
+                <input asp-for="Settings.AutoConvertThresholdSats" type="number" min="0" class="form-control" />
+                <span asp-validation-for="Settings.AutoConvertThresholdSats" class="text-danger"></span>
+                <div class="form-text">
+                    Leave empty to use Spark's own minimum. A value below that minimum is raised to it rather
+                    than honoured, so setting a small number does not do what it looks like.
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary" id="SparkSaveStableBalance">Save</button>
+        </form>
+    </div>
+</div>
+
+@section PageFootContent {
+    <partial name="_ValidationScriptsPartial" />
+}

@@ -1,0 +1,85 @@
+name: Spark regtest wallet
+
+# Prints where to send money to the CI regtest wallet, and how much it already has.
+#
+# Run this by hand (Actions > Spark regtest wallet > Run workflow) when you are standing the wallet up for the
+# first time, or when the `funded-regtest-test` job has told you the wallet is drained and you want to check the
+# balance before or after a top-up.
+#
+# WHAT THIS WORKFLOW DELIBERATELY DOES NOT DO: generate the seed. The natural design — CI mints a mnemonic and
+# hands it back — has no safe return channel. An encrypted artefact needs a passphrase, and the only channel a
+# workflow_dispatch offers is its inputs, which GitHub stores against the run *unmasked* and shows to everyone
+# with read access; that puts the key beside the lock. Artifacts are also downloadable by every user with read
+# access and are retained for months, so a passphrase that leaks once is a permanent compromise of the wallet.
+#
+# So the seed is generated on the operator's own machine, offline, and the only time it crosses a network is
+# when the operator pastes it into GitHub's secret form over TLS. The generator
+# (`SparkRegtestWalletTool.Generate_a_wallet_mnemonic_for_the_operator_to_store`) asserts that GITHUB_ACTIONS is
+# not set, so this cannot be quietly changed later. Generation needs no network, which is what makes it work
+# for a maintainer whose IP the SSP blocks. See docs/testing.md, "A funded regtest wallet for CI".
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  deposit-address:
+    name: Print the CI wallet's deposit address
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # The secrets context is not available to a job-level `if`, so the check is a step. Failing rather than
+      # skipping is deliberate: someone pressed "Run workflow" to get an address, and a green run that silently
+      # produced nothing is worse than a red one that says why.
+      - name: Require the wallet secret
+        env:
+          SPARK_REGTEST_SEED: ${{ secrets.SPARK_REGTEST_SEED }}
+        run: |
+          if [ -z "${SPARK_REGTEST_SEED}" ]; then
+            echo "::error::The repository secret SPARK_REGTEST_SEED is not set, so there is no wallet to look up."
+            echo "Generate a seed on your own machine first — never here, the generator refuses to run in CI:"
+            echo "  SPARK_REGTEST_WALLET_GENERATE=1 dotnet test \\"
+            echo "    --filter 'FullyQualifiedName~Generate_a_wallet_mnemonic' -l 'console;verbosity=detailed'"
+            echo "Then store it as SPARK_REGTEST_SEED under Settings > Secrets and variables > Actions,"
+            echo "and run this workflow again. Full runbook: docs/testing.md, 'A funded regtest wallet for CI'."
+            exit 1
+          fi
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build (plugin + tests)
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release
+
+      # No API key: regtest accepts a null one. The tool prints the identity pubkey, the balance and the static
+      # deposit address to the job log and to the run summary, and asserts the mnemonic is in neither.
+      - name: Look up the deposit address
+        env:
+          SPARK_REGTEST_SEED: ${{ secrets.SPARK_REGTEST_SEED }}
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build
+          --filter "FullyQualifiedName~Print_the_funding_details"
+          --logger "console;verbosity=detailed"

@@ -1,0 +1,36 @@
+@using BTCPayServer
+@using BTCPayServer.Client
+@using BTCPayServer.Plugins.Flint
+@using BTCPayServer.Plugins.Flint.Models
+@using Microsoft.AspNetCore.Mvc.TagHelpers
+@*
+    Injected at "spark-status-post-body": the sweep section of the Spark status page, and the way in to the sweep
+    settings and history.
+
+    A partial rather than markup inside Status.cshtml because the extension point is the contract the status page
+    already publishes, and because it keeps the sweep feature's UI in files a reader can find from the sweep code.
+
+    The model is whatever the status page passed — a SparkStatusViewModel. Anything else is tolerated without
+    throwing: a partial that throws inside a layout takes the whole page down, and this one is decoration.
+*@
+@{
+    var storeId = Model switch
+    {
+        SparkStatusViewModel status => status.StoreId,
+        string s => s,
+        _ => Context.GetCurrentStoreId()
+    };
+}
+@if (!string.IsNullOrEmpty(storeId))
+{
+    <h3 class="mt-4 mb-3">Sweeps</h3>
+    <p class="text-secondary">
+        Whatever sits on Spark depends on Spark's service providers to stay spendable. Sweeping moves it onto the
+        Bitcoin blockchain by cooperative exit, which is the one thing that bounds how much of your money that
+        dependency covers. Exits cost a flat fee whatever they carry, so sweep rarely and in size.
+    </p>
+    <a class="btn btn-secondary" id="SparkSweepSettingsLink" asp-controller="Spark" asp-action="Sweep"
+       asp-route-storeId="@storeId" permission="@Policies.CanViewStoreSettings">
+        Sweep settings and history
+    </a>
+}

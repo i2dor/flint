@@ -1,0 +1,75 @@
+@using BTCPayServer
+@using BTCPayServer.Plugins.Flint.Models
+@using Microsoft.AspNetCore.Mvc.TagHelpers
+@*
+    Injected at "spark-setup-post-body": step 2 of setup, which is optional.
+
+    This renders *inside* the setup page's form, so it deliberately contains no form and no submit button of its
+    own — nested forms are invalid HTML and a second submit button inside this one would post the seed form. On
+    first-time setup there is nothing to link to yet (the sweep page requires a configured store), so it sets the
+    expectation instead; once configured, the same block becomes the link.
+
+    Anything other than the setup view model is tolerated without throwing, as with every extension partial.
+*@
+@{
+    var setup = Model as SparkSetupViewModel;
+    var storeId = setup?.StoreId ?? Context.GetCurrentStoreId();
+    var configured = setup?.AlreadyConfigured ?? false;
+}
+<div class="mt-5" id="SparkSweepSetupStep">
+    <h3 class="mb-3">Step 2 — sweeping (optional)</h3>
+    <p class="text-secondary">
+        A Spark balance is held on a second layer and depends on Spark's service providers. Auto-sweep moves it out
+        to Bitcoin on its own once it passes a threshold you choose, which keeps that exposure bounded without you
+        having to remember to do anything. It is off until you turn it on.
+    </p>
+    <p class="text-secondary">
+        Exits cost a flat fee regardless of the amount, so the settings default to sweeping infrequently and in
+        size rather than often and small.
+    </p>
+    @if (configured && !string.IsNullOrEmpty(storeId))
+    {
+        <a class="btn btn-secondary" asp-controller="Spark" asp-action="Sweep" asp-route-storeId="@storeId">
+            Configure sweeping
+        </a>
+    }
+    else if (setup is not null)
+    {
+        @*
+            Real inputs rather than a promise you can do this later. These post with the seed form -- this
+            partial renders inside it -- so a merchant leaves setup with sweeping already on. Only the two
+            fields that decide whether sweeping happens at all; everything else keeps its default and lives on
+            the sweep page.
+
+            asp-for against the setup view model, so the names bind to it and not to a nested prefix.
+        *@
+        <div class="form-group">
+            <div class="form-check">
+                <input asp-for="@setup.EnableSweeping" type="checkbox" class="form-check-input"
+                       id="SparkSetupEnableSweeping" />
+                <label asp-for="@setup.EnableSweeping" class="form-check-label"
+                       for="SparkSetupEnableSweeping"></label>
+            </div>
+        </div>
+
+        <div class="form-group col-md-6">
+            <label asp-for="@setup.SweepBalanceThresholdSats" class="form-label"></label>
+            <div class="input-group">
+                <input asp-for="@setup.SweepBalanceThresholdSats" type="number" min="0" step="1"
+                       class="form-control" id="SparkSetupSweepThreshold" />
+                <span class="input-group-text">sats</span>
+            </div>
+            <span asp-validation-for="@setup.SweepBalanceThresholdSats" class="text-danger"></span>
+            <div class="form-text">
+                Sweeps go to this store's on-chain wallet. If it has none, setup still completes and sweeping
+                stays off until you choose a destination.
+            </div>
+        </div>
+    }
+    else
+    {
+        <p class="text-secondary mb-0">
+            <em>Finish step 1 and you will be able to set this up from the Flint status page.</em>
+        </p>
+    }
+</div>

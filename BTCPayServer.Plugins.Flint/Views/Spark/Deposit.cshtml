@@ -1,0 +1,205 @@
+@model SparkDepositViewModel
+@{
+    // No nav entry of its own — reached from the status page's Advanced section, so it keeps the top-level
+    // Spark entry lit.
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Spark deposits"));
+
+    var view = Model.Deposits;
+    var stuck = view.Stuck;
+    var maturing = view.Maturing;
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+    <a id="page-primary" asp-action="Status" asp-route-storeId="@Model.StoreId"
+       class="btn btn-secondary text-nowrap">
+        Back to status
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+
+        @*
+            The stuck list comes first, above the address. A merchant reading this page has usually already
+            sent money and is looking for it; showing them the address again before telling them their deposit
+            is stranded gets the ordering exactly backwards.
+        *@
+        @if (stuck.Count > 0)
+        {
+            <div class="alert alert-danger" role="alert">
+                <strong>
+                    @stuck.Count on-chain @(stuck.Count == 1 ? "deposit has" : "deposits have") not been
+                    credited.
+                </strong>
+                Spark tried and the fee it needed was above the limit this store allows. It will
+                <strong>not</strong> try again at a lower price — these sit here until they are claimed by
+                hand.
+            </div>
+
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Deposit</th>
+                        <th class="text-end">Amount</th>
+                        <th class="text-end">Claim needs</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var deposit in stuck)
+                    {
+                        <tr>
+                            <td>
+                                <vc:truncate-center text="@deposit.TxId" classes="truncate-center-id" />
+                                <div class="form-text">output @deposit.Vout</div>
+                                @if (deposit.ClaimError is { } error)
+                                {
+                                    <div class="form-text text-danger">@error.Message</div>
+                                }
+                            </td>
+                            <td class="text-end">@deposit.AmountSats.ToString("N0") sats</td>
+                            <td class="text-end">
+                                @if (deposit.ClaimError?.RequiredFeeSats is { } required)
+                                {
+                                    <span>@required.ToString("N0") sats</span>
+                                    @if (deposit.ClaimError.RequiredFeeRateSatPerVbyte is { } rate)
+                                    {
+                                        <div class="form-text">@rate.ToString("N0") sat/vB</div>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="text-secondary">Unknown</span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                <form method="post" asp-action="ClaimDeposit" asp-route-storeId="@Model.StoreId"
+                                      permission="@Policies.CanModifyStoreSettings">
+                                    <input type="hidden" name="txId" value="@deposit.TxId" />
+                                    <input type="hidden" name="vout" value="@deposit.Vout" />
+                                    @*
+                                        No fee field. The fee Spark reported on the failure is what the claim
+                                        needs, the service re-reads it rather than trusting this form, and the
+                                        store's ceiling plus the never-more-than-half-a-deposit backstop are
+                                        applied server-side either way.
+                                    *@
+                                    <button type="submit" class="btn btn-primary btn-sm text-nowrap">
+                                        Claim now
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+
+        @if (view.ClaimPolicyLooksTooLow)
+        {
+            <div class="alert alert-warning" role="alert">
+                <strong>This store's claim fee limit looks too low for current fees.</strong>
+                A deposit arriving now may not be claimed automatically. Raise the headroom below, or expect to
+                claim by hand.
+            </div>
+        }
+
+        <h3 class="mb-3">Deposit address</h3>
+
+        @if (view.Address is { } address)
+        {
+            <p>
+                Send Bitcoin here to top this store's Spark wallet up. The address is permanent — save it once
+                and reuse it.
+            </p>
+            <div class="input-group mb-2">
+                <input id="SparkDepositAddress" type="text" class="form-control font-monospace"
+                       readonly="readonly" value="@address" />
+                <button type="button" class="btn btn-outline-secondary" data-clipboard-target="#SparkDepositAddress">
+                    Copy
+                </button>
+            </div>
+            <div class="form-text">
+                Spark credits a deposit after <strong>three confirmations</strong>, and only then does it try to
+                claim it. Allow half an hour or more before the balance moves — the balance page will show
+                nothing at all in the meantime.
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-warning" role="alert">
+                This store's deposit address could not be read.
+                @if (view.AddressError is { } addressError)
+                {
+                    <span>@addressError</span>
+                }
+                <strong>Do not send anything on-chain until it can be.</strong>
+            </div>
+        }
+
+        @if (maturing.Count > 0)
+        {
+            <h3 class="mt-4 mb-3">Waiting to confirm</h3>
+            <p class="form-text">
+                These have arrived on-chain and are waiting for their third confirmation. Nothing needs doing.
+            </p>
+            <table class="table">
+                <tbody>
+                    @foreach (var deposit in maturing)
+                    {
+                        <tr>
+                            <td><vc:truncate-center text="@deposit.TxId" classes="truncate-center-id" /></td>
+                            <td class="text-end">@deposit.AmountSats.ToString("N0") sats</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+
+        <h3 class="mt-4 mb-3">Claim fee policy</h3>
+        <table class="table">
+            <tbody>
+                <tr>
+                    <th class="w-50">Automatic claims are allowed</th>
+                    <td>
+                        the network-recommended fee rate plus
+                        <strong>@view.Settings.EffectiveClaimFeeLeewaySatPerVbyte.ToString("N0") sat/vB</strong>
+                        <div class="form-text">
+                            A rate that tracks the mempool, not a fixed number. Spark's own default is a fixed
+                            1 sat/vB, which is below the mainnet floor almost always — a deposit under that
+                            default simply never arrives, with nothing to show for it but a row on this page.
+                            A rate is also the <em>only</em> limit on an automatic claim: Spark claims in the
+                            background and offers no cap relative to the size of the deposit, so a small
+                            deposit maturing during a fee spike can lose a real share of itself. Prefer one
+                            large deposit to several small ones.
+                        </div>
+                    </td>
+                </tr>
+                <tr>
+                    <th>A claim made by hand may cost at most</th>
+                    <td>
+                        <strong>@view.Settings.EffectiveMaxManualClaimFeeSats.ToString("N0") sats</strong>
+                        <div class="form-text">
+                            And never more than
+                            @SparkDepositSettings.HardMaxClaimFeePercent.ToString("0.#")% of the deposit itself,
+                            whatever this limit says.
+                        </div>
+                    </td>
+                </tr>
+                @if (view.RecommendedFees is { } fees)
+                {
+                    <tr>
+                        <th>Fees right now</th>
+                        <td id="SparkRecommendedFees">
+                            @fees.FastestFeeSatPerVbyte.ToString("N0") sat/vB fastest,
+                            @fees.HalfHourFeeSatPerVbyte.ToString("N0") half hour,
+                            @fees.EconomyFeeSatPerVbyte.ToString("N0") economy
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>

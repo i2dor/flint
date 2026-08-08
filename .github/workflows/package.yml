@@ -1,0 +1,275 @@
+name: Package
+
+# Builds the .btcpay plugin artifact via BTCPay Server's own PluginPacker (vendored in the
+# btcpayserver submodule at BTCPayServer.PluginPacker), signs it, and publishes it:
+#   - always as workflow artifacts (.btcpay, its .btcpay.json manifest, SHA256SUMS, and the
+#     Sigstore attestation bundle)
+#   - additionally attached to a GitHub Release when triggered by a `v*` tag push
+#
+# workflow_dispatch allows building/inspecting a packaged artifact from any branch without
+# cutting a release (e.g. to sanity-check packaging changes before tagging).
+#
+# ---------------------------------------------------------------------------------------------
+# Signing: keyless build provenance, not a maintainer GPG key.
+#
+# The obvious precedent is the Boltz BTCPay plugin, which GPG-signs SHA256SUMS in CI with a
+# private key held as a repository secret and commits the public key to the repo. That is
+# well-trodden, and it is also weaker than it looks: a private key stored in GitHub Actions
+# secrets is reachable by anything that can run a workflow in this repository, so it defends
+# against a tampered download but *not* against the repository compromise that is the reason to
+# sign in the first place. It also puts a key's whole lifecycle -- generation, passphrase custody,
+# rotation, revocation -- onto one maintainer, and a signing key nobody can find at release time
+# is how projects quietly stop signing.
+#
+# actions/attest-build-provenance mints a short-lived Sigstore signing certificate from this job's
+# OIDC token instead. There is no long-lived key anywhere, nothing for a maintainer to generate,
+# store or lose, and the resulting attestation says more than a detached signature does: it binds
+# the artifact's digest to this repository, this workflow file, and the exact commit that produced
+# it. A verifier gets to check provenance, not just authorship.
+#
+# A user verifies a downloaded artifact with:
+#
+#   gh attestation verify BTCPayServer.Plugins.Flint.btcpay \
+#     --repo sethforprivacy/flint
+#
+# ...or, with no network and no GitHub account, against the bundle attached to the release:
+#
+#   gh attestation verify BTCPayServer.Plugins.Flint.btcpay \
+#     --bundle attestation.jsonl --repo sethforprivacy/flint
+#
+# The attestation step runs on workflow_dispatch as well as on tags, deliberately: it means the
+# signing path is exercised and verifiable before the first release rather than for the first time
+# during it.
+#
+# Caveat while this repository is private: GitHub only persists attestations for public repositories
+# (or on an upgraded plan), answering "Feature not available for the <account> organization"
+# otherwise. So signing is skipped while private -- packaging still runs and still uploads artifacts,
+# marked unsigned with a warning -- and a tag build hard-fails rather than cutting an unverifiable
+# release. Making the repository public restores signing with no change to this file.
+#
+# What this does *not* give you: it attests that GitHub ran this workflow in this repository at this
+# commit, so it is only as good as who can push to the repository and who can change this file. A
+# detached maintainer signature made on a machine GitHub does not control would be a second,
+# independent statement, and is worth adding if this plugin ever matters enough to be worth
+# attacking that way. There is deliberately no half-version of that here: signing with a key kept in
+# a repository secret would add ceremony without adding an independent signer.
+# ---------------------------------------------------------------------------------------------
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write      # only exercised on the tag-triggered release-attach step
+  id-token: write      # mints the OIDC token the Sigstore signing certificate is issued against
+  attestations: write  # persists the attestation against the repository
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  # PLUGIN_NAME is the plugin identifier and the assembly name -- what PluginPacker writes into the
+  # manifest and what BTCPay keys an install by. PROJECT_PATH is the csproj on disk.
+  #
+  # They currently agree, and are still two variables rather than one interpolation, because they have
+  # already come apart once: an earlier rename moved the assembly name while the directory and csproj
+  # filename stayed put, and a composed `$DIR/$NAME.csproj` then pointed at a file that did not exist.
+  # `dotnet build` reports a missing project as an unrecognised switch rather than a missing file, so
+  # the failure did not name its own cause. Keep them separate and that cannot recur.
+  PLUGIN_NAME: BTCPayServer.Plugins.Flint
+  PROJECT_PATH: BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+
+jobs:
+  package:
+    name: Build & package plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      # A single build that also captures TargetDir (same pattern as plugin-register.sh's
+      # `-getProperty:TargetPath`), so the plugin isn't built twice.
+      #
+      # `-t:Build` is load-bearing: `-getProperty` on its own only *evaluates* the project and
+      # skips every target, so without it this step reports the output directory while building
+      # nothing, and PluginPacker then fails on a missing assembly.
+      - name: Build plugin (Release)
+        id: build-dir
+        run: |
+          set -euo pipefail
+          target_dir="$(dotnet build "$PROJECT_PATH" \
+            --configuration Release -t:Build -getProperty:TargetDir)"
+          if [ ! -f "$target_dir/$PLUGIN_NAME.dll" ]; then
+            echo "error: $target_dir/$PLUGIN_NAME.dll was not produced by the build" >&2
+            exit 1
+          fi
+          echo "path=$target_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Run PluginPacker
+        env:
+          PLUGIN_DIR: ${{ steps.build-dir.outputs.path }}
+          OUT_DIR: ${{ runner.temp }}/packed
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          dotnet run --configuration Release \
+            --project btcpayserver/BTCPayServer.PluginPacker/BTCPayServer.PluginPacker.csproj -- \
+            "$PLUGIN_DIR" "$PLUGIN_NAME" "$OUT_DIR"
+          echo "Packed output:"
+          find "$OUT_DIR" -type f -print
+
+      - name: Locate packed artifact
+        id: artifact
+        env:
+          OUT_DIR: ${{ runner.temp }}/packed
+        run: |
+          set -euo pipefail
+          btcpay_file="$(find "$OUT_DIR" -name '*.btcpay' -print -quit)"
+          if [ -z "$btcpay_file" ]; then
+            echo "error: PluginPacker did not produce a .btcpay file under $OUT_DIR" >&2
+            exit 1
+          fi
+          artifact_dir="$(dirname "$btcpay_file")"
+          echo "dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      # A tag is the one input to this workflow that nothing else validates. Note what is and is not
+      # at stake: the plugin registry does *not* key anything off the tag -- it reads the version out
+      # of the PluginPacker manifest, and takes a git ref only as something to clone -- and BTCPay
+      # keys plugin upgrades off that same manifest version. So a wrong tag cannot ship a wrongly
+      # versioned plugin. What it does produce is a GitHub Release called v0.2.0 whose artifacts
+      # identify themselves as 0.1.0, which is a release page that lies about its own contents for as
+      # long as it exists, and which people verify attestations against. Cheap to prevent: PluginPacker
+      # names its output directory after the version it read out of the built assembly, so by this
+      # point that number is already on disk.
+      - name: Tag matches the built plugin version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+          ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # The directory name is Version.ToString() of what BaseBTCPayServerPlugin reports, which is
+          # four components today (the SDK stamps AssemblyInformationalVersion as "0.1.0+<sha>", which
+          # does not parse as a Version, so it falls back to the four-component AssemblyVersion). That
+          # is an implementation detail worth not depending on: normalise to major.minor.patch instead
+          # of stripping a trailing ".0", so this keeps working if it ever reports three components.
+          built="$(basename "$ARTIFACT_DIR")"
+          IFS=. read -r major minor patch _rest <<< "$built"
+          built3="${major:-0}.${minor:-0}.${patch:-0}"
+          if [ "v$built3" != "$TAG" ]; then
+            echo "error: tag $TAG does not match the built plugin version v$built3" \
+                 "(PluginPacker reported '$built')." >&2
+            echo "Bump <Version> in $PROJECT_PATH, or retag." >&2
+            exit 1
+          fi
+          echo "Tag $TAG matches the built plugin version."
+
+      # Keyless signing. See the note at the top of this file for why this rather than a GPG key in
+      # a repository secret. Runs on workflow_dispatch too, so the path is proven before a release
+      # depends on it.
+      # Sigstore attestation is unavailable to a private repository on this plan: the API answers
+      # "Feature not available for the <account> organization ... upgrade the billing plan, or make
+      # this repository public". The repository is private until the post-release soak finishes, so
+      # rather than fail every packaging run until then, the step is skipped while private -- and a
+      # tag build refuses to proceed unsigned, because an unsigned release is the one case where
+      # silently carrying on would be wrong.
+      - name: Attest build provenance
+        id: attest
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ steps.artifact.outputs.dir }}/*.btcpay
+            ${{ steps.artifact.outputs.dir }}/*.btcpay.json
+            ${{ steps.artifact.outputs.dir }}/SHA256SUMS
+
+      # A release is the one case where carrying on unsigned would be wrong, so a tag build stops
+      # here rather than publishing artifacts nobody can verify.
+      - name: Refuse to release unsigned
+        if: startsWith(github.ref, 'refs/tags/v') && steps.attest.outcome == 'skipped'
+        run: |
+          echo "error: this is a tag build, but provenance was not attested because the" >&2
+          echo "repository is private. Make it public (or upgrade the plan) before releasing." >&2
+          exit 1
+
+      - name: Note that the build is unsigned
+        if: steps.attest.outcome == 'skipped'
+        run: |
+          echo "::warning::Repository is private, so no build provenance was attested." \
+               "These artifacts are unsigned and are for inspection only."
+
+      # The attestation is fetched from GitHub's API by `gh attestation verify` and needs nothing
+      # shipped alongside it. This copy exists only for the offline case: `--bundle attestation.jsonl`
+      # verifies the same thing with no network and no GitHub account. One file, JSON Lines, one
+      # bundle per subject.
+      - name: Collect attestation bundle
+        if: steps.attest.outcome == 'success'
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUNDLE:-}" ] || [ ! -f "$BUNDLE" ]; then
+            echo "error: the attestation step produced no bundle at '${BUNDLE:-}'." >&2
+            exit 1
+          fi
+          cp "$BUNDLE" "$ARTIFACT_DIR/attestation.jsonl"
+          echo "Attestation: ${{ steps.attest.outputs.attestation-url }}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PLUGIN_NAME }}
+          path: |
+            ${{ steps.artifact.outputs.dir }}/*.btcpay
+            ${{ steps.artifact.outputs.dir }}/*.btcpay.json
+            ${{ steps.artifact.outputs.dir }}/SHA256SUMS
+            ${{ steps.artifact.outputs.dir }}/attestation.jsonl
+          # Stays `error` even though attestation.jsonl is absent on an unsigned (private-repo)
+          # build: this fires only when *no* path matches, so it still catches the case that
+          # matters -- packaging producing nothing at all -- without tripping on the missing bundle.
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
+        run: |
+          set -euo pipefail
+
+          # Release notes live in a reviewable Markdown file rather than a heredoc here: a heredoc's
+          # terminator has to start its line, and a line at column zero closes the YAML block scalar
+          # this script is written in. `gh release create` prepends --notes to --generate-notes'
+          # output, so the verification instructions land above the generated commit list.
+          notes="$(sed -e '/^<!--/,/^-->/d' \
+            -e "s|__REPO__|$GITHUB_REPOSITORY|g" -e "s|__TAG__|$TAG|g" \
+            .github/release-notes-template.md)"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+              --verify-tag --generate-notes --notes "$notes"
+          fi
+          gh release upload "$TAG" \
+            "$ARTIFACT_DIR"/*.btcpay "$ARTIFACT_DIR"/*.btcpay.json "$ARTIFACT_DIR"/SHA256SUMS \
+            "$ARTIFACT_DIR"/attestation.jsonl \
+            --repo "$GITHUB_REPOSITORY" --clobber

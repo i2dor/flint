@@ -1,0 +1,87 @@
+@model SparkStatusViewModel
+@{
+    // Destructive, so it is reached from the status page rather than the nav, and keeps that entry lit.
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Remove Flint"));
+    // A trail back to the plugin root, so the heading below is not the only entry in it. With no parent,
+    // TitleHeader synthesises a single crumb equal to the title and prints it twice.
+    //
+    // Fully qualified rather than imported: SetBreadcrumbs lives in the BTCPayServer namespace, and
+    // pulling that into _ViewImports would make the bare `Constants` these views use ambiguous between
+    // ours and core's. Controller is "Spark" because TitleHeader strips the "Controller" suffix itself.
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+        <div class="alert alert-danger" role="alert">
+            <h4 class="alert-heading">This destroys the wallet's keys on this server.</h4>
+            <p class="mb-0">
+                The encrypted recovery phrase is deleted from BTCPay. Your own backup of that phrase becomes
+                the <strong>only</strong> way to reach anything left on the wallet. If you do not have it,
+                stop here and sweep the balance out first.
+            </p>
+        </div>
+
+        @if (Model.SeedSource == SeedSource.HotWallet)
+        {
+            <div class="alert alert-info" role="alert">
+                This store's Spark wallet was set up from its on-chain wallet's recovery phrase, so that phrase
+                still recovers it. Removing Spark here does not affect the on-chain wallet.
+            </div>
+        }
+
+        <p>Removing Spark from this store will:</p>
+        <ul>
+            <li>shut the Spark wallet down, so the store stops taking Lightning payments through it;</li>
+            <li>delete the encrypted recovery phrase and the store's Spark settings;</li>
+            @if (Model.LightningWiring is SparkLightningWiringState.Spark or SparkLightningWiringState.StaleSpark)
+            {
+                <li>remove the store's Lightning and LNURL payment methods, which currently point at this wallet;</li>
+            }
+            else
+            {
+                <li>
+                    leave the store's Lightning payment method alone, because it does not point at this
+                    wallet;
+                </li>
+            }
+            <li>
+                keep the wallet's local database
+                @if (!string.IsNullOrEmpty(Model.StorageDirectory))
+                {
+                    @:at <code>@Model.StorageDirectory</code>.
+                }
+                else
+                {
+                    @:in this server's data directory.
+                }
+                It holds the record of payments already settled on a wallet whose phrase you may still hold,
+                and deleting a configuration is not evidence the funds were moved. A server administrator can
+                remove it by hand if you want it gone.
+            </li>
+        </ul>
+
+        <p class="text-secondary">
+            Nothing here moves any money. Funds still on the Spark wallet stay on it.
+        </p>
+
+        <div class="d-flex flex-wrap align-items-center gap-3 mt-4">
+            @* permission, not permissioned — see the note in Status.cshtml. *@
+            <form method="post" asp-action="RemoveConfirmed" asp-route-storeId="@Model.StoreId"
+                  permission="@Policies.CanModifyStoreSettings">
+                <button type="submit" id="SparkRemoveConfirm" class="btn btn-danger">
+                    Remove Flint from this store
+                </button>
+            </form>
+            <a asp-action="Status" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Cancel</a>
+        </div>
+    </div>
+</div>

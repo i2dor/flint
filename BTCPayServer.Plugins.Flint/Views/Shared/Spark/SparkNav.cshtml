@@ -1,0 +1,100 @@
+@using BTCPayServer
+@using BTCPayServer.Client
+@using BTCPayServer.Plugins.Flint.Services
+@using BTCPayServer.Plugins.Flint.Views
+@using Microsoft.AspNetCore.Mvc.TagHelpers
+@inject SparkService SparkService
+@inject SparkStableBalanceService StableBalanceService
+@*
+    Injected at "store-integrations-nav": the plugin's section of the store's Plugins navigation.
+
+        Spark             status once configured, setup before that
+          Sweeps          sweep configuration and history
+          Stable Balance  mainnet only
+
+    Core passes a MainNavViewModel here and the store on it is the authoritative id — HttpContext.GetStoreData
+    deliberately returns null while the navigation is rendering, so GetCurrentStoreId is only a fallback. See
+    SparkNavStoreId for why the model shapes are tolerated rather than assumed: a throw in this file is a throw
+    inside the layout, which breaks every page on the server.
+
+    The top entry's destination depends on state: the status page once Spark is configured, the setup page
+    before that. Hiding it until configured would leave a merchant with nowhere to click. The permission follows
+    the destination for the same reason — the setup page requires CanModifyStoreSettings, so offering the link
+    to a view-only user would only ever produce an access-denied page.
+
+    Only sections live here. Deposits sit in the status page's Advanced accordion because a Spark wallet is
+    funded by customers paying invoices, and removal is a destructive action that belongs next to the state it
+    destroys; promoting either to the nav would undo the previous commit's trimming.
+*@
+@{
+    var storeId = SparkNavStoreId.From(Model) ?? Context.GetCurrentStoreId();
+    var configured = !string.IsNullOrEmpty(storeId) && await SparkService.Get(storeId) is not null;
+}
+@if (!string.IsNullOrEmpty(storeId))
+{
+    @* Permission on the li, as core's own integrations-nav entries do, so an unauthorised user gets no
+       empty list item rather than a hollow one. *@
+    <li class="nav-item"
+        permission="@(configured ? Policies.CanViewStoreSettings : Policies.CanModifyStoreSettings)">
+        <a layout-menu-item="@SparkNavPages.Spark" asp-area="" asp-controller="Spark"
+           asp-action="@(configured ? "Status" : "Setup")" asp-route-storeId="@storeId">
+            @*
+                Inline SVG rather than core's icon view component (vc:icon), which is not an option here:
+                that component renders <use href="~/img/icon-sprite.svg#symbol">, so it can only ever
+                address a symbol in BTCPay core's own sprite, and a plugin has no way to add one to it.
+                SparkBrandingTests holds this, and the currentColor rule below, in place.
+
+                The geometry is the Flint mark from assets/logo.svg — the F with blade-cut arms and the
+                four-point spark off the top arm — refitted from its 24-ish authoring space into core's
+                24-unit icon box by the shared transform on both paths. Keep the two files in step: the
+                nav icon and the README/registry logo being visibly the same mark is the point of both.
+
+                Both paths paint in currentColor, never a fixed colour, and the spark deliberately loses
+                the amber it has in logo.png: the nav link's colour is var(--btcpay-header-link) and
+                changes on hover, when active, and with the operator's theme, so a fixed colour would be
+                wrong in half of those states. This is the monochrome rendering of the mark, and it was
+                chosen knowing that — the mark was picked in part because it survives one colour.
+
+                Sized by core's .icon class, which is width/height: var(--icon-size); #mainMenu sets that
+                to 1.5rem, so this renders at 24px alongside core's own nav entries.
+            *@
+            @* aria-hidden because the adjacent <span> already names the entry; an accessible name here
+               would just make a screen reader read "Flint" twice. *@
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" fill-rule="nonzero" transform="translate(-6.63 -2.08) scale(1.2135)"
+                      d="M 7,4 L 10.5,4 L 10.5,20.5 L 7,20.5 Z M 10.5,4 L 19.4,4 L 16.8,7.4 L 10.5,7.4 Z M 10.5,10.8 L 16.6,10.8 L 14.6,14.2 L 10.5,14.2 Z" />
+                <path fill="currentColor" transform="translate(-6.63 -2.08) scale(1.2135)"
+                      d="M 21.4,2.7 L 22.0,4.4 L 23.7,5.0 L 22.0,5.6 L 21.4,7.3 L 20.8,5.6 L 19.1,5.0 L 20.8,4.4 Z" />
+            </svg>
+            <span>Flint</span>
+        </a>
+    </li>
+    @*
+        Sub-entries only once there is a wallet: both pages redirect to setup without one, so before that they
+        are three ways of reaching the same page. Unlike core's store-settings sub-entries these are not gated
+        on ViewData.IsCategory — that gate exists to stop a list of eight entries from following you around the
+        whole store, and two entries that are the point of the request should not hide until you have already
+        found the section. Both destinations are GETs guarded by the controller's class-level
+        CanViewStoreSettings, so the li permission matches what the page will actually allow.
+    *@
+    @if (configured)
+    {
+        <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
+            <a layout-menu-item="@SparkNavPages.Sweeps" asp-area="" asp-controller="Spark"
+               asp-action="Sweep" asp-route-storeId="@storeId">
+                <span>Sweeps</span>
+            </a>
+        </li>
+        @* Mainnet-only, and the same answer the status page's summary gives — USDB has no deployment on any
+           other network, so off-mainnet this entry would lead to a page that can only explain itself. *@
+        @if (StableBalanceService.Available)
+        {
+            <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
+                <a layout-menu-item="@SparkNavPages.StableBalance" asp-area="" asp-controller="Spark"
+                   asp-action="StableBalance" asp-route-storeId="@storeId">
+                    <span>Stable Balance</span>
+                </a>
+            </li>
+        }
+    }
+}

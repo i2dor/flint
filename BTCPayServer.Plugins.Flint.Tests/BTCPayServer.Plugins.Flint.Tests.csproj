@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the plugin's pure logic: connection-string parsing and payment-key comparison,
+    payment-hash mapping, invoice-record state transitions, settlement fan-out semantics, and the
+    ILightningClient surface driven through a fake ISparkSdkClient.
+
+    Deliberately does NOT reference BTCPayServer.Tests / ServerTester: those need Docker, NBXplorer
+    and a Postgres instance, and would turn a two-second test run into a ten-minute one.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    Matches the plugin project. Without it, referencing BTCPayServer drags its static web assets into this
+    project's build, which fails intermittently on incremental builds ("could not copy
+    staticwebassets.build.endpoints.json") because a test assembly has no static-web-asset pipeline of its
+    own. None of it is needed to run unit tests.
+  -->
+  <ItemDefinitionGroup>
+    <ProjectReference>
+      <Properties>StaticWebAssetsEnabled=false</Properties>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+
+  <!--
+    Recorded provider payloads. Embedded rather than copied to the output directory so a test reads the bytes
+    that were recorded, from the assembly, with no path resolution and nothing on disk to go missing.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="TestData\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BTCPayServer.Plugins.Flint\BTCPayServer.Plugins.Flint.csproj" />
+    <!--
+      The plugin project deliberately excludes BTCPayServer's runtime assets (BTCPay ships them, and a
+      plugin folder carrying its own copy causes assembly-identity conflicts at load time). Tests do
+      need them at runtime, so they are referenced here directly.
+    -->
+    <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+  </ItemGroup>
+
+</Project>

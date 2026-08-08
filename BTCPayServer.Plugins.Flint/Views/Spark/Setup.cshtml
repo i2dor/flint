@@ -1,0 +1,159 @@
+@model SparkSetupViewModel
+@{
+    var title = Model.AlreadyConfigured ? "Replace the Spark seed" : "Set up Flint";
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, title));
+}
+
+<form method="post" asp-action="Setup" asp-route-storeId="@Model.StoreId">
+    <div class="sticky-header">
+        <vc:title-header />
+        <button id="page-primary" type="submit" class="btn btn-primary" disabled="@(!Model.CanUseHotWallet)">
+            @(Model.AlreadyConfigured ? "Replace seed" : "Set up Flint")
+        </button>
+    </div>
+
+    <partial name="_StatusMessage" />
+
+    <div class="row">
+        <div class="col-xl-8 col-xxl-constrain">
+            @if (!ViewContext.ModelState.IsValid)
+            {
+                <div asp-validation-summary="All" class="@(ViewContext.ModelState.ErrorCount.Equals(1) ? "no-marker" : "")"></div>
+            }
+
+            <p class="text-secondary">
+                Spark gives this store a Lightning wallet with no node to run. One recovery phrase controls
+                that wallet, and it is the only way to reach the funds if this server is lost — BTCPay keeps
+                an encrypted copy, but that copy is unreadable without this server's data-protection keys.
+            </p>
+
+            @if (!Model.CanUseHotWallet)
+            {
+                <div class="alert alert-warning" role="alert">
+                    A server administrator has not allowed non-admins to create hot wallets on this server.
+                    Spark holds keys on the server, so it cannot be set up until an administrator either
+                    enables that policy or configures Spark for you.
+                </div>
+            }
+
+            @if (Model.AlreadyConfigured)
+            {
+                <div class="alert alert-warning" role="alert">
+                    <strong>This store already has a Spark wallet.</strong>
+                    Replacing its seed points the store at a different wallet. Any balance left on the current
+                    one stays there and is reachable only from its own recovery phrase — sweep it out first
+                    if you want to keep it.
+                </div>
+            }
+
+            <h3 class="mt-4 mb-3">Where should this store's Spark seed come from?</h3>
+
+            <div class="list-group mb-4">
+                <label class="list-group-item d-flex gap-3 @(Model.CanUseHotWallet ? "" : "disabled")" for="SeedSource-Generated">
+                    <input asp-for="SeedSource" type="radio" id="SeedSource-Generated" value="@SeedSource.Generated"
+                           class="form-check-input flex-shrink-0 mt-1" disabled="@(!Model.CanUseHotWallet)">
+                    <span>
+                        <strong>Generate a new recovery phrase</strong>
+                        <span class="badge bg-info ms-2">Recommended</span>
+                        <span class="d-block text-secondary">
+                            A fresh 12-word phrase, shown to you once on the next screen. This keeps your
+                            Lightning funds and your on-chain funds under separate keys, so one compromise
+                            does not reach both.
+                        </span>
+                    </span>
+                </label>
+
+                <label class="list-group-item d-flex gap-3 @(Model is { CanUseHotWallet: true, HotWalletAvailable: true } ? "" : "disabled")" for="SeedSource-HotWallet">
+                    <input asp-for="SeedSource" type="radio" id="SeedSource-HotWallet" value="@SeedSource.HotWallet"
+                           class="form-check-input flex-shrink-0 mt-1"
+                           disabled="@(!(Model is { CanUseHotWallet: true, HotWalletAvailable: true }))">
+                    <span>
+                        <strong>Reuse this store's on-chain wallet seed</strong>
+                        <span class="d-block text-secondary">
+                            Nothing new to write down: the recovery phrase you already backed up for this
+                            store's Bitcoin wallet also recovers its Spark wallet.
+                        </span>
+                        @if (Model.HotWalletAvailable)
+                        {
+                            <span class="d-block text-warning mt-2">
+                                <strong>One phrase then controls both balances.</strong>
+                                Whoever holds it can spend your Lightning funds and your on-chain funds, and
+                                the Spark wallet's public identity links the two publicly.
+                            </span>
+                            <span class="d-block text-warning mt-2">
+                                <strong>If that wallet was created with a BIP39 passphrase, do not pick this.</strong>
+                                BTCPay does not store passphrases, so only the words can be read here — and the
+                                words alone derive a <em>different</em> Spark wallet from the one your backup
+                                describes. Funds would arrive somewhere your written-down backup cannot
+                                recover. There is no way to detect this from here; if you are not certain,
+                                generate a new phrase instead.
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="d-block text-danger mt-2">
+                                @(Model.HotWalletUnavailableReason ?? "Not available for this store.")
+                                Generate a new recovery phrase instead.
+                            </span>
+                        }
+                    </span>
+                </label>
+
+                <label class="list-group-item d-flex gap-3 @(Model.CanUseHotWallet ? "" : "disabled")" for="SeedSource-Imported">
+                    <input asp-for="SeedSource" type="radio" id="SeedSource-Imported" value="@SeedSource.Imported"
+                           class="form-check-input flex-shrink-0 mt-1" disabled="@(!Model.CanUseHotWallet)"
+                           aria-controls="ImportSeed">
+                    <span>
+                        <strong>Import an existing recovery phrase</strong>
+                        <span class="d-block text-secondary">
+                            Restores a Spark wallet you already have, or moves one to this store. Use the
+                            wallet on one store at a time.
+                        </span>
+                    </span>
+                </label>
+            </div>
+
+            <div class="collapse @(Model.SeedSource == SeedSource.Imported ? "show" : "")" id="ImportSeed">
+                <div class="form-group">
+                    <label asp-for="ImportedMnemonic" class="form-label"></label>
+                    <textarea asp-for="ImportedMnemonic" class="form-control font-monospace py-2" rows="3"
+                              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                              placeholder="12, 15, 18, 21 or 24 words separated by spaces"></textarea>
+                    <span asp-validation-for="ImportedMnemonic" class="text-danger"></span>
+                    <div class="form-text">
+                        The phrase is checked, tidied and stored encrypted. It is never shown again on any
+                        page in this plugin.
+                    </div>
+                </div>
+            </div>
+
+            @*
+                Wave 4 hangs sweep settings here, as setup page 2. Nothing in this view or in
+                SparkSetupViewModel needs to change for it: the provisioner already carries a store's existing
+                sweep settings across a seed change.
+            *@
+            <vc:ui-extension-point location="spark-setup-post-body" model="@Model" />
+        </div>
+    </div>
+</form>
+
+@section PageFootContent {
+    <partial name="_ValidationScriptsPartial" />
+    <script>
+        // Bootstrap's data-bs-toggle="collapse" on a radio only ever opens: picking a sibling radio leaves the
+        // panel open, and a merchant who switched away from "import" would be looking at a phrase box that no
+        // longer applies to what they are about to submit. Driven from the group's state instead.
+        document.addEventListener('DOMContentLoaded', () => {
+            const panel = document.getElementById('ImportSeed');
+            const radio = document.getElementById('SeedSource-Imported');
+            if (!panel || !radio || typeof bootstrap === 'undefined') return;
+            const collapse = bootstrap.Collapse.getOrCreateInstance(panel, { toggle: false });
+            const sync = () => {
+                radio.checked ? collapse.show() : collapse.hide();
+                radio.setAttribute('aria-expanded', radio.checked ? 'true' : 'false');
+            };
+            delegate('change', 'input[name="SeedSource"]', sync);
+            sync();
+        })
+    </script>
+}

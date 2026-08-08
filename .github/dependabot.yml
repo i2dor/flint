@@ -1,0 +1,52 @@
+# Deliberately NOT configured here: package-ecosystem "gitsubmodule" for the btcpayserver
+# submodule. That ecosystem tracks the latest commit on the submodule's tracked branch, not
+# release tags — it would propose bumping to arbitrary unreleased btcpayserver commits, which is
+# exactly what this repo does not want (the submodule is pinned to stable release tags only, see
+# docs/building.md and Constants.MinBTCPayServerVersion). See instead
+# .github/workflows/btcpayserver-update.yml, which finds the newest stable vX.Y.Z tag.
+
+version: 2
+
+updates:
+  # Breez.Sdk.Spark and any other NuGet packages referenced directly by the plugin project.
+  # Pre-1.0 and ships frequent releases, some of them explicit prereleases (e.g. "0.20.0-dev1")
+  # — this repo pins stable only (see the comment on the PackageReference in the .csproj).
+  # No explicit `ignore` rule for that is configured: dependabot.yml's
+  # `ignore.update-types` only supports semver-major/minor/patch, not a "prerelease" type, and
+  # Dependabot's own default behaviour already only proposes stable-to-stable updates when the
+  # pinned version (0.19.2 here) isn't itself a prerelease — confirmed against community reports
+  # of the opposite problem (dependabot/feedback#451: prerelease-pinned projects not being
+  # offered further prereleases), not against a live run of this repo. Watch the first PR
+  # Dependabot opens here to confirm it holds; if it ever proposes a prerelease, an explicit
+  # `ignore: - dependency-name: "Breez.Sdk.Spark", versions: ["*-*"]`-style pattern would be the
+  # fallback (NuGet ignore version patterns are glob-style, not semver ranges).
+  #
+  # Also note: Dependabot's nuget updater resolves the project's ProjectReference to
+  # ../btcpayserver/BTCPayServer/BTCPayServer.csproj, which lives in a git submodule; this is
+  # believed to work (Dependabot clones submodules), but has not been confirmed with a live run
+  # against this repo. Any PR it opens is still gated by ci.yml before merge either way.
+  - package-ecosystem: "nuget"
+    directory: "/BTCPayServer.Plugins.Flint"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Test-project NuGet packages (xunit, Microsoft.NET.Test.Sdk, ...). Separate entry because
+  # Dependabot's nuget updater scans one project directory per entry.
+  - package-ecosystem: "nuget"
+    directory: "/BTCPayServer.Plugins.Flint.Tests"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Action version pins in .github/workflows/*.yml (checkout, setup-dotnet, cache, ...).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"

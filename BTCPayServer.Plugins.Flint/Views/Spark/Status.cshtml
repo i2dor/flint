@@ -1,0 +1,314 @@
+@model SparkStatusViewModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Flint"));
+
+    var (wiringText, wiringClass) = Model.LightningWiring switch
+    {
+        SparkLightningWiringState.Spark when Model.LightningEnabledForCheckout =>
+            ("This store takes Lightning payments through its Spark wallet.", "text-success"),
+        SparkLightningWiringState.Spark =>
+            ("Pointed at this store's Spark wallet, but Lightning is switched off for checkout.", "text-warning"),
+        SparkLightningWiringState.StaleSpark =>
+            ("Pointed at an out-of-date Spark configuration. Checkout will fail until it is repaired.", "text-danger"),
+        SparkLightningWiringState.NotConfigured =>
+            ("This store has no Lightning payment method, so the wallet takes no payments.", "text-warning"),
+        SparkLightningWiringState.InternalNode =>
+            ("This store uses BTCPay's internal Lightning node, not Spark.", "text-warning"),
+        SparkLightningWiringState.OtherStoreSpark =>
+            ("Pointed at another store's Spark wallet. Checkout still works, and every payment it takes goes "
+             + "into that other store's wallet, not this one. Repair this now.", "text-danger"),
+        SparkLightningWiringState.StoreNotFound =>
+            ("The store could not be read.", "text-danger"),
+        _ => ("This store uses a different Lightning node, not Spark.", "text-warning")
+    };
+
+    var wiringNeedsRepair = Model.LightningWiring is not SparkLightningWiringState.Spark
+                            || !Model.LightningEnabledForCheckout;
+}
+
+@*
+    The title without vc:title-header, which prints it twice on this page.
+
+    TitleHeader renders a breadcrumb trail and then the title as a heading, and a page that sets no
+    breadcrumbs gets one synthesised from that same title -- see its Invoke: `if (!resolvedItems.Any(item =>
+    item.Active)) resolvedItems.Add(new BreadcrumbItem(title, Active: true))`. A trail whose only entry is
+    the page you are already on carries no information, so it reads as the heading repeated above itself.
+
+    Core wears that on its own top-level pages and avoids it on sub-pages by calling ViewData.SetBreadcrumbs
+    to give the trail a parent. This page is the plugin's root: there is no parent inside the plugin to point
+    at, so there is no trail worth rendering. The sub-pages are where a trail earns its place.
+
+    The classes are core's own, so the heading keeps the same type scale and spacing as every other page.
+*@
+<div class="sticky-header">
+    <nav class="title-header-nav">
+        <h2 class="title-header-nav__title"><span>@ViewData["Title"]</span></h2>
+    </nav>
+    <a id="page-primary" permission="@Policies.CanModifyStoreSettings" asp-action="Setup"
+       asp-route-storeId="@Model.StoreId" class="btn btn-secondary text-nowrap">
+        Replace seed
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+        <h3 class="mb-3">Wallet</h3>
+        @if (!Model.WalletRunning)
+        {
+            <div class="alert alert-danger" role="alert">
+                <strong>This store's Spark wallet is not running.</strong>
+                Lightning payments are unavailable until it starts. The server log says why — the usual causes
+                are a stored recovery phrase this server can no longer decrypt, two stores configured with the
+                same phrase, or a Bitcoin network Spark does not support.
+            </div>
+        }
+        else if (Model.WalletError is not null)
+        {
+            <div class="alert alert-warning" role="alert">
+                The wallet is running but could not be read: @Model.WalletError
+            </div>
+        }
+
+        @*
+            The balance leads the page, because it is the one thing a merchant opens this page to see. Two
+            figures side by side rather than a row in a table: sats always, and the stablecoin holding beside it
+            when Stable Balance is on — those are two different assets, not two views of one, and showing them
+            as a pair is what makes that legible. No chart: the plugin keeps no balance history, so anything
+            time-shaped here would be invented.
+        *@
+        <div class="d-flex flex-wrap gap-3 mb-4" id="SparkBalanceCards">
+            <div class="card flex-grow-1" style="min-width: 14rem;">
+                <div class="card-body">
+                    <div class="text-secondary text-uppercase small mb-1">Spark balance</div>
+                    @if (Model.BalanceSats is { } balance)
+                    {
+                        <div class="d-flex align-items-baseline gap-2">
+                            <span class="h2 mb-0" id="SparkBalance">@balance.ToString("N0")</span>
+                            <span class="text-secondary">sats</span>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="h2 mb-0 text-secondary" id="SparkBalance">—</div>
+                        <div class="form-text">Unavailable right now.</div>
+                    }
+                </div>
+            </div>
+
+            @if (Model.StableBalanceHolding is { } stableHolding)
+            {
+                <div class="card flex-grow-1" style="min-width: 14rem;">
+                    <div class="card-body">
+                        <div class="text-secondary text-uppercase small mb-1">Stable balance</div>
+                        <div class="h2 mb-0" id="SparkStableBalanceAmount">@stableHolding</div>
+                    </div>
+                </div>
+            }
+            else if (Model.StableBalanceActive)
+            {
+                <div class="card flex-grow-1" style="min-width: 14rem;">
+                    <div class="card-body">
+                        <div class="text-secondary text-uppercase small mb-1">Stable balance</div>
+                        <div class="h2 mb-0 text-secondary" id="SparkStableBalanceAmount">—</div>
+                        <div class="form-text">On. Nothing converted yet.</div>
+                    </div>
+                </div>
+            }
+        </div>
+        <div class="form-text mb-4">
+            Indicative — the balance can lag a settled payment by up to half a minute. Your invoices are the
+            record.
+        </div>
+
+        <table class="table">
+            <tbody>
+                <tr>
+                    <th>Recovery phrase</th>
+                    <td>
+                        @switch (Model.SeedSource)
+                        {
+                            case SeedSource.Generated:
+                                <span>Generated by this plugin and shown to you once during setup.</span>
+                                break;
+                            case SeedSource.Imported:
+                                <span>Imported by you.</span>
+                                break;
+                            case SeedSource.HotWallet:
+                                <span>Reused from this store's on-chain wallet.</span>
+                                <div class="form-text text-warning">
+                                    One phrase controls this store's Lightning funds and its on-chain funds.
+                                </div>
+                                break;
+                        }
+                        <div class="form-text">
+                            Never shown again here. Your own backup is the recovery path.
+                        </div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3 class="mt-4 mb-3">On-chain deposits</h3>
+        @if (Model.StuckDepositCount > 0)
+        {
+            @*
+                Loud on the status page, because this is the failure that looks like theft. A deposit whose
+                claim fee exceeded the limit is never retried — the merchant sent Bitcoin to an address this
+                plugin gave them and the balance did not move.
+            *@
+            <div class="alert alert-danger" role="alert" id="SparkStuckDeposits">
+                <strong>
+                    @Model.StuckDepositCount on-chain @(Model.StuckDepositCount == 1 ? "deposit has" : "deposits have")
+                    not been credited.
+                </strong>
+                Spark could not claim @(Model.StuckDepositCount == 1 ? "it" : "them") within this store's fee
+                limit and will not try again on its own.
+            </div>
+        }
+        @* The alert above stays on the page unconditionally: an uncredited deposit is money the merchant sent
+           that did not arrive, and it is the failure that looks most like theft. Only the top-up affordance
+           moves into Advanced — a Spark wallet is funded by customers paying invoices, so a merchant depositing
+           on-chain themselves is the exception, not the flow to put in front of them. *@
+        @if (Model.StuckDepositCount == 0)
+        {
+            <p class="text-secondary">Nothing waiting to be credited.</p>
+        }
+
+        <h3 class="mt-4 mb-3">Stable Balance</h3>
+        <p id="SparkStableBalanceSummary">
+            @if (!Model.StableBalanceAvailable)
+            {
+                <span class="text-secondary">
+                    Only available on Bitcoin mainnet — USDB has no deployment on this server's network.
+                </span>
+            }
+            else if (Model.StableBalanceActive)
+            {
+                @* The amount itself is in the card above; repeating it here just makes the page longer. *@
+                <span>On. Spark converts this store's balance to a stablecoin in the background.</span>
+            }
+            else
+            {
+                <span class="text-secondary">Off. This store's balance is held in Bitcoin.</span>
+            }
+        </p>
+        @if (Model.StableBalanceAvailable)
+        {
+            <a class="btn btn-secondary" asp-action="StableBalance" asp-route-storeId="@Model.StoreId"
+               id="SparkStableBalanceLink">
+                Stable Balance settings
+            </a>
+        }
+
+        <h3 class="mt-4 mb-3">Lightning payment method</h3>
+        <p class="@wiringClass" id="SparkLightningWiring">@wiringText</p>
+        @if (wiringNeedsRepair)
+        {
+            @*
+                permission, not permissioned. Both are real tag helpers, but permissioned only wraps the
+                content in a disabled fieldset and strips the submit button with a newline-sensitive regex — a
+                view-only user has no use for this control at all, so it is suppressed outright. The action
+                itself requires CanModifyStoreSettings regardless; this only keeps the page honest.
+            *@
+            <form method="post" asp-action="EnableLightning" asp-route-storeId="@Model.StoreId"
+                  permission="@Policies.CanModifyStoreSettings">
+                <button type="submit" class="btn btn-secondary" id="SparkRepairLightning">
+                    Use Flint for Lightning payments
+                </button>
+                @if (Model.LightningWiring is SparkLightningWiringState.OtherNode or SparkLightningWiringState.InternalNode)
+                {
+                    <div class="form-text">
+                        This replaces the store's current Lightning configuration, and asks you to confirm
+                        first. A connection string cannot be recovered once it is gone, so copy it out if it
+                        holds a macaroon or certificate you do not have elsewhere.
+                    </div>
+                }
+            </form>
+        }
+
+        @*
+            Wave 4's sweep settings and sweep history render here. The location is already live, so adding
+            them needs no change to this view.
+        *@
+        <vc:ui-extension-point location="spark-status-post-body" model="@Model" />
+
+        @*
+            Everything a merchant does not need in order to take payments. Collapsed by default and not
+            conditional on role, because none of it is privileged on its own — the storage path is still gated
+            below, since it describes the host's filesystem rather than the store.
+        *@
+        <h3 class="mt-5 mb-3">Advanced</h3>
+        <div class="accordion" id="SparkAdvanced">
+            <div class="accordion-item">
+                <h4 class="accordion-header">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                            data-bs-target="#SparkAdvancedBody" aria-expanded="false"
+                            aria-controls="SparkAdvancedBody" id="SparkAdvancedToggle">
+                        Wallet details and manual top-up
+                    </button>
+                </h4>
+                <div id="SparkAdvancedBody" class="accordion-collapse collapse" data-bs-parent="#SparkAdvanced">
+                    <div class="accordion-body">
+                        <table class="table table-sm">
+                            <tbody>
+                                <tr>
+                                    <th class="w-25">Spark identity</th>
+                                    <td>
+                                        @if (Model.IdentityPubkey is { } pubkey)
+                                        {
+                                            <vc:truncate-center text="@pubkey" classes="truncate-center-id" />
+                                        }
+                                        else
+                                        {
+                                            <span class="text-secondary">Not synced yet</span>
+                                        }
+                                    </td>
+                                </tr>
+                                @if (!string.IsNullOrEmpty(Model.StorageDirectory))
+                                {
+                                    <tr>
+                                        <th>SDK storage</th>
+                                        <td><code>@Model.StorageDirectory</code></td>
+                                    </tr>
+                                }
+                                <tr>
+                                    <th>On-chain deposit address</th>
+                                    <td>
+                                        @if (Model.DepositAddress is { } depositAddress)
+                                        {
+                                            <vc:truncate-center text="@depositAddress" classes="truncate-center-id" />
+                                            <div class="form-text">
+                                                Sending Bitcoin here credits this wallet. Customer payments do
+                                                not need it.
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-secondary">Not available right now.</span>
+                                        }
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <a class="btn btn-secondary" asp-action="Deposit" asp-route-storeId="@Model.StoreId"
+                           id="SparkDepositLink">
+                            Deposit address and unclaimed deposits
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div permission="@Policies.CanModifyStoreSettings">
+            <h3 class="mt-5 mb-3">Additional actions</h3>
+            <div id="danger-zone" class="d-flex flex-wrap align-items-center gap-3 mb-5 mt-2">
+                <a id="SparkRemove" class="btn btn-outline-danger" asp-action="Remove"
+                   asp-route-storeId="@Model.StoreId">
+                    Remove this store's Spark wallet
+                </a>
+            </div>
+        </div>
+    </div>
+</div>

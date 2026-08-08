@@ -1,0 +1,7 @@
+@{
+    // Set explicitly rather than inherited. A plugin's views resolve view-start files through the composite
+    // file provider, so relying on core's /Views/_ViewStart.cshtml to reach them is an assumption about
+    // provider ordering that a core release could change — and the failure mode is every Spark page
+    // rendering with no chrome at all. Naming the layout here costs one line and cannot drift.
+    Layout = "../Shared/_Layout.cshtml";
+}

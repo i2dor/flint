@@ -1,0 +1,163 @@
+name: btcpayserver submodule update
+
+# Dependabot's gitsubmodule ecosystem tracks the latest commit on the submodule's tracked
+# branch, not release tags, so it is the wrong tool for a submodule that is deliberately pinned
+# to stable btcpayserver release tags (see docs/building.md and the comment on
+# Constants.BuiltAgainstBTCPayServerVersion). This workflow does the tag-aware equivalent: weekly plus
+# on-demand, it looks for the newest stable `vX.Y.Z` release tag newer than the one pinned and,
+# if found, opens a PR that bumps the submodule and updates Constants.BuiltAgainstBTCPayServerVersion (and
+# the version mentioned in docs/building.md) to match, keeping them in lockstep as documented there.
+#
+# Token: uses the default GITHUB_TOKEN throughout — no PAT secret required. GitHub does not fire
+# `pull_request`-triggered workflow runs for pushes/PRs authored by GITHUB_TOKEN (loop
+# prevention), which would normally mean ci.yml never runs on the PR this workflow opens. The
+# `gh workflow run` step below works around that: workflow_dispatch is explicitly exempted from
+# the loop-prevention rule, so re-dispatching ci.yml (which has a `workflow_dispatch:` trigger)
+# on the bump branch gets it a real CI run. This needs the `actions: write` permission below and
+# ci.yml's workflow_dispatch trigger to stay in place; if either goes away, a PAT
+# (contents + pull-requests: write) mirroring the VERSION_BUMP_TOKEN pattern used elsewhere would
+# be the fallback.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Detect only: print the result and diff, but do not push or open a PR"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write  # to re-dispatch ci.yml on the bump branch, see above
+
+jobs:
+  check:
+    name: Check for a newer stable btcpayserver release
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      current: ${{ steps.check.outputs.current }}
+      latest: ${{ steps.check.outputs.latest }}
+      release_url: ${{ steps.check.outputs.release_url }}
+    steps:
+      # No submodule checkout needed: the discovery script only reads Constants.cs from the main
+      # repo and queries the upstream remote's tag list over the network (git ls-remote), so this
+      # stays cheap enough to run unconditionally every week.
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run discovery script
+        id: check
+        run: |
+          set -euo pipefail
+          out="$(scripts/check-btcpayserver-update.sh)"
+          echo "Discovery result: $out"
+          {
+            echo "changed=$(jq -r .changed <<<"$out")"
+            echo "current=$(jq -r .current <<<"$out")"
+            echo "latest=$(jq -r .latest <<<"$out")"
+            echo "release_url=$(jq -r .release_url <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  bump:
+    name: Open bump PR
+    needs: check
+    if: ${{ needs.check.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CURRENT: ${{ needs.check.outputs.current }}
+      LATEST: ${{ needs.check.outputs.latest }}
+      RELEASE_URL: ${{ needs.check.outputs.release_url }}
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Shallow: fetches only the one target tag's history into the already-initialised
+      # (shallow, depth-1) submodule checkout, rather than the whole btcpayserver history.
+      - name: Bump submodule to v${{ needs.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 -- btcpayserver
+          git -C btcpayserver fetch --depth 1 origin "refs/tags/v$LATEST:refs/tags/v$LATEST"
+          git -C btcpayserver checkout "v$LATEST"
+
+          # BuiltAgainstBTCPayServerVersion only. Constants.MinBTCPayServerVersion is the *support floor*, which
+          # may be older than the pinned tag — moving it is a decision for a human, not a side effect of a
+          # submodule bump: raising it drops every host below the new value, and lowering it needs proof of
+          # runtime compatibility (see the remarks on that constant, and the TitleHeader incident). The pattern
+          # is anchored on the longer constant name so it cannot match the floor.
+          sed -i -E "s/BuiltAgainstBTCPayServerVersion = \"[0-9]+\.[0-9]+\.[0-9]+\"/BuiltAgainstBTCPayServerVersion = \"$LATEST\"/" \
+            BTCPayServer.Plugins.Flint/Constants.cs
+          sed -i -E "s/\`v[0-9]+\.[0-9]+\.[0-9]+\`\)\./\`v$LATEST\`)./" docs/building.md
+
+          git add btcpayserver BTCPayServer.Plugins.Flint/Constants.cs docs/building.md
+          git status --short
+
+      - name: Create branch and commit
+        id: commit
+        run: |
+          set -euo pipefail
+          branch="chore/btcpayserver-v$LATEST"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — diff only, not pushing:"
+            git --no-pager diff --cached
+            exit 0
+          fi
+
+          git switch -c "$branch"
+          git commit -m "Bump btcpayserver submodule to v$LATEST"
+          git push -f origin "$branch"
+
+      - name: Open or update PR
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+        run: |
+          set -euo pipefail
+          title="Bump btcpayserver submodule: v$CURRENT -> v$LATEST"
+          body="$(cat <<BODY
+          Bumps the \`btcpayserver\` submodule from \`v$CURRENT\` to \`v$LATEST\`, and updates
+          \`Constants.BuiltAgainstBTCPayServerVersion\` (and the version mentioned in docs/building.md) to match —
+          the submodule tag and that constant must always agree, per the comment on it.
+
+          It deliberately does **not** touch \`Constants.MinBTCPayServerVersion\`, the declared support
+          floor: that is a separate number on purpose, and raising it drops every host below the new
+          value. Raise it by hand, only when the plugin genuinely needs something newer. Lowering it
+          needs more than a green build — Razor view components, partials and tag helpers resolve by
+          name at render time, so only a real render on a host of that version proves compatibility.
+
+          Upstream release notes: $RELEASE_URL
+
+          Opened automatically by \`.github/workflows/btcpayserver-update.yml\`. This does not
+          touch \`TargetFramework\`; bump that separately by hand if this release requires it.
+          CI on this PR is the merge gate — please review before merging, especially anything CI
+          flags.
+          BODY
+          )"
+
+          open_count="$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$open_count" = "0" ]; then
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+            echo "Opened PR for $BRANCH."
+          else
+            gh pr edit "$BRANCH" --title "$title" --body "$body"
+            echo "PR already open for $BRANCH; force-pushed branch updated it."
+          fi
+
+          # See the workflow-level comment: workflow_dispatch is exempt from GITHUB_TOKEN's
+          # loop-prevention rule, so this is what actually gets ci.yml to run on the PR.
+          gh workflow run ci.yml --ref "$BRANCH"

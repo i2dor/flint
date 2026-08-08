@@ -1,0 +1,632 @@
+@using BTCPayServer.Plugins.Flint.Data
+@model SparkSweepViewModel
+@{
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Sweeps, "Spark sweeps"));
+
+    // A trail back to the plugin root, so the heading below is not the only entry in it. With no parent,
+    // TitleHeader synthesises a single crumb equal to the title and prints it twice.
+    //
+    // Fully qualified rather than imported: SetBreadcrumbs lives in the BTCPayServer namespace, and
+    // pulling that into _ViewImports would make the bare `Constants` these views use ambiguous between
+    // ours and core's. Controller is "Spark" because TitleHeader strips the "Controller" suffix itself.
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+    // Indicative only, for the "what would a sweep cost at this threshold" hint. Every real decision uses the
+    // live quote from the provider, never this number.
+    var indicativeFee = Constants.IndicativeCoopExitFeeSats;
+    var sweepableAtThreshold = Model.Settings.BalanceThresholdSats - Model.Settings.ReserveSats;
+    var indicativePercent = sweepableAtThreshold > 0 ? indicativeFee * 100d / sweepableAtThreshold : 0d;
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+    <a asp-action="Status" asp-route-storeId="@Model.StoreId" class="btn btn-secondary text-nowrap">
+        Back to Flint
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+        @if (!ViewContext.ModelState.IsValid)
+        {
+            <div asp-validation-summary="All" class="@(ViewContext.ModelState.ErrorCount.Equals(1) ? "no-marker" : "")"></div>
+        }
+
+        <p class="text-secondary">
+            A sweep moves this store's Lightning balance out of Spark and onto the Bitcoin blockchain as a
+            <strong>cooperative exit</strong> — Spark's service providers build and broadcast the transaction.
+            Sweeping is how you stop holding more than you need on a second layer: whatever is on Spark depends
+            on those providers, and whatever has been swept does not.
+        </p>
+
+        <div class="alert alert-info" role="alert">
+            <strong>A sweep costs the same whatever it carries, so sweep rarely and in size.</strong>
+            The fee is flat, not proportional — most of it is the on-chain broadcast. At typical mainnet fee
+            levels that runs to tens of thousands of sats, so a sweep needs to be well into the millions to stay
+            under a 3% ceiling.
+            <div class="mt-2">
+                If sweeps are being refused for their fee, raise the minimum sweep and the threshold rather than
+                the fee limit.
+            </div>
+        </div>
+
+        @if (!Model.WalletRunning)
+        {
+            <div class="alert alert-danger" role="alert">
+                This store's Spark wallet is not running, so nothing can be swept. These settings can still be
+                saved.
+            </div>
+        }
+
+        <table class="table table-sm">
+            <tbody>
+                <tr>
+                    <th class="w-25">Spark balance</th>
+                    <td>
+                        @if (Model.BalanceSats is { } balance)
+                        {
+                            <span id="SparkSweepBalance">@balance.ToString("N0") sats</span>
+                            <span class="text-secondary">— indicative; a sweep re-reads it after a full sync.</span>
+                        }
+                        else
+                        {
+                            <span class="text-secondary">Unavailable</span>
+                        }
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<form method="post" asp-action="Sweep" asp-route-storeId="@Model.StoreId" permission="@Policies.CanModifyStoreSettings">
+    <div class="row">
+        <div class="col-xl-8 col-xxl-constrain">
+            <h3 class="mt-4 mb-3">Automatic sweeping</h3>
+
+            <div class="form-group">
+                <div class="form-check">
+                    <input asp-for="Settings.Enabled" type="checkbox" class="form-check-input" />
+                    <label asp-for="Settings.Enabled" class="form-check-label"></label>
+                    <div class="form-text">
+                        Off by default. With it off you can still sweep by hand at the bottom of this page.
+                    </div>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.BalanceThresholdSats" class="form-label"></label>
+                    <div class="input-group">
+                        <input asp-for="Settings.BalanceThresholdSats" type="number" min="0" step="1" class="form-control" />
+                        <span class="input-group-text">sats</span>
+                    </div>
+                    <span asp-validation-for="Settings.BalanceThresholdSats" class="text-danger"></span>
+                    <div class="form-text">
+                        @if (sweepableAtThreshold > 0)
+                        {
+                            <span>
+                                At this threshold a sweep would carry about
+                                @sweepableAtThreshold.ToString("N0") sats, so an
+                                @indicativeFee.ToString("N0") sat fee would be roughly
+                                <strong class="@(indicativePercent > 2 ? "text-warning" : "")">@indicativePercent.ToString("0.##")%</strong>
+                                of it.
+                            </span>
+                        }
+                        else
+                        {
+                            <span>How much has to be on Spark before a sweep is considered.</span>
+                        }
+                    </div>
+                </div>
+
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.ReserveSats" class="form-label"></label>
+                    <div class="input-group">
+                        <input asp-for="Settings.ReserveSats" type="number" min="0" step="1" class="form-control" />
+                        <span class="input-group-text">sats</span>
+                    </div>
+                    <span asp-validation-for="Settings.ReserveSats" class="text-danger"></span>
+                    <div class="form-text">
+                        Left on Spark after each sweep, so the wallet keeps receiving. If the exit fee is charged
+                        on top rather than taken out of the swept amount, this is also what pays it.
+                    </div>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.MinimumSweepSats" class="form-label"></label>
+                    <div class="input-group">
+                        <input asp-for="Settings.MinimumSweepSats" type="number" min="@Constants.MinimumOnchainSendSats" step="1" class="form-control" />
+                        <span class="input-group-text">sats</span>
+                    </div>
+                    <span asp-validation-for="Settings.MinimumSweepSats" class="text-danger"></span>
+                    <div class="form-text">
+                        Below this, the flat fee eats too much of the sweep and it is refused. Applies to
+                        manual sweeps too.
+                    </div>
+                </div>
+
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.ConfirmationSpeed" class="form-label"></label>
+                    <select asp-for="Settings.ConfirmationSpeed" asp-items="Html.GetEnumSelectList<SweepConfirmationSpeed>()" class="form-select"></select>
+                    <div class="form-text">
+                        The slowest tier is always the cheapest.
+                    </div>
+                </div>
+            </div>
+
+            <h3 class="mt-4 mb-3">Fee limits</h3>
+            <p class="text-secondary">
+                Enforced by the server against the quote it is about to pay, on automatic and manual sweeps
+                alike — not by this page.
+            </p>
+
+            <div class="row">
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.MaxFeePercent" class="form-label"></label>
+                    <div class="input-group">
+                        <input asp-for="Settings.MaxFeePercent" type="number" min="0" max="100" step="0.01" class="form-control" />
+                        <span class="input-group-text">%</span>
+                    </div>
+                    <span asp-validation-for="Settings.MaxFeePercent" class="text-danger"></span>
+                    <div class="form-text">
+                        The percentage form is the one that matters, because the fee is flat and the percentage is
+                        therefore decided entirely by how much you sweep.
+                    </div>
+                </div>
+
+                <div class="col-md-6 form-group">
+                    <label asp-for="Settings.MaxFeeFlatSats" class="form-label"></label>
+                    <div class="input-group">
+                        <input asp-for="Settings.MaxFeeFlatSats" type="number" min="0" step="1" class="form-control" />
+                        <span class="input-group-text">sats</span>
+                    </div>
+                    <span asp-validation-for="Settings.MaxFeeFlatSats" class="text-danger"></span>
+                    <div class="form-text">
+                        Optional. When both limits are set, the stricter one wins. Leave it empty unless you have
+                        a reason — a flat limit set today will refuse every sweep the first time mainnet fees
+                        rise past it.
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="form-check">
+                    <input asp-for="Settings.DrainWhenSweeping" type="checkbox" class="form-check-input" />
+                    <label asp-for="Settings.DrainWhenSweeping" class="form-check-label"></label>
+                    <div class="form-text">
+                        On, the fee comes out of what is swept and the balance lands exactly on your reserve. Off,
+                        the fee is charged on top and comes out of the reserve — so the reserve has to be bigger
+                        than the fee, currently around @indicativeFee.ToString("N0") sats.
+                        <br />
+                        This is a cooperative exit either way. This plugin never performs a unilateral exit.
+                    </div>
+                </div>
+            </div>
+
+            <h3 class="mt-4 mb-3">Destination</h3>
+
+            <div class="list-group mb-3">
+                <label class="list-group-item d-flex gap-3 @(Model.StoreWalletAvailable ? "" : "disabled")" for="DestinationMode-StoreWallet">
+                    <input asp-for="Settings.DestinationMode" type="radio" id="DestinationMode-StoreWallet"
+                           value="@SweepDestinationMode.StoreWallet" class="form-check-input flex-shrink-0 mt-1"
+                           disabled="@(!Model.StoreWalletAvailable)">
+                    <span>
+                        <strong>This store's Bitcoin wallet</strong>
+                        <span class="badge bg-info ms-2">Recommended</span>
+                        <span class="d-block text-secondary">
+                            A fresh address from the store's own wallet for every sweep, labelled
+                            "Spark sweep" so the incoming transaction is recognisable. Rotating the address means
+                            your sweeps are not all linked to one address on the blockchain.
+                        </span>
+                        @if (!Model.StoreWalletAvailable)
+                        {
+                            <span class="d-block text-danger mt-2">
+                                @(Model.StoreWalletReason ?? "Not available for this store.")
+                            </span>
+                        }
+                    </span>
+                </label>
+
+                <label class="list-group-item d-flex gap-3" for="DestinationMode-StaticAddress">
+                    <input asp-for="Settings.DestinationMode" type="radio" id="DestinationMode-StaticAddress"
+                           value="@SweepDestinationMode.StaticAddress" class="form-check-input flex-shrink-0 mt-1"
+                           aria-controls="StaticAddressPanel">
+                    <span>
+                        <strong>A fixed Bitcoin address</strong>
+                        <span class="d-block text-secondary">
+                            For a store with no on-chain wallet in BTCPay, or cold storage kept elsewhere. Every
+                            sweep goes to the same address, so anyone watching the blockchain can add them up.
+                        </span>
+                    </span>
+                </label>
+
+                <label class="list-group-item d-flex gap-3 @(Model.CrossChainAvailable ? "" : "disabled")"
+                       for="DestinationMode-EvmAddress">
+                    <input asp-for="Settings.DestinationMode" type="radio" id="DestinationMode-EvmAddress"
+                           value="@SweepDestinationMode.EvmAddress" class="form-check-input flex-shrink-0 mt-1"
+                           disabled="@(!Model.CrossChainAvailable)" aria-controls="EvmAddressPanel">
+                    <span>
+                        <strong>A stablecoin on another chain</strong>
+                        <span class="d-block text-secondary">
+                            Sweeps are delivered as a stablecoin to an address you control on an EVM chain,
+                            through a bridge provider. This is still a normal Spark transfer at the point money
+                            leaves this wallet — there is no unilateral exit here either.
+                        </span>
+                        @if (!Model.CrossChainAvailable)
+                        {
+                            <span class="d-block text-danger mt-2">
+                                Only available on Bitcoin mainnet. Spark refuses to start a wallet configured
+                                for cross-chain sending on @Model.NetworkName.
+                            </span>
+                        }
+                    </span>
+                </label>
+            </div>
+
+            <div class="collapse @(Model.Settings.DestinationMode == SweepDestinationMode.StaticAddress ? "show" : "")" id="StaticAddressPanel">
+                <div class="form-group">
+                    <label asp-for="Settings.StaticAddress" class="form-label"></label>
+                    <input asp-for="Settings.StaticAddress" class="form-control font-monospace"
+                           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                    <span asp-validation-for="Settings.StaticAddress" class="text-danger"></span>
+                    <div class="form-text">
+                        A plain address for <strong>@Model.NetworkName</strong>, not a <code>bitcoin:</code> link.
+                        It is checked now and again before every sweep. Nothing verifies that you control it —
+                        a typo that happens to be a valid address sends your money to a stranger.
+                    </div>
+                </div>
+            </div>
+
+            <div class="collapse @(Model.Settings.DestinationMode == SweepDestinationMode.EvmAddress ? "show" : "")"
+                 id="EvmAddressPanel">
+                <div class="form-group">
+                    <label asp-for="Settings.EvmAddress" class="form-label"></label>
+                    <input asp-for="Settings.EvmAddress" class="form-control font-monospace"
+                           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                           placeholder="0x…" />
+                    <span asp-validation-for="Settings.EvmAddress" class="text-danger"></span>
+                    <div class="form-text">
+                        <strong>An address carries no chain.</strong> Pick the network below carefully — the
+                        wrong one sends your money somewhere you may not be able to reach. Nothing verifies that
+                        you control this address.
+                    </div>
+                </div>
+
+                @*
+                    Both lists come from CrossChainCatalog, which fetches the provider's route table and caches
+                    the projection for hours — so rendering this page costs no request, whatever the state of
+                    the cache, and a cold one simply offers the built-in floor.
+
+                    The asset options for every chain travel on the chain's own option, so switching chains
+                    needs no second source of truth on the page and no request either. A chain the server added
+                    because this store already had it carries exactly the asset it was saved with, which is all
+                    anyone knows about it.
+                *@
+                <div class="form-group">
+                    <label asp-for="Settings.EvmChain" class="form-label"></label>
+                    <select asp-for="Settings.EvmChain" class="form-select">
+                        @foreach (var option in Model.ChainOptions)
+                        {
+                            var offered = string.Join(' ', option.Assets.Select(asset => asset.Symbol));
+                            <option value="@option.Chain" data-assets="@offered"
+                                    selected="@(option.Chain == Model.SelectedChain)">@option.Label</option>
+                        }
+                    </select>
+                    <span asp-validation-for="Settings.EvmChain" class="text-danger"></span>
+                    <div class="form-text">
+                        Checked against the live route table before every sweep.
+                        <strong>@SweepSettings.DefaultCrossChainChain</strong> is the provider's own settlement
+                        chain and has the shortest path.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label asp-for="Settings.EvmAsset" class="form-label"></label>
+                    <select asp-for="Settings.EvmAsset" class="form-select">
+                        @*
+                            The full name goes in the tooltip rather than into the option text, because the
+                            option text is the posted value's twin: a merchant reading "USDT" here and a route
+                            carrying "USDT" have to be looking at the same string. The name is what tells
+                            USD₮0 apart from USDT when the two sit next to each other.
+                        *@
+                        @foreach (var asset in Model.AssetOptions)
+                        {
+                            <option value="@asset.Symbol" title="@asset.Name"
+                                    selected="@(asset.Symbol == Model.SelectedAsset)">@asset.Symbol</option>
+                        }
+                    </select>
+                    <span asp-validation-for="Settings.EvmAsset" class="text-danger"></span>
+                    <div class="form-text">
+                        What the chain above carries. <code>USDT0</code> is not <code>USDT</code>, and neither is
+                        substituted for the other.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label asp-for="Settings.CrossChainSlippageBps" class="form-label"></label>
+                    <input asp-for="Settings.CrossChainSlippageBps" type="number"
+                           min="@SweepSettings.MinCrossChainSlippageBps"
+                           max="@SweepSettings.MaxCrossChainSlippageBps" class="form-control"
+                           placeholder="@SweepSettings.DefaultCrossChainSlippageBps" />
+                    <span asp-validation-for="Settings.CrossChainSlippageBps" class="text-danger"></span>
+                    <div class="form-text">
+                        Hundredths of a percent, between @SweepSettings.MinCrossChainSlippageBps and
+                        @SweepSettings.MaxCrossChainSlippageBps. Leave empty for
+                        @SweepSettings.DefaultCrossChainSlippageBps. This is a <em>different</em> setting from
+                        the Stable Balance conversion slippage, and the two do not share a value.
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label asp-for="Settings.CrossChainMinimumStableUnits" class="form-label"></label>
+                    <input asp-for="Settings.CrossChainMinimumStableUnits" type="number" min="0"
+                           class="form-control" />
+                    <span asp-validation-for="Settings.CrossChainMinimumStableUnits" class="text-danger"></span>
+                    <div class="form-text">
+                        Only used when Stable Balance is on, because only then is a sweep funded from a
+                        stablecoin rather than from sats — and a satoshi minimum means nothing against a dollar
+                        amount. Whole units, so 20 means twenty dollars' worth.
+                    </div>
+                </div>
+
+                <div class="alert alert-info" role="alert">
+                    A cross-chain send costs a fixed amount plus a percentage, so small ones are poor value:
+                    roughly 3% at the smallest the provider will accept, against roughly 0.3% at
+                    @SweepSettings.DefaultCrossChainMinimumSweepSats.ToString("N0") sats. It also debits
+                    <em>more</em> than the amount being sent, to cover the provider's fee and slippage, so a
+                    sweep is refused rather than sent if the balance only just covers the amount. There is no
+                    arrival estimate — the SDK does not provide one.
+                </div>
+            </div>
+
+            <div class="d-flex flex-wrap gap-3 mt-4">
+                <button id="page-primary" type="submit" class="btn btn-primary">Save sweep settings</button>
+            </div>
+        </div>
+    </div>
+</form>
+
+@*
+    Its own form, outside the settings form. HTML forbids nesting them, and posting the settings fields to the
+    preview action would suggest that unsaved edits are what gets previewed — they are not: the engine reads the
+    stored settings.
+*@
+<form method="post" asp-action="SweepPreview" asp-route-storeId="@Model.StoreId" permission="@Policies.CanModifyStoreSettings">
+    <div class="row">
+        <div class="col-xl-8 col-xxl-constrain">
+            <h3 class="mt-4 mb-3">Sweep now</h3>
+            <button type="submit" class="btn btn-secondary" id="SparkSweepNow">Sweep now…</button>
+            <div class="form-text mt-2 mb-5">
+                Shows the amount, the destination and a live fee quote before anything is sent. It ignores the
+                switch and the threshold above — you have just answered that question by pressing the button — but
+                not the minimum, the fee limits or the destination rules, which are enforced by the server either
+                way. It uses the <em>saved</em> settings, so save first if you have changed anything.
+            </div>
+        </div>
+    </div>
+</form>
+
+<div class="row">
+    <div class="col-xl-10 col-xxl-constrain">
+        <h3 class="mt-2 mb-3">Sweep history</h3>
+
+        @if (Model.History.Count == 0)
+        {
+            <p class="text-secondary" id="SparkSweepHistoryEmpty">
+                Nothing yet. Sweeps, and any sweep this plugin refused to make, are listed here with the reason.
+            </p>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-hover" id="SparkSweepHistory">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th>Status</th>
+                            <th class="text-end">Delivered</th>
+                            <th class="text-end">Fee</th>
+                            <th>Destination</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var record in Model.History)
+                        {
+                            var (statusText, statusClass) = record.Status switch
+                            {
+                                SweepRecordStatus.Confirmed => ("Confirmed", "text-success"),
+                                SweepRecordStatus.Sent => ("Sent", "text-success"),
+                                SweepRecordStatus.Pending => ("Unresolved", "text-warning"),
+                                SweepRecordStatus.Refused => ("Refused", "text-secondary"),
+                                _ => ("Failed", "text-danger")
+                            };
+                            var moved = record.Status is SweepRecordStatus.Sent or SweepRecordStatus.Confirmed
+                                        or SweepRecordStatus.Pending;
+                            <tr>
+                                <td>
+                                    @record.CreatedAt.ToString("u")
+                                    <span class="d-block text-secondary small">
+                                        @(record.Trigger == SweepTrigger.Manual ? "By hand" : "Automatic")
+                                    </span>
+                                    @if (record.AttemptCount > 1)
+                                    {
+                                        @* A recurring refusal is one row that keeps ticking rather than one row per
+                                           pass, so it has to say how often and how recently — otherwise it reads as
+                                           a single old event that may long since have resolved itself. *@
+                                        <span class="d-block text-warning small">
+                                            Still happening — @record.AttemptCount.ToString("N0") times, last
+                                            @record.LastActivityAt.ToString("u")
+                                        </span>
+                                    }
+                                </td>
+                                <td class="@statusClass">@statusText</td>
+                                <td class="text-end">
+                                    @if (moved)
+                                    {
+                                        <span>@record.RecipientAmountSats.ToString("N0")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-secondary">—</span>
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    @if (moved)
+                                    {
+                                        <span>@((record.FeeSats ?? record.QuotedFeeSats).ToString("N0"))</span>
+                                        @* The honest number: what the exit cost as a share of what arrived. *@
+                                        <span class="d-block small @(record.FeePercent > 2 ? "text-warning" : "text-secondary")">
+                                            @record.FeePercent.ToString("0.##")%
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-secondary">—</span>
+                                    }
+                                </td>
+                                <td>
+                                    @if (string.IsNullOrEmpty(record.DestinationAddress))
+                                    {
+                                        <span class="text-secondary">—</span>
+                                    }
+                                    else
+                                    {
+                                        <vc:truncate-center text="@record.DestinationAddress" classes="truncate-center-id" />
+                                        <span class="d-block text-secondary small">
+                                            @(record.DestinationMode switch
+                                            {
+                                                SweepDestinationMode.StaticAddress => "Fixed address",
+                                                SweepDestinationMode.EvmAddress =>
+                                                    $"{record.DestinationAsset} on {record.DestinationChain}"
+                                                    + (record.Provider is { } provider ? $" via {provider}" : ""),
+                                                _ => "Store wallet"
+                                            })
+                                        </span>
+                                        @if (record.DescribeDelivered() is { } delivered)
+                                        {
+                                            <span class="d-block text-secondary small">
+                                                @delivered
+                                                @if (record.ConversionStatus is { } conversionStatus
+                                                     && conversionStatus != SparkConversionStatus.Completed)
+                                                {
+                                                    <span>(@conversionStatus)</span>
+                                                }
+                                            </span>
+                                        }
+                                    }
+                                </td>
+                                <td class="small">
+                                    @if (record.TxId is { } txId)
+                                    {
+                                        <vc:truncate-center text="@txId" classes="truncate-center-id" />
+                                    }
+                                    @if (record.Error is { } error)
+                                    {
+                                        <span class="d-block text-secondary">@error</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            @if (Model.HistoryTotal > Model.Count)
+            {
+                <nav class="d-flex gap-3">
+                    @if (Model.Skip > 0)
+                    {
+                        <a class="btn btn-link p-0" asp-action="Sweep" asp-route-storeId="@Model.StoreId"
+                           asp-route-skip="@Math.Max(0, Model.Skip - Model.Count)" asp-route-count="@Model.Count">
+                            Newer
+                        </a>
+                    }
+                    @if (Model.Skip + Model.Count < Model.HistoryTotal)
+                    {
+                        <a class="btn btn-link p-0" asp-action="Sweep" asp-route-storeId="@Model.StoreId"
+                           asp-route-skip="@(Model.Skip + Model.Count)" asp-route-count="@Model.Count">
+                            Older
+                        </a>
+                    }
+                    <span class="text-secondary">
+                        @(Model.Skip + 1)–@(Model.Skip + Model.History.Count) of @Model.HistoryTotal
+                    </span>
+                </nav>
+            }
+        }
+    </div>
+</div>
+
+@section PageFootContent {
+    <partial name="_ValidationScriptsPartial" />
+    <script>
+        // Same reason as the setup page's import panel: Bootstrap's collapse toggle on a radio only ever opens,
+        // so a merchant who switched back to their store wallet would still be looking at an address field that
+        // no longer applies to what they are about to save.
+        //
+        // Both panels are driven from one handler over the whole radio group rather than one handler each. With
+        // two independent handlers, switching from the fixed-address panel to the cross-chain one would open the
+        // second without closing the first, and the page would show two destinations at once — for a form that
+        // posts every field it renders, and where the fields left visible are the ones a merchant assumes are in
+        // force.
+        document.addEventListener('DOMContentLoaded', () => {
+            if (typeof bootstrap === 'undefined') return;
+
+            const panels = [
+                ['StaticAddressPanel', 'DestinationMode-StaticAddress'],
+                ['EvmAddressPanel', 'DestinationMode-EvmAddress']
+            ]
+                .map(([panelId, radioId]) => ({
+                    panel: document.getElementById(panelId),
+                    radio: document.getElementById(radioId)
+                }))
+                .filter(x => x.panel && x.radio)
+                .map(x => ({
+                    radio: x.radio,
+                    collapse: bootstrap.Collapse.getOrCreateInstance(x.panel, { toggle: false })
+                }));
+
+            if (panels.length === 0) return;
+
+            const sync = () => {
+                for (const { radio, collapse } of panels) {
+                    radio.checked ? collapse.show() : collapse.hide();
+                    radio.setAttribute('aria-expanded', radio.checked ? 'true' : 'false');
+                }
+            };
+            delegate('change', 'input[name="Settings.DestinationMode"]', sync);
+            sync();
+        })
+
+        // The asset list belongs to the chain, so switching chain has to rebuild it. Its own listener rather
+        // than a branch of the one above: that one gives up when Bootstrap is missing, and an asset select left
+        // holding another chain's options would post a destination the merchant never chose.
+        //
+        // Server-rendered first and only rewritten on change, so the page a merchant loads is the saved
+        // configuration whether or not this runs. Nothing here is a check — the route table is read again before
+        // every sweep, and an asset that chain does not carry is refused there rather than sent.
+        document.addEventListener('DOMContentLoaded', () => {
+            const chains = document.querySelector('select[name="Settings.EvmChain"]');
+            const assets = document.querySelector('select[name="Settings.EvmAsset"]');
+            if (!chains || !assets) return;
+
+            chains.addEventListener('change', () => {
+                const offered = (chains.selectedOptions[0]?.dataset.assets ?? '').split(' ').filter(Boolean);
+                if (offered.length === 0) return;
+
+                // Kept when the new chain carries it too, so switching chain to compare two of them does not
+                // quietly change the asset as well.
+                const held = assets.value;
+                const keep = offered.includes(held) ? held : offered[0];
+                assets.replaceChildren(...offered.map(a => new Option(a, a, false, a === keep)));
+            });
+        })
+    </script>
+}

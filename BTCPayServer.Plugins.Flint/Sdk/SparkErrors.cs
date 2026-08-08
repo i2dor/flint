@@ -1,0 +1,136 @@
+using System;
+using Breez.Sdk.Spark;
+
+namespace BTCPayServer.Plugins.Flint.Sdk;
+
+/// <summary>
+/// Turns SDK exceptions into text fit for a merchant, and classifies the ones we act on.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The SDK's exceptions are UniFFI-generated: the payload sits in a public field named <c>v1</c> and
+/// <c>Message</c> is synthesised as <c>"@v1=Tree service error: insufficient funds"</c>, prefix and
+/// all. Never surface <c>ex.Message</c> directly (spike notes §12).
+/// </para>
+/// <para>
+/// Note also that not every failure is an <c>SdkException</c>: the C# binding layer itself throws
+/// <c>ArgumentNullException</c> for a null description, so callers must catch <c>Exception</c> at the
+/// <c>ILightningClient</c> boundary rather than <c>SdkException</c>.
+/// </para>
+/// </remarks>
+public static class SparkErrors
+{
+    public static string Describe(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception switch
+        {
+            SdkException.InsufficientFunds => "Insufficient Spark balance.",
+            SdkException.SparkException spark => Strip(spark.v1),
+            SdkException.InvalidInput invalid => Strip(invalid.v1),
+            SdkException.NetworkException network => $"Spark network error: {Strip(network.v1)}",
+            SdkException.StorageException storage => $"Spark storage error: {Strip(storage.v1)}",
+            SdkException.ChainServiceException chain => $"Bitcoin chain service error: {Strip(chain.v1)}",
+            SdkException.LnurlException lnurl => $"LNURL error: {Strip(lnurl.v1)}",
+            SdkException.Signer signer => $"Spark signer error: {Strip(signer.v1)}",
+            SdkException.InvalidUuid uuid => $"Invalid identifier: {Strip(uuid.v1)}",
+            SdkException.Generic generic => Strip(generic.v1),
+            // MissingUtxo and MaxDepositClaimFeeExceeded carry several named fields rather than a
+            // single v1, so there is nothing better to do than strip the synthesised prefix.
+            SdkException => Strip(exception.Message),
+            ObjectDisposedException => "The Spark wallet for this store is no longer running.",
+            _ => Strip(exception.Message)
+        };
+    }
+
+    /// <summary>
+    /// True when the failure means "not enough sats".
+    /// </summary>
+    /// <remarks>
+    /// The typed <c>SdkException.InsufficientFunds</c> variant exists but was never observed being
+    /// thrown: an unfunded send surfaces as <c>SparkException: @v1=Tree service error: insufficient
+    /// funds</c>. Both are matched, the second one by substring, because there is no alternative.
+    /// </remarks>
+    public static bool IsInsufficientFunds(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.InsufficientFunds ||
+               (exception is SdkException.SparkException spark &&
+                spark.v1?.Contains("insufficient funds", StringComparison.OrdinalIgnoreCase) is true);
+    }
+
+    /// <summary>
+    /// True when the SDK rejected the request locally, before doing anything.
+    /// </summary>
+    /// <remarks>
+    /// These are client-side validations that cost 0 ms and definitively mean nothing was sent — an amount
+    /// below the 294-sat dust floor for the destination's script type, a malformed address, an unsupported
+    /// payment method. Distinguishing them from a network failure is what lets a caller say "safe to retry
+    /// differently" instead of "state unknown".
+    /// </remarks>
+    public static bool IsInvalidInput(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.InvalidInput;
+    }
+
+    /// <summary>
+    /// True when a cooperative-exit fee quote has expired and the send must be re-prepared.
+    /// </summary>
+    /// <remarks>
+    /// A prepared bitcoin-address response is valid for only ~60 seconds, so this is a normal condition
+    /// rather than a failure to report: the caller re-prepares and tries again. It arrives as prose inside
+    /// a <c>SparkException</c> ("The coop exit fee quote has expired, please request a new quote"), so
+    /// there is no typed variant to match on. Used by the sweep path.
+    /// </remarks>
+    public static bool IsExpiredFeeQuote(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.SparkException spark &&
+               spark.v1?.Contains("fee quote has expired", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    /// <summary>
+    /// True when a bridge provider refused an amount as below its own minimum.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A normal outcome, not a fault.</b> The cross-chain minimum is enforced server-side by the provider and
+    /// the SDK exposes no getter for it — the spike had to binary-search it, finding a floor somewhere between
+    /// 1,000 and 1,500 satoshi — so "too small" is only discoverable by attempting a prepare, and arrives as a
+    /// <c>NetworkException</c> carrying the provider's own prose (<c>Amount too small (code: 400)</c>).
+    /// </para>
+    /// <para>
+    /// Matched by substring because there is no typed variant and no error code on the C# side. A caller that
+    /// treated this as a network failure would report the provider as unreachable to a merchant whose only
+    /// problem is a small balance.
+    /// </para>
+    /// </remarks>
+    public static bool IsAmountTooSmall(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.NetworkException network &&
+               network.v1?.Contains("amount too small", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    /// <summary>
+    /// True when the SDK reported "no such row", which is how it reports "not found".
+    /// </summary>
+    /// <remarks>
+    /// <c>GetPayment</c> on an unknown id throws <c>StorageException: @v1=Underlying implementation
+    /// error: Query returned no rows</c> rather than returning null (spike notes §6).
+    /// </remarks>
+    public static bool IsNotFound(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.StorageException storage &&
+               storage.v1?.Contains("no rows", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    private static string Strip(string? message)
+    {
+        if (string.IsNullOrEmpty(message))
+            return "Unknown Spark error.";
+        return message.StartsWith("@v1=", StringComparison.Ordinal) ? message[4..] : message;
+    }
+}

@@ -1,0 +1,340 @@
+using Breez.Sdk.Spark;
+using BTCPayServer.Plugins.Flint.Sdk;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using NBitcoin;
+using Xunit;
+using BitcoinNetwork = NBitcoin.Network;
+
+namespace BTCPayServer.Plugins.Flint.Tests;
+
+/// <summary>
+/// Nothing credential-shaped may reach the operator's log through the SDK's log bridge.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The bridge forwards the Rust SDK's own lines into BTCPay's logger, and the same subscriber writes them to
+/// <c>&lt;DataDir&gt;/Plugins/Spark/logs/sdk.log</c> — at the process umask, observed as 0644. What the SDK
+/// emits was measured against a throwaway regtest wallet: at <c>info</c> and <c>debug</c> nothing secret
+/// appeared, and at <c>trace</c> the service provider's GraphQL <c>session_token</c> did, in full, twice per
+/// authentication.
+/// </para>
+/// <para>
+/// The probe could not cover everything — an unfunded wallet never produces the lines a completed payment
+/// would, which are the ones a preimage would ride on. So these tests are written against the lines that were
+/// <em>not</em> observable as much as the ones that were, using the names the SDK's own SQLite schema uses.
+/// </para>
+/// </remarks>
+public class SparkLogBridgeTests
+{
+    /// <summary>
+    /// The real leak, in the shape it was actually observed in.
+    /// </summary>
+    /// <remarks>
+    /// Copied from the probe's own output rather than invented, minus the token itself. It is a live bearer
+    /// credential for the merchant's wallet against the service provider.
+    /// </remarks>
+    [Fact]
+    public void The_service_providers_session_token_never_reaches_the_log()
+    {
+        const string token = "eyJ1aWQiOiIwMTlmZDQ5Ny03Yjc3LTZlZDgifQ.anPdDQ.9noMLLWPhHNXSkl3YtayTfpEtMbvonj";
+        var line =
+            "raw response body: {\"data\": {\"verify_challenge\": {\"valid_until\": \"2026-08-06T01:12:05+00:00\", "
+            + $"\"session_token\": \"{token}\"}}}}";
+
+        var forwarded = Forward(line, "trace");
+
+        Assert.DoesNotContain(token, forwarded);
+        Assert.Contains(SparkLogScrubber.Redacted, forwarded);
+    }
+
+    /// <summary>
+    /// A preimage, in the two shapes the SDK's own types would produce one in.
+    /// </summary>
+    /// <remarks>
+    /// Unobserved rather than invented: <c>payment_details_lightning</c> has a <c>preimage</c> column and the
+    /// Rust <c>Payment</c> type carries it, so a debug line dumping either would print it. The probe wallet
+    /// was never paid, so this is the gap the redaction exists to cover.
+    /// </remarks>
+    [Theory]
+    [InlineData("PaymentDetails { preimage: Some(\"PREIMAGE\"), payment_hash: \"abc\" }")]
+    [InlineData("{\"preimage\": \"PREIMAGE\"}")]
+    [InlineData("preimage=PREIMAGE")]
+    [InlineData("payment_details_lightning row: invoice=lnbcrt1..., preimage: PREIMAGE")]
+    // Rust's tracing can format a field through Display instead of as a key/value pair, which separates the
+    // name from the value with a space rather than a colon. Requiring `:` or `=` let this shape through.
+    [InlineData("received preimage PREIMAGE")]
+    [InlineData("claiming with preimage PREIMAGE for payment 4b1f")]
+    public void A_preimage_never_reaches_the_log(string template)
+    {
+        const string preimage = "9f2c1b7a4e8d0356f1a9c4b28e7d05316a4f9c2b8e7d0531f4a9c2b8e7d05314";
+
+        var forwarded = Forward(template.Replace("PREIMAGE", preimage), "debug");
+
+        Assert.DoesNotContain(preimage, forwarded);
+    }
+
+    /// <summary>
+    /// A recovery phrase, both labelled and bare.
+    /// </summary>
+    /// <remarks>
+    /// The bare case is why the wordlist check exists: a phrase can appear with no name attached to it — in a
+    /// panic message, an error string, a struct printed without field names — and by shape alone twelve
+    /// consecutive BIP39 words are unmistakable.
+    /// </remarks>
+    [Fact]
+    public void A_recovery_phrase_never_reaches_the_log()
+    {
+        var mnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+        var firstWord = mnemonic.Split(' ')[0];
+
+        var labelled = Forward($"connecting with mnemonic=\"{mnemonic}\"", "debug");
+        Assert.DoesNotContain(mnemonic, labelled);
+
+        var bare = Forward($"failed to derive from {mnemonic} on regtest", "debug");
+        Assert.DoesNotContain(mnemonic, bare);
+
+        // Belt and braces: not merely reformatted somewhere in the middle.
+        Assert.DoesNotContain($"{firstWord} ", bare[bare.IndexOf("from", StringComparison.Ordinal)..]);
+    }
+
+    [Fact]
+    public void An_extended_private_key_never_reaches_the_log()
+    {
+        var xprv = new ExtKey().GetWif(BitcoinNetwork.Main).ToString();
+        Assert.StartsWith("xprv", xprv);
+
+        Assert.DoesNotContain(xprv, Forward($"restoring from {xprv}", "debug"));
+    }
+
+    [Theory]
+    [InlineData("api_key=abcdef0123456789")]
+    [InlineData("\"private_key\": \"abcdef0123456789\"")]
+    [InlineData("signing_key: abcdef0123456789")]
+    [InlineData("authorization: Bearer abcdef0123456789")]
+    public void Other_credential_names_have_their_values_removed(string line)
+    {
+        Assert.DoesNotContain("abcdef0123456789", Forward(line, "debug"));
+    }
+
+    /// <summary>
+    /// The other half: the lines that carry the diagnostic value must survive intact.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without this, "redact everything" would pass every test above, and the operator would be left with a
+    /// log that cannot answer the question it exists for. All four are real lines from the probe.
+    /// </para>
+    /// <para>
+    /// The DDL cases matter specifically: the SDK's migrations <em>mention</em> <c>preimage</c> — as a column
+    /// name and inside a <c>json_extract</c> path — and a redaction keyed on the word rather than on an
+    /// assignment to it would blank them.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("Running: ALTER TABLE lnurl_receive_metadata ADD COLUMN preimage TEXT;")]
+    [InlineData("json_extract(details, '$.Lightning.preimage')")]
+    [InlineData("Created new connection to operator: https://0.spark.lightspark.com")]
+    [InlineData("Calling query_nodes with request: QueryNodesRequest { include_parents: false, limit: 100 }")]
+    public void Ordinary_diagnostic_lines_are_forwarded_unchanged(string line)
+    {
+        Assert.Equal(line, Forward(line, "debug"));
+    }
+
+    /// <summary>
+    /// A 64-hex run with no sensitive name in front of it survives, whatever separator precedes it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This pins the boundary that makes <c>SensitiveHexValue</c> safe to have at all. Accepting whitespace
+    /// between a sensitive name and a 64-hex value is <em>name-keyed</em>; widening it to the shape alone is
+    /// the rule <c>SparkLogScrubber</c>'s remarks reject at length, because a preimage, a payment hash, a txid
+    /// and a public key's x-coordinate are all 32 bytes of hex and only one of them is a secret.
+    /// </para>
+    /// <para>
+    /// It is a test rather than a comment because the two regexes differ by one token, and the wider one
+    /// passes every other test in this file. Without this, someone tidying the pattern into a single shape
+    /// rule would blank the txid a sweep sitting at <em>Sent</em> carries as the only handle on funds in
+    /// flight, and nothing would object.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("broadcast txid e9946fb8351db1e27bba015f3f3e099ad3de46e91678482222f5a238cb654bca0")]
+    [InlineData("payment_hash: 84e9d10684e9d10684e9d10684e9d10684e9d10684e9d10684e9d10684e9d106")]
+    [InlineData("identity 02b79ba94ef9bc75b657c57c49781e57cb63ee2bd831297ef684b1bdb58de1bd")]
+    public void A_hex_identifier_with_no_sensitive_name_is_left_alone(string line)
+    {
+        Assert.Equal(line, Forward(line, "debug"));
+    }
+
+    /// <summary>
+    /// An English sentence of twelve short words is not a recovery phrase.
+    /// </summary>
+    /// <remarks>
+    /// The wordlist check earns its keep here. Redacting on the twelve-lowercase-words pattern alone would
+    /// silently eat prose, and a scrubber that eats prose is one an operator turns off.
+    /// </remarks>
+    [Fact]
+    public void A_long_sentence_of_ordinary_words_is_not_mistaken_for_a_phrase()
+    {
+        const string line =
+            "the node did not send the data that the peer had asked for and then the link went away again";
+
+        Assert.Equal(line, Forward(line, "debug"));
+    }
+
+    [Fact]
+    public void A_line_the_SDK_reports_with_no_text_does_not_throw()
+    {
+        // Log is a UniFFI callback: throwing back into it is how the process deadlocks.
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+        var bridge = new SparkLogBridge(log);
+
+        bridge.Log(new LogEntry(null!, "debug"));
+        bridge.Log(new LogEntry("", null!));
+
+        Assert.Equal(2, log.Lines.Count);
+    }
+
+    /// <summary>
+    /// A filter that would turn the Rust subscriber up to trace is refused.
+    /// </summary>
+    /// <remarks>
+    /// This is the guard that actually protects the <em>file</em>. Scrubbing happens on the C# bridge, but
+    /// <c>sdk.log</c> is written by the Rust subscriber and never passes through it, so the only way to keep
+    /// a session token out of it is to never ask for the level that emits one.
+    /// </remarks>
+    [Theory]
+    [InlineData("trace")]
+    [InlineData("TRACE")]
+    [InlineData("info,breez_sdk_spark=trace")]
+    [InlineData("spark::ssp=trace,info")]
+    public void A_trace_filter_is_refused(string requested)
+    {
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+
+        var applied = SparkLogging.ClampFilter(requested, log);
+
+        Assert.Equal(SparkLogging.MaxFilter, applied);
+        Assert.Contains("session token", log.AllText);
+    }
+
+    [Theory]
+    [InlineData("info")]
+    [InlineData("debug")]
+    [InlineData("warn")]
+    [InlineData("info,breez_sdk_spark=debug")]
+    public void A_filter_that_does_not_reach_trace_is_left_alone(string requested)
+    {
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+
+        Assert.Equal(requested, SparkLogging.ClampFilter(requested, log));
+        Assert.Empty(log.Lines);
+    }
+
+    /// <summary>
+    /// A filter nobody supplied falls back to the quiet level, not to the clamp's ceiling.
+    /// </summary>
+    /// <remarks>
+    /// The clamp exists because verbosity is what put a live session token on disk, so resolving "no filter
+    /// was asked for" into the most verbose level the plugin tolerates is the one direction the fallback must
+    /// not lean. Production is unaffected either way — <c>Constants.SdkLogFilter</c> is always passed — which
+    /// is exactly why this needs a test rather than a reviewer noticing.
+    /// </remarks>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void A_filter_that_was_never_supplied_falls_back_to_the_quiet_level(string? requested)
+    {
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+
+        var applied = SparkLogging.ClampFilter(requested, log);
+
+        Assert.Equal(SparkLogging.DefaultFilter, applied);
+        Assert.NotEqual(SparkLogging.MaxFilter, applied);
+    }
+
+    /// <summary>
+    /// The fallback and the filter the plugin actually ships are the same level.
+    /// </summary>
+    /// <remarks>
+    /// Two constants describing one intention drift apart silently otherwise: lowering
+    /// <c>Constants.SdkLogFilter</c> without lowering the fallback would leave the forgotten-argument path
+    /// louder than the configured one, which is the whole defect this pins.
+    /// </remarks>
+    [Fact]
+    public void The_fallback_is_the_level_the_plugin_ships()
+    {
+        Assert.Equal(Constants.SdkLogFilter, SparkLogging.DefaultFilter);
+    }
+
+    /// <summary>
+    /// Initialisation applies the clamp, rather than merely having one available.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the <c>ClampFilter</c> tests above on purpose: a clamp nothing calls is not a guard, and
+    /// the difference between the two is exactly one deleted line.
+    /// </remarks>
+    [Fact]
+    public void Initialisation_installs_the_clamped_filter_and_not_the_requested_one()
+    {
+        using var dir = new TempDirectory();
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+        string? installed = null;
+
+        var ok = SparkLogging.Initialise(
+            dir.Path, log, "info,breez_sdk_spark=trace", (_, _, filter) => installed = filter);
+
+        Assert.True(ok);
+        Assert.Equal(SparkLogging.MaxFilter, installed);
+    }
+
+    // The log directory's mode is asserted in SparkStorageDirectoryPermissionTests, beside the per-store
+    // storage directory's. They were separate once, and that is precisely how storage came to be the one
+    // directory nobody hardened.
+
+    [Fact]
+    public void The_shipped_filter_is_one_that_survives_the_clamp()
+    {
+        // Pins the constant against the guard rather than restating it: bumping SdkLogFilter to something the
+        // plugin would then refuse should be a failure here, not a surprise on a live server.
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+
+        Assert.Equal(Constants.SdkLogFilter, SparkLogging.ClampFilter(Constants.SdkLogFilter, log));
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public TempDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "spark-log-tests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>Puts a line through the real bridge and returns what the logger received.</summary>
+    private static string Forward(string line, string level)
+    {
+        var log = new CapturingLogger<SparkLogBridgeTests>();
+        new SparkLogBridge(log).Log(new LogEntry(line, level));
+
+        var entry = Assert.Single(log.Lines);
+        var marker = "spark: ";
+        return entry[(entry.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
+    }
+}

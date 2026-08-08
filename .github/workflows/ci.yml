@@ -1,0 +1,260 @@
+name: CI
+
+# Runs on every push to main and on all PRs, so it works as the merge gate documented in
+# docs/ci-and-releases.md. Also runs on a daily schedule and supports manual
+# workflow_dispatch:
+#
+# - The daily schedule exists so the live integration-test job (see below) surfaces Lightspark
+#   SSP / Breez SDK drift even on days with no commits: Lightning is only testable live, and the
+#   SDK is pre-1.0 with frequent releases.
+# - workflow_dispatch lets .github/workflows/btcpayserver-update.yml explicitly re-trigger this
+#   workflow on a PR branch it just pushed. GitHub does not fire `pull_request`-triggered runs
+#   for pushes/PRs authored by the default GITHUB_TOKEN (loop prevention), but it explicitly
+#   exempts workflow_dispatch from that rule — this is how that PR gets a CI run without a PAT.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * *"  # 05:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  build-and-test:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          # Depth 1 applies to the btcpayserver submodule too (actions/checkout passes the same
+          # fetch-depth through to `git submodule update`), which matters: the submodule is a
+          # large, long-lived repo, and a full clone of it on every run would dominate CI time.
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      # setup-dotnet's own `cache: true` input keys on packages.lock.json, which this repo does
+      # not use, so NuGet caching is done directly against the global-packages folder instead.
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build (plugin + tests)
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release
+
+      # The Postgres and live-regtest suites skip themselves when their environment variables are
+      # unset, so this run covers the in-process tests only. The other two jobs cover the rest.
+      - name: Unit tests
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build
+
+  store-test:
+    name: Store tests (real Postgres)
+    runs-on: ubuntu-latest
+    # A hard gate, unlike the live integration job: this needs no third-party service, so a failure
+    # here is always our bug. It is also the only suite that exercises the plugin's EF store against
+    # real SQL and the production context factory — including its EnableRetryOnFailure setting, which
+    # makes EF reject user-initiated transactions. A store that opens one fails every call, so
+    # nothing could ever settle, and no in-memory test can catch it.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: sparktest
+          POSTGRES_DB: sparktests
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build (plugin + tests)
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release
+
+      - name: Store contract & concurrency tests
+        env:
+          SPARK_POSTGRES_TESTS: "Host=127.0.0.1;Port=5432;Database=sparktests;Username=postgres;Password=sparktest"
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=Postgres"
+
+  integration-test:
+    name: Live regtest integration test (Lightspark SSP)
+    runs-on: ubuntu-latest
+    # Deliberately not gated on build-and-test: it should run and report on its own schedule and
+    # on every PR regardless of the unit-test outcome, so drift in the live SSP stays visible.
+    #
+    # continue-on-error unconditionally: this test depends on a third-party network service
+    # outside our control (Lightspark's hosted regtest), so treating it as a hard merge gate on
+    # any trigger — not just PRs — would let an unrelated outage block merges to main. The job
+    # still reports its real pass/fail status in the run summary, so drift stays visible; it just
+    # never turns the overall run red.
+    #
+    # PROPOSED, NOT YET DONE — gate this on pull requests only:
+    #
+    #     continue-on-error: ${{ github.event_name != 'pull_request' }}
+    #
+    # That makes a real failure block a merge, where a human is present to re-run a transient
+    # outage, while a scheduled or push run still cannot turn main red. The reason it is not done
+    # in the commit that added `funded-regtest-test` is sequencing, not disagreement: there is no
+    # measured flake rate for this job to justify the flip either way, and changing the merge
+    # policy for the existing live job in the same change that introduces a second, unproven live
+    # job would confound the two. Let the daily schedule accumulate a few weeks of pass/fail on
+    # both, then flip this line if the rate supports it. See docs/ci-and-releases.md.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build (plugin + tests)
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release
+
+      # No API key needed: regtest accepts a null one (see docs/testing.md). This talks to the real
+      # Lightspark-hosted regtest SSP over the network and loads the SDK's native library.
+      - name: Integration test (regtest, live network)
+        env:
+          SPARK_INTEGRATION_TESTS: "1"
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=Integration"
+
+  funded-regtest-test:
+    name: Funded regtest suite (money actually moves)
+    runs-on: ubuntu-latest
+    # ADVISORY, like integration-test, and for the same reason plus two of its own. Beyond depending on a
+    # third-party service, this suite depends on a *wallet with a balance*: it will go red when the CI wallet
+    # runs dry, which is an operations event and not a defect in the pull request that happened to be open at
+    # the time. Blocking merges on the state of a faucet-funded balance would be a bad trade. The suite says so
+    # itself — a drained wallet fails with an instruction to top it up, not an assertion about numbers.
+    #
+    # What makes it useful anyway is the artefact. This is the only job in the repository that produces the
+    # log output of a *completed* payment, which is the one stated gap in the plugin's log audit and the
+    # open question in SparkLogScrubber's remarks. The preimage assertion inside the suite is a hard one; if the
+    # scrubber ever lets a preimage through, this job reports a real failure with the value in the message.
+    # Someone has to look at the run summary — the same standing caveat integration-test carries.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # The secrets context is not available to a job-level `if`, so the gate is a step that sets an output the
+      # later steps key off. The suite would skip itself cleanly without this — every test is guarded by
+      # Assert.SkipUnless on the same variable — but skipping after a five-minute submodule checkout and build
+      # wastes a runner on every PR in a fork that has no secret.
+      - name: Check for the wallet secret
+        id: gate
+        env:
+          SPARK_REGTEST_SEED: ${{ secrets.SPARK_REGTEST_SEED }}
+        run: |
+          if [ -n "${SPARK_REGTEST_SEED}" ]; then
+            echo "funded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "funded=false" >> "$GITHUB_OUTPUT"
+            echo "SPARK_REGTEST_SEED is not set, so the funded suite has no wallet and will not run." >> "$GITHUB_STEP_SUMMARY"
+            echo "This is the expected state for a fork. See docs/testing.md, 'A funded regtest wallet for CI'." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up .NET
+        if: steps.gate.outputs.funded == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        if: steps.gate.outputs.funded == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Build (plugin + tests)
+        if: steps.gate.outputs.funded == 'true'
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release
+
+      # One wallet, three tests that each move its money: the suite's collection is declared with
+      # DisableParallelization, and the balance lags settlement by ~20 s, so this must not be sped up.
+      - name: Funded regtest suite
+        if: steps.gate.outputs.funded == 'true'
+        env:
+          SPARK_REGTEST_SEED: ${{ secrets.SPARK_REGTEST_SEED }}
+          SPARK_REGTEST_ARTIFACT_DIR: ${{ github.workspace }}/funded-regtest-artifacts
+        run: >
+          dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
+          --configuration Release --no-build --filter "Category=FundedRegtest"
+          --logger "console;verbosity=detailed"
+
+      # always(), because a failed run is exactly when the captured log is worth reading. The fixture writes
+      # the artefact from DisposeAsync, so it exists even when an assertion failed — and the preimage assertion
+      # failing is the case where a human most needs the surrounding lines.
+      #
+      # The fixture withholds the raw sdk.log if the wallet's mnemonic appears in it: these artefacts are
+      # downloadable by anyone with read access to the repository, and a leak must not also be a publication.
+      - name: Upload the SDK log audit
+        if: always() && steps.gate.outputs.funded == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: funded-regtest-log-audit
+          path: funded-regtest-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

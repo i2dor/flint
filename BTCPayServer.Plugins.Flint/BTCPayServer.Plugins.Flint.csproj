@@ -1,0 +1,137 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <!--
+      AssemblyName is the plugin identifier: BTCPay's loader resolves a plugin's assembly by the
+      identifier it was installed under, so the two cannot disagree. Constants.PluginIdentifier holds
+      the same string and SparkBrandingTests asserts they match.
+
+      Assembly name, root namespace, project directory and csproj filename are all the same string
+      again. They were briefly out of step during the rename, which is how a composed csproj path in
+      the packaging workflow came to point at a file that did not exist; see the note beside
+      PROJECT_PATH there.
+
+      (No double hyphen anywhere in this comment: a csproj is XML, and MSBuild refuses to load the
+      project rather than warning. Use a semicolon or an em dash.)
+    -->
+    <AssemblyName>BTCPayServer.Plugins.Flint</AssemblyName>
+    <RootNamespace>BTCPayServer.Plugins.Flint</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    Plugin specific properties.
+
+    These three are the plugin's registry-facing identity, and BTCPay derives them by reflecting over
+    the built assembly (see BaseBTCPayServerPlugin): Product -> Name, Description -> Description,
+    Version -> Version. They are what PluginPacker writes into the .btcpay.json manifest and what the
+    plugin registry shows on the plugin's card, so the Description is user-facing copy, not a code
+    comment.
+
+    Product is the *display* name and nothing else. The plugin's identity is Identifier
+    (Constants.PluginIdentifier, "BTCPayServer.Plugins.Flint"), which names its directory on disk and is
+    what every existing install is keyed by — renaming that would orphan them, so the two must not be
+    conflated. Note that BaseBTCPayServerPlugin falls back to the assembly name when Product is absent:
+    delete this line and the plugin silently starts calling itself "BTCPayServer.Plugins.Flint" in the
+    registry. SparkBrandingTests holds both ends of that.
+
+    Version is the *single* source of truth for the plugin's version — there is deliberately no
+    version constant in Constants.cs and no hard-coded version anywhere else. (The Boltz plugin is
+    the cautionary tale: three version sources that drifted apart.) The only other place the number
+    appears is the newest heading in CHANGELOG.md, and PluginVersionTests asserts the two agree, so
+    a bump that forgets the changelog fails the suite rather than shipping.
+  -->
+  <PropertyGroup>
+    <Product>Flint</Product>
+    <Description>Accept Lightning payments without running a node. Each store gets its own Spark wallet, wired into Lightning and LNURL automatically, with optional automatic sweeps to on-chain Bitcoin or to a stablecoin on an EVM address. Funds sit on Spark, a non-custodial Bitcoin layer two network, until they are swept.</Description>
+    <Version>0.1.0</Version>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!-- Plugin development properties -->
+  <PropertyGroup>
+    <AddRazorSupportForMvc>true</AddRazorSupportForMvc>
+    <PreserveCompilationContext>false</PreserveCompilationContext>
+    <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ProjectReference>
+      <Properties>StaticWebAssetsEnabled=false</Properties>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+
+  <!--
+    This makes sure that referencing BTCPayServer doesn't put any artifact in the published
+    directory: BTCPay already ships those assemblies, and duplicating them in the plugin folder
+    causes assembly-identity conflicts at plugin load time.
+
+    Relaxed only when EfMigrations=true, because `dotnet ef` reflects over this assembly at design
+    time and therefore needs BTCPayServer.dll physically present. See docs/development.md for the
+    exact migration workflow.
+  -->
+  <ItemDefinitionGroup Condition="'$(EfMigrations)' != 'true'">
+    <ProjectReference>
+      <Private>false</Private>
+      <ExcludeAssets>runtime;native;build;buildTransitive;contentFiles</ExcludeAssets>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\**" />
+    <ProjectReference Include="..\btcpayserver\BTCPayServer\BTCPayServer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The unit tests assert on pure helpers (amount rounding, expiry clamping, UTF-8 truncation, payment-hash
+      normalisation, fee-limit arithmetic) that have no business being part of the plugin's public surface.
+    -->
+    <InternalsVisibleTo Include="BTCPayServer.Plugins.Flint.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Pinned exactly: the Spark SDK is pre-1.0 and ships ~monthly minor releases.
+      Bumping this version requires re-running the compat checklist.
+      The package carries ~200 MB of native libraries for linux-x64/arm64, osx-x64/arm64,
+      win-x64/x86. There is no linux-musl (Alpine) or win-arm64 payload.
+    -->
+    <PackageReference Include="Breez.Sdk.Spark" Version="0.19.2" />
+  </ItemGroup>
+
+  <!--
+    Entity Framework: the compile-time references to Microsoft.EntityFrameworkCore and
+    Npgsql.EntityFrameworkCore.PostgreSQL flow in transitively from the BTCPayServer project
+    reference (the ExcludeAssets above drops only the runtime assets), so a normal build needs no
+    EF PackageReference at all.
+
+    Everything below exists solely to author migrations, and is opt-in via -p:EfMigrations=true so
+    that no ordinary Debug or Release build — and therefore no packaged plugin — is affected.
+  -->
+  <ItemGroup Condition="'$(EfMigrations)' == 'true'">
+    <!--
+      NU1107 workaround. Microsoft.EntityFrameworkCore.Design depends on
+      Microsoft.CodeAnalysis.CSharp.Workspaces 5.0.0, which requires Microsoft.CodeAnalysis.Common
+      at exactly 5.0.0. BTCPayServer.Rating references Microsoft.CodeAnalysis.CSharp 5.6.0, which
+      reaches us transitively through the BTCPayServer project reference and requires Common at
+      exactly 5.6.0. Bumping the Workspaces packages to 5.6.0 makes the whole Roslyn graph agree.
+      Design-time only, so this cannot affect the shipped plugin.
+    -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.6.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.6.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      The BTCPayServer project reference contributes Npgsql's compile assets but not its runtime
+      assembly (by design: BTCPay already ships it). `dotnet ef` loads the provider at design time,
+      so it needs the runtime assembly present in this project's output. Version must match
+      BTCPayServer.Abstractions.
+    -->
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+  </ItemGroup>
+
+</Project>

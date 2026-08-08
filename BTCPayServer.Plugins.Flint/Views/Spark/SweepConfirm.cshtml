@@ -1,0 +1,258 @@
+@model SparkSweepConfirmViewModel
+@{
+    // Reached only from the sweep page, and cancels back to it, so it keeps that nav entry lit rather than
+    // appearing to leave the section mid-confirmation.
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Sweeps, "Sweep now"));
+    var preview = Model.Preview;
+    var quote = preview.Quote;
+    var crossChain = preview.CrossChainQuote;
+}
+
+<div class="sticky-header">
+    <vc:title-header />
+    <a asp-action="Sweep" asp-route-storeId="@Model.StoreId" class="btn btn-secondary text-nowrap">Cancel</a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-xl-8 col-xxl-constrain">
+        @if (!preview.CanSweep)
+        {
+            <div class="alert alert-warning" role="alert" id="SparkSweepRefusal">
+                <strong>This sweep will not go ahead.</strong>
+                <span class="d-block mt-1">@preview.RefusalReason</span>
+            </div>
+            <p class="text-secondary">
+                Nothing has been sent, and nothing will be until this is resolved. The reason above is the same
+                one the automatic sweep would give.
+            </p>
+            <a asp-action="Sweep" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+                Back to sweep settings
+            </a>
+        }
+        else if (crossChain is { } cc)
+        {
+            @*
+                A separate table rather than the same one with different labels. The two rails are not
+                comparable: a cooperative exit's fee is a flat number of satoshi taken off a satoshi amount,
+                while a cross-chain sweep's cost is a spread inside the destination asset plus an overpayment on
+                the source. Rendering them through one set of rows would have to pick a unit, and picking one
+                would put a figure in front of a merchant in the wrong currency.
+            *@
+            <p class="text-secondary">
+                This is a <strong>cross-chain send</strong>: the wallet transfers to
+                <strong>@cc.Route.Provider</strong>'s Spark address and the provider delivers on
+                @cc.Route.Chain. It is a normal Spark transfer at the point money leaves this wallet — there is
+                no unilateral exit involved.
+            </p>
+
+            <table class="table" id="SparkCrossChainQuote">
+                <tbody>
+                    <tr>
+                        <th class="w-50">The destination should receive</th>
+                        <td class="fw-semibold">@cc.DescribeEstimatedOut()</td>
+                    </tr>
+                    <tr>
+                        <th>Sending</th>
+                        <td>
+                            @preview.Amount
+                            @if (preview.Amount is SparkSendAmount.Token)
+                            {
+                                <div class="form-text">
+                                    Funded from this store's stablecoin balance, because Stable Balance is on.
+                                    That is why this figure is in dollars rather than sats.
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                    @if (preview.Amount is SparkSendAmount.Bitcoin bitcoinAmount)
+                    {
+                        <tr>
+                            <th>Leaves the Spark balance</th>
+                            <td>
+                                @cc.AmountInSats.ToString("N0") sats
+                                <div class="form-text">
+                                    <strong>More than the amount being sent.</strong> The provider overpays the
+                                    source leg to cover its fee and slippage, so
+                                    @((cc.AmountInSats - bitcoinAmount.Sats).ToString("N0")) sats above the
+                                    @bitcoinAmount.Sats.ToString("N0") sats requested leaves the wallet. A sweep
+                                    is refused rather than sent if the balance only just covers the amount.
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                    <tr>
+                        <th>Spread the provider states</th>
+                        <td>
+                            @SparkSendAmount.FormatBaseUnits(cc.AssetAmountIn - cc.EstimatedOut, cc.Route.Decimals)
+                            @cc.Route.Asset
+                            <div class="form-text">
+                                The difference between what the provider says it takes in and what it says it
+                                delivers. Its service fee is inside that figure and was quoted in
+                                <strong>@(cc.ServiceFeeAsset ?? cc.Route.Asset)</strong> — which is not always
+                                the asset being delivered, so the two are not added together here.
+                            </div>
+                            <div class="form-text">
+                                <strong>This is not the whole cost.</strong> Both numbers come from the same
+                                quote, so this figure says nothing about the <em>rate</em> the provider applied.
+                                The plugin checks that separately, against your store's own exchange rates, and
+                                refuses a sweep whose delivered value is more than
+                                @SparkSweepEngine.MaxCrossChainValueLossPercent.ToString("0.#")% below what
+                                leaves the wallet — but compare the two amounts above yourself before
+                                confirming.
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Destination</th>
+                        <td>
+                            <code class="text-break">@preview.Destination!.Address</code>
+                            <div class="form-text">
+                                @cc.Route.Asset on <strong>@cc.Route.Chain</strong>@(cc.Route.ChainId is { } id
+                                    ? $" (chain {id})" : ""), via @cc.Route.Provider. Nothing verifies that you
+                                control this address, and an address on the wrong chain is not recoverable.
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Spark balance now</th>
+                        <td>@preview.BalanceSats.ToString("N0") sats</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="alert alert-info" role="alert">
+                <strong>These figures are an estimate, and there is no arrival time.</strong>
+                The quote is valid for about a minute, so on confirm the plugin asks for a fresh one and checks
+                it against your fee limit again before sending. Spark reports no estimated arrival for a
+                cross-chain delivery, so this page cannot show one — and no event announces the delivery either,
+                so the sweep history updates when the plugin next polls rather than the moment it lands.
+            </div>
+
+            <form method="post" asp-action="SweepNow" asp-route-storeId="@Model.StoreId" permission="@Policies.CanModifyStoreSettings">
+                @* No amount, destination, chain or asset in the form, for the same reason as the exit path: the
+                   engine re-derives all of them, and a form that carried them could change them. *@
+                <div class="d-flex flex-wrap gap-3 mt-4 mb-5">
+                    <button id="page-primary" type="submit" class="btn btn-primary" name="confirm" value="true">
+                        Send @cc.DescribeEstimatedOut() to @cc.Route.Chain
+                    </button>
+                    <a asp-action="Sweep" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
+        }
+        else
+        {
+            <p class="text-secondary">
+                This is a <strong>cooperative exit</strong>: Spark's service providers build and broadcast the
+                Bitcoin transaction. It typically leaves Spark within seconds and confirms on-chain like any other
+                transaction.
+            </p>
+
+            <table class="table" id="SparkSweepQuote">
+                <tbody>
+                    <tr>
+                        <th class="w-50">The destination receives</th>
+                        <td class="fw-semibold">@quote!.RecipientAmountSats.ToString("N0") sats</td>
+                    </tr>
+                    <tr>
+                        <th>Exit fee (@preview.Settings.ConfirmationSpeed)</th>
+                        <td>
+                            @quote.FeeSats.ToString("N0") sats
+                            @{
+                                var percent = quote.FeePercentOfRecipientAmount;
+                            }
+                            <span class="@(percent > 2 ? "text-warning fw-semibold" : "text-secondary")">
+                                — @percent.ToString("0.##")% of what arrives
+                            </span>
+                            @if (percent > 2)
+                            {
+                                <div class="form-text text-warning">
+                                    That is a large share to lose to fees. A cooperative exit costs the same flat
+                                    amount whatever it carries, so waiting for a bigger balance and sweeping once
+                                    costs the same in total and delivers more.
+                                </div>
+                            }
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Leaves the Spark balance</th>
+                        <td>
+                            @quote.TotalDebitedSats.ToString("N0") sats
+                            <div class="form-text">
+                                @if (quote.FeesIncluded)
+                                {
+                                    <span>
+                                        The fee is taken out of the swept amount, so the balance lands on your
+                                        @preview.Settings.ReserveSats.ToString("N0") sat reserve.
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>
+                                        The fee is charged on top, out of your
+                                        @preview.Settings.ReserveSats.ToString("N0") sat reserve.
+                                    </span>
+                                }
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Fee by speed</th>
+                        <td>
+                            <span class="d-block">Slow — @quote.Tiers.SlowFeeSats.ToString("N0") sats</span>
+                            <span class="d-block">Medium — @quote.Tiers.MediumFeeSats.ToString("N0") sats</span>
+                            <span class="d-block">Fast — @quote.Tiers.FastFeeSats.ToString("N0") sats</span>
+                            <div class="form-text">
+                                Change the tier on the sweep settings page. The fee does not depend on the amount,
+                                only on the tier.
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Destination</th>
+                        <td>
+                            <code class="text-break">@preview.Destination!.Address</code>
+                            <div class="form-text">
+                                @if (preview.Destination.Rotates)
+                                {
+                                    <span>
+                                        From this store's own Bitcoin wallet. <strong>A fresh address is reserved
+                                        and labelled when you confirm</strong>, so the address actually used may be
+                                        the next one after this — the fee and the amount are unaffected.
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span>The fixed address configured for this store.</span>
+                                }
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Spark balance now</th>
+                        <td>@preview.BalanceSats.ToString("N0") sats</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="alert alert-info" role="alert">
+                <strong>These figures are an estimate.</strong>
+                A Spark exit quote is only valid for about a minute, so on confirm the plugin asks for a fresh one
+                and checks it against your fee limit again before sending. If the fee has moved above the limit,
+                nothing is sent and you are told why.
+            </div>
+
+            <form method="post" asp-action="SweepNow" asp-route-storeId="@Model.StoreId" permission="@Policies.CanModifyStoreSettings">
+                @* No amount, destination or fee in the form. The engine re-derives all three server-side; a form
+                   that carried them would be a form that could change them. *@
+                <div class="d-flex flex-wrap gap-3 mt-4 mb-5">
+                    <button id="page-primary" type="submit" class="btn btn-primary" name="confirm" value="true">
+                        Sweep @quote.RecipientAmountSats.ToString("N0") sats now
+                    </button>
+                    <a asp-action="Sweep" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
+        }
+    </div>
+</div>
