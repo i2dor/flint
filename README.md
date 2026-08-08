@@ -11,20 +11,6 @@ itself. The balance can then be swept automatically, on a threshold, to the stor
 wallet, to a fixed Bitcoin address, or cross-chain to a stablecoin at an address you control on an EVM
 chain; and it can be held in USDB between sweeps.
 
-**Status: 0.1.0 — the first release, and thinly proven.** Feature-complete for what it sets out to do,
-mainnet-exercised, and independently security-audited with no critical, high or medium findings. But
-"mainnet-exercised" means **one happy-path run per money path**: a real store delivered one full
-BTC → USDB → USDT → Arbitrum sweep whose on-chain amount matched the figure the plugin recorded exactly,
-one cooperative-exit sweep, and one deposit auto-claim at live fee rates — single-digit dollar amounts,
-one operator, one run each. That establishes that the plumbing connects and that the numbers the plugin
-reports are truthful. It establishes **nothing about any failure path**: every recovery path — a crashed
-cross-chain send, a stuck conversion, a refund — is unexercised against the real provider, and neither
-Stable Balance nor cross-chain sending can be tested off mainnet at all, so neither has CI coverage
-against a live service. Only one bridge provider (Orchestra) routes cross-chain sweeps today, with no
-fallback. USDB is freezable by its issuer. The cooperative-exit fee defaults are still regtest
-measurements and will very likely refuse every sweep on mainnet until you raise them. Read
-[Known limitations](docs/limitations.md) before putting money through this.
-
 ## Trust model
 
 **What you are trusting, in one paragraph.** Spark is a 2-of-3 statechain operated by Lightspark, Breez
