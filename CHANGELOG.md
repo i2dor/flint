@@ -47,11 +47,11 @@ released and do not correspond to anything published here.
 ### Changed
 
 - **The plugin identifier is now `BTCPayServer.Plugins.Flint`.** ⚠️ **Operators must uninstall the
-  old plugin and install this one** — BTCPay keys an install by the identifier, so it sees this as a
-  different plugin and will not offer it as an upgrade. Nothing is lost in the switch: the store's Spark
-  settings, its encrypted recovery phrase, the plugin's Postgres schema and the SDK storage directory are
-  each keyed by a constant that deliberately did **not** change, so a store's wallet comes through intact
-  and keeps taking payments.
+  old plugin, install this one, and re-import the store's recovery phrase** — BTCPay keys an install by
+  the identifier, so it sees this as a different plugin, and every constant that keys stored data moved
+  too. The migration warning at the top of this release is the authoritative list of what carries over
+  (the wallet and its balance, from the network) and what does not (local history and idempotency
+  records).
   The reason for the change is that a third party had already registered `BTCPayServer.Plugins.Spark` on
   the official plugin registry, and BTCPay joins an installed plugin to a registry entry by identifier
   alone: their repository was credited as this plugin's author, the card's "Sources" and "Details" links
@@ -62,12 +62,11 @@ released and do not correspond to anything published here.
   page showed "Flint" above "Flint". The status page is the plugin's root and has no parent to
   point at, so it renders the heading alone; the Sweeps, Stable Balance and removal pages now set a trail
   back to it, which is where a breadcrumb earns its place.
-- **The plugin is called "Flint".** It is built by Seth For Privacy (see `LICENSE`), and a plugin calling
-  itself plain "Spark" implies it comes from Spark or from Breez. The rename is display-only: the manifest
-  name, the nav entry, the status page and the Lightning connection's label. The identifier
-  `BTCPayServer.Plugins.Spark` is untouched, because it names the plugin's directory on disk and every
-  existing install lives under it. Mentions of the Spark *network* — "Spark wallet", "Spark balance",
-  "Spark sweeps" — are still correct and are unchanged.
+- **The plugin is called "Flint".** It is built and maintained by Seth For Privacy (see `LICENSE`), and
+  a plugin calling itself plain "Spark" implies it comes from Spark or from Breez. The name appears in
+  the manifest, the nav entry, the status page and the Lightning connection's label. Mentions of the
+  Spark *network* — "Spark wallet", "Spark balance", "Spark sweeps" — are still correct and are
+  unchanged: that is the network the plugin connects to, not what the plugin is called.
 - **The nav entry carried the previous owner's logomark with a Spark asterisk**, instead of BTCPay's
   generic plugin symbol. (The mark has since been replaced by the Flint mark; the mechanics are
   unchanged.) It is an inline `<svg>` because `<vc:icon>` can only address symbols in core's own
