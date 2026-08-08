@@ -204,6 +204,17 @@ jobs:
   funded-regtest-test:
     name: Funded regtest suite (money actually moves)
     runs-on: ubuntu-latest
+    # One funded run at a time, repository-wide. The suite spends from a single shared regtest wallet,
+    # and the SSP enforces "One user can only have one coop exit request at a time" -- two funded jobs
+    # running concurrently (two PRs' CI overlapping, or a re-run beside a fresh run) make the second
+    # fail on the service's limit, not on the code. Observed live the first day two PRs ran together.
+    # cancel-in-progress stays false so a running spend is never interrupted mid-flight; a queued run
+    # waits. GitHub keeps at most one run pending per group and cancels older pending ones, so under a
+    # Dependabot burst some funded jobs may show "cancelled" -- re-run those rather than reading the
+    # cancellation as a failure. The job stays advisory either way (see below).
+    concurrency:
+      group: funded-regtest-wallet
+      cancel-in-progress: false
     # ADVISORY, like integration-test, and for the same reason plus two of its own. Beyond depending on a
     # third-party service, this suite depends on a *wallet with a balance*: it will go red when the CI wallet
     # runs dry, which is an operations event and not a defect in the pull request that happened to be open at
