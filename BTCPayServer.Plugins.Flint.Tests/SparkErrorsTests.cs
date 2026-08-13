@@ -32,7 +32,8 @@ public class SparkErrorsTests
             new SdkException.Signer("@v1=signer"),
             new SdkException.InvalidUuid("@v1=uuid"),
             new SdkException.Generic("@v1=generic"),
-            new SdkException.InsufficientFunds(),
+            // tokenIdentifier is null for a sat shortfall, set only when a token balance is short.
+            new SdkException.InsufficientFunds(null),
             new SdkException.MissingUtxo("tx", 0),
             new SdkException.OptimizationAlreadyRunning()
         ];
@@ -64,7 +65,11 @@ public class SparkErrorsTests
     {
         // The typed variant was never actually observed being thrown; an unfunded send arrives as a
         // SparkException whose text contains "insufficient funds".
-        Assert.True(SparkErrors.IsInsufficientFunds(new SdkException.InsufficientFunds()));
+        Assert.True(SparkErrors.IsInsufficientFunds(new SdkException.InsufficientFunds(null)));
+        // Since SDK 0.22.0 the variant carries the identifier of whichever balance was short; a token
+        // shortfall must classify the same way, because the plugin only ever spends sats and would
+        // otherwise report a token error as "state unknown".
+        Assert.True(SparkErrors.IsInsufficientFunds(new SdkException.InsufficientFunds("btkn1exampletoken")));
         Assert.True(SparkErrors.IsInsufficientFunds(
             new SdkException.SparkException("@v1=Tree service error: insufficient funds")));
         Assert.False(SparkErrors.IsInsufficientFunds(new SdkException.SparkException("@v1=Invalid network")));
