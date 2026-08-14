@@ -80,8 +80,9 @@ public static class Constants
     /// <remarks>
     /// Informational — nothing at runtime reads it. It exists so the update automation has a version to bump that
     /// is not the support floor, and so a reader can see at a glance which release the assembly was built against.
-    /// It currently equals <see cref="MinBTCPayServerVersion"/>, which is the safe state, not a redundancy: the two
-    /// stay separate constants so a submodule bump can move this one without silently moving the floor.
+    /// It is currently one patch release ahead of <see cref="MinBTCPayServerVersion"/>: the v2.4.2 submodule bump
+    /// moved this constant and left the floor alone, which is exactly what the two being separate constants is
+    /// for — a bump here must never silently drop every host below it.
     /// </remarks>
     public const string BuiltAgainstBTCPayServerVersion = "2.4.2";
 

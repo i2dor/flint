@@ -8,6 +8,32 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [0.1.1] — 2026-08-14
+
+A dependency-only release. No plugin source changed between 0.1.0 and this; the packaged artifact
+differs from 0.1.0 only in the Spark SDK's bundled native libraries. Upgrading is an ordinary plugin
+update — the identifier, the settings key, the Postgres schema, the SDK storage directory and the
+data-protection purpose are all untouched, so **no recovery phrase needs re-importing** and no
+balance has to be swept out first. The 0.1.0 migration warning applies to arriving from the
+predecessor plugin, not to this step.
+
+### Changed
+
+- **The Spark SDK is now 0.22.0**, up from the 0.19.2 that 0.1.0 shipped. Breez published no release
+  notes across that range, so the bump was reviewed by reading the diff of the surface instead: it is
+  additive — batch sends, CPFP, prepared unilateral exit, passkeys, none of which this plugin calls —
+  with one breaking change that reached us. `SdkException.InsufficientFunds` stopped being a
+  payload-free variant and now carries the identifier of whichever balance was short, which broke two
+  test call sites and no production code. `SparkErrors.IsInsufficientFunds` classifies a token
+  shortfall the same as a sat shortfall, because the plugin only ever spends sats and would otherwise
+  report a token error as "state unknown" — the classification that makes a sweep unsafe to retry.
+  The reason to ship a bump with no known fix in it is that the SDK is pre-1.0 and releases roughly
+  monthly: staying near the tip keeps each upgrade a small step that can be read in an afternoon,
+  rather than a large one taken later under pressure.
+- **The plugin is built against BTCPay Server 2.4.2**, up from 2.4.1. This is the release it is
+  compiled and tested against, not a new requirement: the declared support floor is unchanged at
+  2.4.1, so every host that can run 0.1.0 can run this.
+
 ## [0.1.0] — 2026-08-08
 
 The first release under the name **Flint**, and the first from this repository.
