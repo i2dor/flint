@@ -281,6 +281,12 @@ jobs:
 
       # One wallet, three tests that each move its money: the suite's collection is declared with
       # DisableParallelization, and the balance lags settlement by ~20 s, so this must not be sped up.
+      #
+      # --output Detailed is Microsoft.Testing.Platform's equivalent of the VSTest
+      # `--logger "console;verbosity=detailed"` this used before the test project moved to MTP (see the
+      # test .csproj). Worth knowing if it is ever edited back: MTP does not reject the old flag, it takes
+      # it as a filter, matches nothing, and exits 5 with "Zero tests ran" -- red, but red for a reason
+      # that reads nothing like a bad command line.
       - name: Funded regtest suite
         if: steps.gate.outputs.funded == 'true'
         env:
@@ -289,7 +295,7 @@ jobs:
         run: >
           dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
           --configuration Release --no-build --filter "Category=FundedRegtest"
-          --logger "console;verbosity=detailed"
+          --output Detailed
 
       # always(), because a failed run is exactly when the captured log is worth reading. The fixture writes
       # the artefact from DisposeAsync, so it exists even when an assertion failed — and the preimage assertion
