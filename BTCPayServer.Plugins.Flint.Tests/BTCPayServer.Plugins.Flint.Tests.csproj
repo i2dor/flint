@@ -13,15 +13,38 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!--
+      An xunit.v3 test project is a real executable: the runner is a Main in the test assembly, not an
+      external host loading it. This was previously implicit, set for us by Microsoft.NET.Test.Sdk, and
+      dropping that package (see below) is what made it need saying. Without it the build fails outright
+      with "xUnit.net v3 test projects must be executable", so there is no silent-misconfiguration risk here.
+    -->
+    <OutputType>Exe</OutputType>
+    <!--
+      Run the tests through Microsoft.Testing.Platform rather than xunit's own console runner. Not a
+      preference: xunit.v3 4.0.0 carries MTP 2.3.3, which dropped the VSTest bridge on the .NET 10 SDK, so
+      the VSTest path this project used through 3.2.2 now fails at `dotnet test` with "Testing with VSTest
+      target is no longer supported". The other half of the switch is the repository-root global.json, which
+      tells `dotnet test` to speak MTP; both are required, and setting only one leaves the same error.
+
+      Nothing in the test *code* changes — MTP is a host, not an assertion library — and the VSTest
+      `filter "Category=…"` syntax the CI jobs and docs/testing.md use still works, because xunit's MTP
+      runner accepts it verbatim. The one casualty is the VSTest console logger option; its replacement is
+      `output Detailed`. See docs/testing.md, which spells both out with their leading dashes (XML comments
+      cannot carry a double hyphen, which is why this one does not).
+    -->
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
   </PropertyGroup>
 
+  <!--
+    Microsoft.NET.Test.Sdk and xunit.runner.visualstudio are both deliberately absent: the first is the VSTest
+    host and the second is its xunit adapter, and under MTP neither is on the path that runs a test. Keeping
+    them builds and passes, so their absence is easy to "fix" by mistake; they were removed because a
+    VSTest adapter sitting in an MTP project is a standing invitation to debug the wrong runner, and because
+    Dependabot would otherwise keep opening bumps for packages this project no longer executes.
+  -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
-    <PackageReference Include="xunit.v3" Version="3.2.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
 
   <!--

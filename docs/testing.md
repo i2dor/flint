@@ -19,6 +19,14 @@ spending again, and a `Payment` whose amount is already net of the fee under `Fe
 is — a fake that echoed the request back instead is what let the sweep message double-subtract the fee on
 mainnet). A cooperative fake would let through precisely the bugs these tests exist to catch.
 
+The suite runs on **Microsoft.Testing.Platform**, not VSTest: xunit.v3 4.0.0 dropped the VSTest bridge on the
+.NET 10 SDK. Two things turn that on and both are needed — `UseMicrosoftTestingPlatformRunner` in the test
+`.csproj`, and the repository-root `global.json`, which is what makes plain `dotnet test` speak MTP. The
+`--filter "Category=…"` syntax below is unaffected; MTP's xunit runner accepts VSTest filters verbatim. What
+does change is the console-verbosity flag: `--logger "console;verbosity=detailed"` (and its `-l` short form)
+is VSTest-only, and **MTP does not reject it** — it reads it as a filter, matches no tests, and exits 5 with
+"Zero tests ran". Use `--output Detailed` instead.
+
 It also covers what the compiler cannot: `ViewComponentCompatibilityTests` resolves every `<vc:…>` tag,
 partial, layout and UI-extension target the plugin names as a string against the components and views that
 actually exist in the pinned submodule. Those are resolved by name at render time, so a green build against
@@ -75,7 +83,7 @@ not burned, because sweeps are directed at the wallet's own static deposit addre
 
 ```bash
 SPARK_REGTEST_WALLET_GENERATE=1 dotnet test \
-  --filter "FullyQualifiedName~Generate_a_wallet_mnemonic" -l "console;verbosity=detailed"
+  --filter "FullyQualifiedName~Generate_a_wallet_mnemonic" --output Detailed
 ```
 
 This needs no network, so it works from a machine whose IP the SSP blocks. The generator **asserts that

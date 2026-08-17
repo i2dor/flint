@@ -51,7 +51,7 @@ jobs:
             echo "::error::The repository secret SPARK_REGTEST_SEED is not set, so there is no wallet to look up."
             echo "Generate a seed on your own machine first — never here, the generator refuses to run in CI:"
             echo "  SPARK_REGTEST_WALLET_GENERATE=1 dotnet test \\"
-            echo "    --filter 'FullyQualifiedName~Generate_a_wallet_mnemonic' -l 'console;verbosity=detailed'"
+            echo "    --filter 'FullyQualifiedName~Generate_a_wallet_mnemonic' --output Detailed"
             echo "Then store it as SPARK_REGTEST_SEED under Settings > Secrets and variables > Actions,"
             echo "and run this workflow again. Full runbook: docs/testing.md, 'A funded regtest wallet for CI'."
             exit 1
@@ -84,6 +84,12 @@ jobs:
 
       # No API key: regtest accepts a null one. The tool prints the identity pubkey, the balance and the static
       # deposit address to the job log and to the run summary, and asserts the mnemonic is in neither.
+      #
+      # --output Detailed is load-bearing here in a way it is not elsewhere: this job exists to *read* what the
+      # tool printed, and the default verbosity does not show a passing test's output. It is Microsoft.Testing.
+      # Platform's replacement for the VSTest `--logger "console;verbosity=detailed"` this used before the test
+      # project moved to MTP (see the test .csproj). MTP does not reject the old flag -- it takes it as a
+      # filter, matches nothing, and exits 5 with "Zero tests ran".
       - name: Look up the deposit address
         env:
           SPARK_REGTEST_SEED: ${{ secrets.SPARK_REGTEST_SEED }}
@@ -91,4 +97,4 @@ jobs:
           dotnet test BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
           --configuration Release --no-build
           --filter "FullyQualifiedName~Print_the_funding_details"
-          --logger "console;verbosity=detailed"
+          --output Detailed
