@@ -327,6 +327,13 @@ public class SparkSweepViewModel
     [BindNever]
     public string NetworkName { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Mempool fee rates, so the confirmation-speed tiers can show roughly what each pays right now. Null when
+    /// they could not be read; the select renders without them.
+    /// </summary>
+    [BindNever]
+    public Sdk.SparkRecommendedFees? RecommendedFees { get; set; }
+
     [BindNever]
     public IReadOnlyList<SweepRecord> History { get; set; } = [];
 

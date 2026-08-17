@@ -36,11 +36,11 @@ knowing about is **two stores on one server sharing a seed**, which the plugin r
 instances on one wallet corrupt its storage. Give each store its own phrase.
 
 The **status page** then shows the wallet's balance (indicative only — see
-[Known limitations](limitations.md)), its Spark identity, the
-Spark network's published health, and what the store's Lightning payment method currently points at, with
-a repair button if it has drifted. If that repair would replace a real Lightning node, it asks for
-confirmation first: a connection string carrying a macaroon or certificate cannot be recovered
-afterwards.
+[Known limitations](limitations.md)) and what the store's Lightning payment method currently points at,
+with a repair button if it has drifted. If that repair would replace a real Lightning node, it asks for
+confirmation first: a connection string carrying a macaroon or certificate cannot be recovered afterwards.
+The wallet's Spark identity, the recovery phrase's provenance, and seed replacement live on the
+**Advanced** page.
 
 **Removing** Spark from a store destroys the server's copy of the
 keys and clears the Lightning configuration the plugin wrote — but only if that configuration still points

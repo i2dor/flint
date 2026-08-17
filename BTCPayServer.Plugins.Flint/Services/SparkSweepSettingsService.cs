@@ -174,6 +174,32 @@ public sealed class SparkSweepSettingsService
     }
 
     /// <summary>
+    /// Mempool fee rates, for showing what each confirmation-speed tier roughly pays. Null when the wallet is
+    /// not running or the rates cannot be read — the page renders without them.
+    /// </summary>
+    public async Task<Sdk.SparkRecommendedFees?> ReadRecommendedFeesAsync(
+        string storeId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+
+        var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
+        if (sdk is null)
+            return null;
+
+        try
+        {
+            return await sdk.GetRecommendedFeesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Decoration only: the tiers still render, just without a market rate beside them.
+            _logger.LogDebug(ex, "Store {StoreId}: could not read recommended fees", storeId);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// One page of a store's sweep history, newest first.
     /// </summary>
     /// <remarks>

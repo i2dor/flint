@@ -1,7 +1,7 @@
 @model SparkStatusViewModel
 @{
-    // Destructive, so it is reached from the status page rather than the nav, and keeps that entry lit.
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Remove Flint"));
+    // Destructive, so it is reached from the Advanced page rather than the nav, and keeps that entry lit.
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Advanced, "Remove Flint").SetCategory(SparkNavCategory.Id));
     // A trail back to the plugin root, so the heading below is not the only entry in it. With no parent,
     // TitleHeader synthesises a single crumb equal to the title and prints it twice.
     //
@@ -81,7 +81,7 @@
                     Remove Flint from this store
                 </button>
             </form>
-            <a asp-action="Status" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Cancel</a>
+            <a asp-action="Advanced" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">Cancel</a>
         </div>
     </div>
 </div>

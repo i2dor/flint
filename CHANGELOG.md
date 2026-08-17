@@ -8,6 +8,28 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+A UI pass ahead of publicising the plugin: fewer words, and a page for the things most stores never touch.
+
+### Changed
+
+- **The navigation gained *Deposits* and *Advanced* entries, and now collapses.** The sub-entries render
+  only while you are inside the Flint section, the way core's own store-settings menu behaves, instead of
+  following you around the rest of the store. The status page's "Advanced" accordion is gone — it was not
+  obviously expandable, and it was carrying real pages.
+- **A new Advanced page** holds the recovery phrase's provenance, seed replacement, the Spark identity,
+  the SDK storage path, wallet removal, and the two sweep settings almost nobody should change: the
+  reserve ("Leave behind") and the fee policy ("Take the exit fee out of the swept amount"). All of it
+  moved off the status and sweep pages; nothing changed in what is stored or in the Greenfield API.
+- **The status page now leads with the balance** and the stuck-deposit alert links straight to the
+  Deposits page. The recovery-phrase row, the wallet-details accordion and the removal button moved to
+  Advanced, and the "indicative balance" footnote is gone.
+- **The deposits page stopped printing its title twice** and is reachable from the navigation.
+- **Form notes were cut back across the plugin.** The confirmation-speed field now shows roughly what
+  each tier pays in sat/vB right now, read from the same mempool feed the deposits page uses, instead of
+  a sentence about tiers.
+
 ## [0.1.1] — 2026-08-14
 
 A dependency-only release. No plugin source changed between 0.1.0 and this; the packaged artifact

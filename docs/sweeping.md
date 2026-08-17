@@ -9,8 +9,10 @@ EVM chain.
 
 ## Sweeping to Bitcoin
 
-Under **Plugins → Spark → Sweep settings and history** (also offered as optional step 2 of setup). Off
-until a merchant turns it on.
+Under **Plugins → Flint → Sweeps** (also offered as optional step 2 of setup). Off
+until a merchant turns it on. The reserve ("Leave behind") and the fee policy ("Take the exit fee out of
+the swept amount") live on the **Advanced** page, because their defaults — no reserve, fee taken out of
+the swept amount — are right for almost every store.
 
 **Every sweep is a cooperative exit** — the plugin asks Spark's service providers to build and broadcast a
 Bitcoin transaction. There is no unilateral-exit path in this plugin, in its UI, or anywhere in its code.

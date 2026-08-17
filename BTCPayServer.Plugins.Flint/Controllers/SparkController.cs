@@ -580,7 +580,112 @@ public class SparkController : Controller
             StoreWalletStatus = current.StoreWalletStatus,
             StoreWalletReason = current.StoreWalletReason,
             HistoryTotal = history.Total,
-            History = history.Records
+            History = history.Records,
+            RecommendedFees = await _sweepSettings
+                .ReadRecommendedFeesAsync(storeId, cancellationToken)
+                .ConfigureAwait(false)
+        };
+    }
+
+    #endregion
+
+    #region Advanced
+
+    /// <summary>
+    /// Wallet details, recovery-phrase provenance, the sweep tuning most stores never touch, and removal.
+    /// </summary>
+    /// <remarks>
+    /// A page of its own rather than an accordion on the status page, so a merchant checking their balance
+    /// never has to read past any of it.
+    /// </remarks>
+    [HttpGet("advanced")]
+    public async Task<IActionResult> Advanced([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var status = await _statusReader.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (!status.Configured)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        return View(await BuildAdvancedViewModel(storeId, status, input: null, cancellationToken)
+            .ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Saves the two sweep-tuning fields the Advanced page owns: the reserve and the fee policy.
+    /// </summary>
+    /// <remarks>
+    /// Everything else on the sweep configuration is read back from what is stored and carried through
+    /// unchanged, so this form cannot alter a threshold or a destination it never displayed — and the whole
+    /// merged object still goes through the one validation path both surfaces share.
+    /// </remarks>
+    [HttpPost("advanced/sweep")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> AdvancedSweep(
+        [FromRoute] string storeId,
+        SparkAdvancedViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        if (settings is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var posted = vm.Settings ?? new SweepSettingsInput();
+        var input = SweepSettingsInput.From(settings.Sweep ?? new SweepSettings());
+        input.ReserveSats = posted.ReserveSats;
+        input.DrainWhenSweeping = posted.DrainWhenSweeping;
+
+        var applied = await _sweepSettings.SaveAsync(storeId, input, cancellationToken).ConfigureAwait(false);
+
+        if (applied.Status is SparkSweepSettingsSaveStatus.NotConfigured)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        if (applied.Status is SparkSweepSettingsSaveStatus.Invalid)
+        {
+            foreach (var error in applied.Errors)
+                ModelState.AddModelError($"{nameof(vm.Settings)}.{error.Field}", error.Error);
+
+            var status = await _statusReader.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+            return View("Advanced",
+                await BuildAdvancedViewModel(storeId, status, input, cancellationToken).ConfigureAwait(false));
+        }
+
+        TempData[WellKnownTempData.SuccessMessage] = "Sweep settings saved.";
+        return RedirectToAction(nameof(Advanced), new { storeId });
+    }
+
+    /// <summary>
+    /// Fills in everything the Advanced page shows. <paramref name="input"/> is the merchant's rejected form
+    /// on a re-render, or null to show what is stored.
+    /// </summary>
+    private async Task<SparkAdvancedViewModel> BuildAdvancedViewModel(
+        string storeId,
+        SparkStoreStatus status,
+        SweepSettingsInput? input,
+        CancellationToken cancellationToken)
+    {
+        if (input is null)
+        {
+            var current = await _sweepSettings.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+            input = current.Settings;
+        }
+
+        return new SparkAdvancedViewModel
+        {
+            StoreId = storeId,
+            SeedSource = status.SeedSource,
+            WalletRunning = status.WalletRunning,
+            IdentityPubkey = status.IdentityPubkey,
+            StorageDirectory = status.StorageDirectoryFor(User),
+            Settings = input
         };
     }
 
