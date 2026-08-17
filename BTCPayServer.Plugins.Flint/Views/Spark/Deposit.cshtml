@@ -1,8 +1,12 @@
 @model SparkDepositViewModel
 @{
-    // No nav entry of its own — reached from the status page's Advanced section, so it keeps the top-level
-    // Spark entry lit.
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Spark deposits"));
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Deposits, "Deposits").SetCategory(SparkNavCategory.Id));
+
+    // A trail back to the plugin root. Without one, TitleHeader synthesises a single crumb equal to the title
+    // and prints the heading twice.
+    BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
 
     var view = Model.Deposits;
     var stuck = view.Stuck;
@@ -11,10 +15,6 @@
 
 <div class="sticky-header">
     <vc:title-header />
-    <a id="page-primary" asp-action="Status" asp-route-storeId="@Model.StoreId"
-       class="btn btn-secondary text-nowrap">
-        Back to status
-    </a>
 </div>
 
 <partial name="_StatusMessage" />

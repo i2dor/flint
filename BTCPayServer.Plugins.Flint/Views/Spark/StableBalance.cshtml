@@ -1,6 +1,6 @@
 @model SparkStableBalanceViewModel
 @{
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.StableBalance, "Spark Stable Balance"));
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.StableBalance, "Stable Balance").SetCategory(SparkNavCategory.Id));
 
     // A trail back to the plugin root, so the heading below is not the only entry in it. With no parent,
     // TitleHeader synthesises a single crumb equal to the title and prints it twice.
@@ -16,10 +16,6 @@
 
 <div class="sticky-header">
     <vc:title-header />
-    <a id="page-primary" asp-action="Status" asp-route-storeId="@Model.StoreId"
-       class="btn btn-secondary text-nowrap">
-        Back to status
-    </a>
 </div>
 
 <partial name="_StatusMessage" />
@@ -172,9 +168,6 @@
                 <label asp-for="Settings.Label" class="form-label"></label>
                 <input asp-for="Settings.Label" class="form-control" />
                 <span asp-validation-for="Settings.Label" class="text-danger"></span>
-                <div class="form-text">
-                    A name for the token inside this wallet. It has no meaning to Spark or to anyone else.
-                </div>
             </div>
 
             <div class="form-group">

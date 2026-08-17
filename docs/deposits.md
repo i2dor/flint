@@ -2,7 +2,7 @@
 
 # Funding the wallet on-chain
 
-Under **Plugins → Spark → Deposit address and unclaimed deposits**, also summarised on the status page.
+Under **Plugins → Flint → Deposits**. A stuck deposit is also flagged loudly on the status page.
 
 The wallet has one **static Bitcoin address**. It does not rotate, so save it once and reuse it. Money sent
 to it credits the store's Spark balance after **three confirmations**, at which point the SDK claims it —

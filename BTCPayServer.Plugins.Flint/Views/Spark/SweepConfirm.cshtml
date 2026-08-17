@@ -2,7 +2,7 @@
 @{
     // Reached only from the sweep page, and cancels back to it, so it keeps that nav entry lit rather than
     // appearing to leave the section mid-confirmation.
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Sweeps, "Sweep now"));
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Sweeps, "Sweep now").SetCategory(SparkNavCategory.Id));
     var preview = Model.Preview;
     var quote = preview.Quote;
     var crossChain = preview.CrossChainQuote;

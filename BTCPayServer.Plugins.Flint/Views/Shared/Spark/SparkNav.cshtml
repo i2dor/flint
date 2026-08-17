@@ -8,9 +8,11 @@
 @*
     Injected at "store-integrations-nav": the plugin's section of the store's Plugins navigation.
 
-        Spark             status once configured, setup before that
+        Flint             status once configured, setup before that
           Sweeps          sweep configuration and history
           Stable Balance  mainnet only
+          Deposits        on-chain top-ups and anything stuck
+          Advanced        wallet details and the settings most stores never touch
 
     Core passes a MainNavViewModel here and the store on it is the authoritative id — HttpContext.GetStoreData
     deliberately returns null while the navigation is rendering, so GetCurrentStoreId is only a fallback. See
@@ -22,13 +24,17 @@
     the destination for the same reason — the setup page requires CanModifyStoreSettings, so offering the link
     to a view-only user would only ever produce an access-denied page.
 
-    Only sections live here. Deposits sit in the status page's Advanced accordion because a Spark wallet is
-    funded by customers paying invoices, and removal is a destructive action that belongs next to the state it
-    destroys; promoting either to the nav would undo the previous commit's trimming.
+    Removal has no entry: it is a destructive action reached from the Advanced page, next to the state it
+    destroys.
 *@
 @{
     var storeId = SparkNavStoreId.From(Model) ?? Context.GetCurrentStoreId();
     var configured = !string.IsNullOrEmpty(storeId) && await SparkService.Get(storeId) is not null;
+
+    // The same gate core's store-settings nav uses (ViewData.IsCategory(WellKnownCategories.Store)): every
+    // Flint page stamps this category onto its LayoutModel, so the sub-entries render only while the merchant
+    // is inside the section and the menu collapses to the one top-level entry everywhere else.
+    var expanded = ViewData.IsCategory(SparkNavCategory.Id);
 }
 @if (!string.IsNullOrEmpty(storeId))
 {
@@ -70,14 +76,13 @@
         </a>
     </li>
     @*
-        Sub-entries only once there is a wallet: both pages redirect to setup without one, so before that they
-        are three ways of reaching the same page. Unlike core's store-settings sub-entries these are not gated
-        on ViewData.IsCategory — that gate exists to stop a list of eight entries from following you around the
-        whole store, and two entries that are the point of the request should not hide until you have already
-        found the section. Both destinations are GETs guarded by the controller's class-level
-        CanViewStoreSettings, so the li permission matches what the page will actually allow.
+        Sub-entries only once there is a wallet — every one of these pages redirects to setup without one, so
+        before that they are just more ways of reaching the same page — and only while the merchant is inside
+        the section, so the list does not follow them around the rest of the store. All destinations are GETs
+        guarded by the controller's class-level CanViewStoreSettings, so the li permission matches what the
+        page will actually allow.
     *@
-    @if (configured)
+    @if (configured && expanded)
     {
         <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
             <a layout-menu-item="@SparkNavPages.Sweeps" asp-area="" asp-controller="Spark"
@@ -96,5 +101,17 @@
                 </a>
             </li>
         }
+        <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
+            <a layout-menu-item="@SparkNavPages.Deposits" asp-area="" asp-controller="Spark"
+               asp-action="Deposit" asp-route-storeId="@storeId">
+                <span>Deposits</span>
+            </a>
+        </li>
+        <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
+            <a layout-menu-item="@SparkNavPages.Advanced" asp-area="" asp-controller="Spark"
+               asp-action="Advanced" asp-route-storeId="@storeId">
+                <span>Advanced</span>
+            </a>
+        </li>
     }
 }

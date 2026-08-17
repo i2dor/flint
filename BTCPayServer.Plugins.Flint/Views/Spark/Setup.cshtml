@@ -1,7 +1,7 @@
 @model SparkSetupViewModel
 @{
     var title = Model.AlreadyConfigured ? "Replace the Spark seed" : "Set up Flint";
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, title));
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, title).SetCategory(SparkNavCategory.Id));
 }
 
 <form method="post" asp-action="Setup" asp-route-storeId="@Model.StoreId">
