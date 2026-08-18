@@ -2,7 +2,10 @@
 
 # Funding the wallet on-chain
 
-Under **Plugins → Flint → Deposits**. A stuck deposit is also flagged loudly on the status page.
+Under **Plugins → Flint → Advanced → Deposit address and unclaimed deposits**. Deposits have no navigation
+entry of their own, because a Spark wallet is funded by customers paying invoices — a merchant never needs to
+top it up for the plugin to work. A stuck deposit is flagged loudly on the status page, which links straight
+to this page when there is actually something to claim.
 
 The wallet has one **static Bitcoin address**. It does not rotate, so save it once and reuse it. Money sent
 to it credits the store's Spark balance after **three confirmations**, at which point the SDK claims it —

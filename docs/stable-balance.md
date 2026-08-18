@@ -2,7 +2,7 @@
 
 # Holding the balance in dollars: Stable Balance
 
-Under **Plugins → Spark → Stable Balance**. Off until a merchant turns it on, and **mainnet only** — USDB
+Under **Plugins → Flint → Stable Balance**. Off until a merchant turns it on, and **mainnet only** — USDB
 has no regtest deployment, and the plugin refuses to store the setting elsewhere rather than accepting it
 and silently never converting.
 

@@ -271,7 +271,7 @@ public class SparkController : Controller
         _logger.LogWarning(
             "Store {StoreId}: Spark was set up but sweeping could not be enabled from the setup page: {Reason}",
             storeId, reason);
-        return $"Sweeping was not turned on: {reason} You can set it up on the Spark sweeps page.";
+        return $"Sweeping was not turned on: {reason} You can set it up on the Sweeps page.";
     }
 
     #endregion

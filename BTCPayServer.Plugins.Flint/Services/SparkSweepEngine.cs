@@ -206,6 +206,7 @@ public sealed class SparkSweepEngine
     private readonly CrossChainRouteResolver _routes;
     private readonly ICrossChainValueOracle _valueOracle;
     private readonly TimeProvider _timeProvider;
+    private readonly ISweepTransactionLabeler _transactionLabeler;
     private readonly ILogger<SparkSweepEngine> _logger;
 
     /// <summary>
@@ -221,6 +222,7 @@ public sealed class SparkSweepEngine
         SweepDestinationResolver destinations,
         CrossChainRouteResolver routes,
         ICrossChainValueOracle valueOracle,
+        ISweepTransactionLabeler transactionLabeler,
         TimeProvider timeProvider,
         ILogger<SparkSweepEngine> logger)
     {
@@ -230,6 +232,7 @@ public sealed class SparkSweepEngine
         _destinations = destinations;
         _routes = routes;
         _valueOracle = valueOracle;
+        _transactionLabeler = transactionLabeler;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -1943,6 +1946,12 @@ public sealed class SparkSweepEngine
                 "Store {StoreId}: sweep {IdempotencyKey} resolved as {Status} "
                 + "(fee {FeeSats} sat, txid {TxId})",
                 storeId, record.IdempotencyKey, status, payment.FeeSats, payment.TxId ?? "unknown");
+
+            // The reconciliation path learns the txid from the SDK's payment rather than from the row, so this
+            // covers a sweep whose send raced a crash — the label lands when the fate is finally known. The
+            // write is idempotent, so a Sent row later promoted to Confirmed labels once.
+            if (status is SweepRecordStatus.Sent or SweepRecordStatus.Confirmed && payment.TxId is not null)
+                await _transactionLabeler.LabelAsync(record, payment.TxId, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1994,6 +2003,12 @@ public sealed class SparkSweepEngine
         record.DeliveredAmountBaseUnits = deliveredBaseUnits ?? record.DeliveredAmountBaseUnits;
         record.ProviderOrderId = providerOrderId ?? record.ProviderOrderId;
         record.CompletedAt = now;
+
+        // After the resolution is durable, never before: the label decorates a transaction that happened, and a
+        // labelling failure is logged and swallowed inside the labeler rather than allowed to disturb a sweep
+        // that has already moved money.
+        if (status is SweepRecordStatus.Sent or SweepRecordStatus.Confirmed && txId is not null)
+            await _transactionLabeler.LabelAsync(record, txId, cancellationToken).ConfigureAwait(false);
 
         return new SweepRunResult(kind, reason, record);
     }

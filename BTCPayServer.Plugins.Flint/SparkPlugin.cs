@@ -126,6 +126,10 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // the resolver holds the rules about which mode wins and when to refuse, and is unit-tested against a fake
         // of the source.
         services.AddSingleton<ISweepAddressSource, BTCPayWalletSweepAddressSource>();
+
+        // Labels a sweep's transaction in the store's wallet once its txid is known, so the transactions list
+        // says where the money came from instead of showing an anonymous incoming transaction.
+        services.AddSingleton<ISweepTransactionLabeler, BTCPayWalletSweepTransactionLabeler>();
         services.AddSingleton(provider =>
         {
             // The chain is fixed for the life of the process, so it is resolved once here rather than per sweep.

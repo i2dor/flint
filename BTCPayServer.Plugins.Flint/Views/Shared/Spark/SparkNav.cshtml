@@ -11,7 +11,6 @@
         Flint             status once configured, setup before that
           Sweeps          sweep configuration and history
           Stable Balance  mainnet only
-          Deposits        on-chain top-ups and anything stuck
           Advanced        wallet details and the settings most stores never touch
 
     Core passes a MainNavViewModel here and the store on it is the authoritative id — HttpContext.GetStoreData
@@ -24,8 +23,10 @@
     the destination for the same reason — the setup page requires CanModifyStoreSettings, so offering the link
     to a view-only user would only ever produce an access-denied page.
 
-    Removal has no entry: it is a destructive action reached from the Advanced page, next to the state it
-    destroys.
+    Removal and deposits have no entry. Removal is a destructive action reached from the Advanced page, next
+    to the state it destroys. Deposits are the exception, not a flow: a Spark wallet is funded by customers
+    paying invoices, so manual top-ups live behind the Advanced page — and when a deposit is actually stuck,
+    the status page's alert links straight to them.
 *@
 @{
     var storeId = SparkNavStoreId.From(Model) ?? Context.GetCurrentStoreId();
@@ -101,12 +102,6 @@
                 </a>
             </li>
         }
-        <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
-            <a layout-menu-item="@SparkNavPages.Deposits" asp-area="" asp-controller="Spark"
-               asp-action="Deposit" asp-route-storeId="@storeId">
-                <span>Deposits</span>
-            </a>
-        </li>
         <li class="nav-item nav-item-sub" permission="@Policies.CanViewStoreSettings">
             <a layout-menu-item="@SparkNavPages.Advanced" asp-area="" asp-controller="Spark"
                asp-action="Advanced" asp-route-storeId="@storeId">

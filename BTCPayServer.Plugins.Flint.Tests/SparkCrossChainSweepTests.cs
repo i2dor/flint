@@ -1529,6 +1529,7 @@ public class SparkCrossChainSweepTests
             settings, runtime, records, resolver,
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             oracle,
+            new FakeSweepTransactionLabeler(),
             time, NullLogger<SparkSweepEngine>.Instance);
 
         return new TestHarness(engine, sdk, records, settings, time, log, oracle, runtime);

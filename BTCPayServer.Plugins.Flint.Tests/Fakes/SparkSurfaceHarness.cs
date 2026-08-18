@@ -224,6 +224,7 @@ public sealed class SparkSurfaceHarness
             settings, runtime, sweepRecords, resolver,
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             valueOracle,
+            new FakeSweepTransactionLabeler(),
             TimeProvider.System, NullLogger<SparkSweepEngine>.Instance);
 
         var provisionerLog = new CapturingLogger<SparkStoreProvisioner>();

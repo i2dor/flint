@@ -2,7 +2,7 @@
 
 # Setting a store up
 
-Everything lives under **Plugins → Spark** in the store's navigation, or behind the **Set up Spark**
+Everything lives under **Plugins → Flint** in the store's navigation, or behind the **Set up Flint**
 option on the store's *Connect to a Lightning node* screen. There is one page and no connection string to
 copy: the plugin writes the store's `BTC-LN` and `BTC-LNURL` payment-method configuration itself, so LNURL
 and Lightning addresses work through BTCPay core once setup finishes.

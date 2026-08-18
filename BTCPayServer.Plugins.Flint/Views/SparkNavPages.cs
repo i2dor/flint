@@ -30,10 +30,10 @@ public static class SparkNavPages
     /// <summary>Stable Balance settings. Rendered only where Stable Balance can work — mainnet.</summary>
     public const string StableBalance = "SparkStableBalance";
 
-    /// <summary>On-chain deposits: the address, and anything sent to it that has not been credited.</summary>
-    public const string Deposits = "SparkDeposits";
-
-    /// <summary>Wallet details, recovery-phrase provenance and the settings most stores never touch.</summary>
+    /// <summary>
+    /// Wallet details, recovery-phrase provenance and the settings most stores never touch. The deposits and
+    /// removal pages borrow this entry: both are reached from the Advanced page rather than from the nav.
+    /// </summary>
     public const string Advanced = "SparkAdvanced";
 }
 

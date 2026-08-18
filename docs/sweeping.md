@@ -39,7 +39,10 @@ allowing anything; the form refuses a flat ceiling above the smallest sweep you 
 configured, the plugin will not pay more than half of what a sweep delivers.
 
 **Destinations** default to a fresh, labelled address from the store's own BTC derivation scheme, reserved
-and therefore rotated on every sweep, so sweeps are not all linked to one address on the blockchain. A store
+and therefore rotated on every sweep, so sweeps are not all linked to one address on the blockchain. Once a
+sweep's transaction id is known, the transaction itself is also labelled `flint-sweep` in the store's BTCPay
+wallet — the same mechanism core uses for payouts — so the wallet's transactions list says where the money
+came from. A store
 with no on-chain wallet in BTCPay can set one fixed address instead, validated against this server's chain
 both on save and again before every send. A store set to sweep into its own wallet that has no wallet is
 **refused with a reason** — it never falls back to an address left over from an earlier configuration.

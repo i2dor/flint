@@ -1,11 +1,15 @@
 @model SparkDepositViewModel
 @{
-    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Deposits, "Deposits").SetCategory(SparkNavCategory.Id));
+    // No nav entry of its own: manual top-ups are the exception, not a flow, so the page is reached from the
+    // Advanced section (or from the status page's stuck-deposit alert) and keeps that entry lit.
+    ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Advanced, "Deposits").SetCategory(SparkNavCategory.Id));
 
-    // A trail back to the plugin root. Without one, TitleHeader synthesises a single crumb equal to the title
-    // and prints the heading twice.
+    // A trail back through the section, so the heading is not the only entry in it. Without one, TitleHeader
+    // synthesises a single crumb equal to the title and prints the heading twice.
     BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
         new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
+            Controller: "Spark", RouteValues: new { storeId = Model.StoreId }),
+        new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Advanced", Action: "Advanced",
             Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
 
     var view = Model.Deposits;
