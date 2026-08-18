@@ -62,7 +62,7 @@ install. Every release artifact is signed; the releases page carries `SHA256SUMS
 check both the hash and the signature before you upload anything. Verify them — this plugin holds
 Lightning keys on your server.
 
-Once installed, the plugin appears per-store under **Plugins → Spark**, and as a **Set up Spark** option
+Once installed, the plugin appears per-store under **Plugins → Flint**, and as a **Set up Flint** option
 on the store's *Connect to a Lightning node* screen. It does nothing at all until a store is set up.
 
 **Uninstalling the plugin is not the same as removing Spark from a store.** *Server settings → Plugins →
@@ -73,7 +73,7 @@ see [Setting a store up](docs/store-setup.md) for exactly what that destroys.
 
 ## Getting a store running
 
-1. **[Set the store up](docs/store-setup.md)** — one page under **Plugins → Spark**, one question (where
+1. **[Set the store up](docs/store-setup.md)** — one page under **Plugins → Flint**, one question (where
    the seed comes from). LNURL and Lightning addresses work through BTCPay core the moment it finishes.
 2. **[Turn sweeping on](docs/sweeping.md)** — off until you do, and it is the only thing that bounds how
    much of the store's money depends on the Spark operators. Set the threshold deliberately; the shipped

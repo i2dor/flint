@@ -39,7 +39,8 @@ public class SparkSweepEngineTests
         FakeSparkStoreRuntime Runtime,
         StubTimeProvider Time,
         WriteLog Log,
-        CapturingLogger<SparkSweepEngine> Logger);
+        CapturingLogger<SparkSweepEngine> Logger,
+        FakeSweepTransactionLabeler Labeler);
 
     /// <param name="sweep">
     /// The store's sweep configuration. Defaults to enabled with the shipped defaults, since almost every test is
@@ -63,6 +64,7 @@ public class SparkSweepEngineTests
         var settings = new FakeSparkStoreSettingsStore();
         var time = new StubTimeProvider(Origin);
         var logger = new CapturingLogger<SparkSweepEngine>();
+        var labeler = new FakeSweepTransactionLabeler();
 
         settings.Settings[StoreId] = new SparkSettings
         {
@@ -81,8 +83,8 @@ public class SparkSweepEngineTests
             NullLogger<SweepDestinationResolver>.Instance);
 
         var engine = new SparkSweepEngine(
-            settings, runtime, records, resolver, Routes(), Oracle(), time, logger);
-        return new Harness(engine, sdk, records, addresses, settings, runtime, time, log, logger);
+            settings, runtime, records, resolver, Routes(), Oracle(), labeler, time, logger);
+        return new Harness(engine, sdk, records, addresses, settings, runtime, time, log, logger, labeler);
     }
 
     /// <summary>
@@ -140,6 +142,48 @@ public class SparkSweepEngineTests
 
         // FeesIncluded genuinely drains: the balance lands on exactly the reserve.
         Assert.Equal(50_000, h.Sdk.BalanceSats);
+    }
+
+    [Fact]
+    public async Task A_sweep_labels_its_transaction_in_the_stores_wallet()
+    {
+        // The label is what tells a merchant reading their Bitcoin wallet where the incoming transaction came
+        // from; without it a sweep is money that arrived with no explanation.
+        var h = CreateHarness();
+
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        var labeled = Assert.Single(h.Labeler.Labeled);
+        Assert.Equal(StoreId, labeled.StoreId);
+        Assert.Equal(h.Sdk.NextOnchainTxId, labeled.TxId);
+        Assert.Equal(SweepDestinationKind.BitcoinAddress, labeled.Kind);
+    }
+
+    [Fact]
+    public async Task A_pass_that_sweeps_nothing_labels_nothing()
+    {
+        var h = CreateHarness(balanceSats: 10_000);
+
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        Assert.Empty(h.Labeler.Labeled);
+    }
+
+    [Fact]
+    public async Task A_crash_recovered_sweep_labels_its_transaction()
+    {
+        // The reconciliation path learns the txid from the SDK's payment rather than from the row, so the label
+        // must land there too — a sweep whose send raced a crash is exactly the transaction a merchant will go
+        // looking for.
+        var h = CreateHarness(balanceSats: 10_000);
+        const string key = "5d0a1cf1-2b3e-4b17-9c8a-7f0c2a0f9e21";
+        await h.Records.AddAsync(NewPending(key), Ct);
+        h.Sdk.Seed(CompletedExit(key, 450_000, 2_190));
+
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        var labeled = Assert.Single(h.Labeler.Labeled);
+        Assert.Equal("txid-recovered", labeled.TxId);
     }
 
     [Fact]
@@ -1215,7 +1259,8 @@ public class SparkSweepEngineTests
         var runtime = new FakeSparkStoreRuntime();
         runtime.Clients[StoreId] = h.Sdk;
         var engine = new SparkSweepEngine(
-            h.Settings, runtime, h.Records, resolver, Routes(), Oracle(), h.Time,
+            h.Settings, runtime, h.Records, resolver, Routes(), Oracle(),
+            new FakeSweepTransactionLabeler(), h.Time,
             NullLogger<SparkSweepEngine>.Instance);
 
         var first = engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);

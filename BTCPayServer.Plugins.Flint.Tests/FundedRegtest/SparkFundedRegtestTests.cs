@@ -397,6 +397,7 @@ public class SparkFundedRegtestTests
                 NullLogger<SweepDestinationResolver>.Instance),
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             new FakeCrossChainValueOracle(),
+            new FakeSweepTransactionLabeler(),
             TimeProvider.System,
             NullLogger<SparkSweepEngine>.Instance);
     }

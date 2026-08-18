@@ -8,6 +8,23 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Added
+
+- **Sweeps are labelled in the store's Bitcoin wallet.** Once a sweep's transaction id is known — at send,
+  or when crash reconciliation resolves it — the plugin writes a `flint-sweep` label onto the transaction in
+  the store's BTCPay wallet, the same way core labels payouts and invoices. The wallet's transactions list
+  then says where the money came from, with a tooltip, filterable like any other label. Cross-chain sweeps
+  are not labelled, because their delivery never appears in a Bitcoin wallet.
+
+### Changed
+
+- **Deposits moved off the navigation, behind Advanced.** A Spark wallet is funded by customers paying
+  invoices — no merchant needs to send their own funds in for the plugin to work — so the deposits page is
+  now reached from the Advanced page instead of carrying a top-level entry. The status page still flags a
+  stuck deposit loudly and links straight to the page that fixes it.
+
 ## [0.1.2] — 2026-08-17
 
 A UI pass ahead of publicising the plugin: fewer words, and a page for the things most stores never touch.

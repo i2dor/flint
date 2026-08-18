@@ -77,6 +77,16 @@
             </tbody>
         </table>
 
+        <h3 class="mt-5 mb-3">On-chain deposits</h3>
+        <p class="text-secondary">
+            The wallet is funded by customers paying invoices — it never needs a top-up to work. Deposits
+            exist for the rare store that wants to move its own Bitcoin onto Spark.
+        </p>
+        <a class="btn btn-secondary" asp-action="Deposit" asp-route-storeId="@Model.StoreId"
+           id="SparkDepositLink">
+            Deposit address and unclaimed deposits
+        </a>
+
         <form method="post" asp-action="AdvancedSweep" asp-route-storeId="@Model.StoreId"
               permission="@Policies.CanModifyStoreSettings">
             <h3 class="mt-5 mb-3">Sweep tuning</h3>
