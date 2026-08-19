@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Data;
+using BTCPayServer.Plugins.Flint;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Services;
 using Microsoft.Extensions.Logging;
@@ -57,7 +58,6 @@ public sealed class BTCPayWalletSweepTransactionLabeler : ISweepTransactionLabel
     public async Task LabelAsync(SweepRecord record, string txId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(record);
-        ArgumentException.ThrowIfNullOrEmpty(txId);
 
         // A cross-chain delivery never appears in the store's Bitcoin wallet, so there is no transaction row
         // for a label to decorate — the provider's Spark-side transfer is not an on-chain transaction at all.
@@ -70,6 +70,20 @@ public sealed class BTCPayWalletSweepTransactionLabeler : ISweepTransactionLabel
         if (record.DestinationKind is not SweepDestinationKind.BitcoinAddress)
             return;
 
+        // The txid comes from the Spark provider's payment data — the same class of externally-supplied 32-byte
+        // identifier NormaliseHash guards elsewhere — so it is validated (64 hex chars, canonical lowercase)
+        // before it can become a wallet-object id and a rendered "flint-sweep" provenance label. This also keeps
+        // the best-effort contract total: a malformed id is skipped, never thrown, so it cannot abort a
+        // reconciliation pass or surface after money has moved.
+        var normalizedTxId = SparkLightningClient.NormaliseHash(txId);
+        if (normalizedTxId is null)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: not labelling sweep transaction {TxId}: malformed txid (expected 64 hex chars)",
+                record.StoreId, txId);
+            return;
+        }
+
         try
         {
             // The id makes the sweep findable from the wallet object later; the tooltip is what the merchant
@@ -77,7 +91,7 @@ public sealed class BTCPayWalletSweepTransactionLabeler : ISweepTransactionLabel
             // hand-built root-relative URL would break under a non-root path base.
             await _walletRepository.AddWalletTransactionAttachment(
                     new WalletId(record.StoreId, CryptoCode),
-                    txId,
+                    normalizedTxId,
                     [new Attachment(AttachmentType, record.IdempotencyKey, new JObject { ["tooltip"] = Tooltip })],
                     WalletObjectData.Types.Tx)
                 .ConfigureAwait(false);

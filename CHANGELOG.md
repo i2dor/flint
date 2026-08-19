@@ -8,6 +8,19 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Changed
+
+- **Sweep labels validate the provider's transaction id before writing it to the wallet.** The txid that
+  labels a sweep comes from the Spark provider's payment data, so it is now checked as a well-formed Bitcoin
+  transaction id (64 hex characters) — the same guard the plugin already applies to externally-supplied
+  payment hashes — before it becomes a wallet object and a rendered `flint-sweep` label. A malformed id is
+  skipped and logged, never thrown, keeping the labeler's best-effort contract total: a bad provider value
+  cannot abort a reconciliation pass or attach a false "swept from this store's Spark wallet" provenance
+  label to an unrelated transaction in the store's wallet. Cross-chain deliveries remain unlabelled and skip
+  this check entirely.
+
 ## [0.1.3] — 2026-08-17
 
 ### Added
