@@ -215,18 +215,26 @@ jobs:
     concurrency:
       group: funded-regtest-wallet
       cancel-in-progress: false
-    # ADVISORY, like integration-test, and for the same reason plus two of its own. Beyond depending on a
-    # third-party service, this suite depends on a *wallet with a balance*: it will go red when the CI wallet
-    # runs dry, which is an operations event and not a defect in the pull request that happened to be open at
-    # the time. Blocking merges on the state of a faucet-funded balance would be a bad trade. The suite says so
-    # itself — a drained wallet fails with an instruction to top it up, not an assertion about numbers.
+    # BLOCKING on pull requests, advisory on schedule and push. This is the gate integration-test's comment
+    # proposes but has not yet earned; this job earned it the other way round, by demonstrating the cost of
+    # not having it: the suite ran red for two days behind a green checkmark (a saturated counting window in
+    # the interrupted-sweep test, fixed by #22) and nothing surfaced it until someone happened to open the
+    # Actions tab. On a PR a human is present to judge a failure and re-run a transient one, so there the
+    # job turns the run red like any other test.
     #
-    # What makes it useful anyway is the artefact. This is the only job in the repository that produces the
-    # log output of a *completed* payment, which is the one stated gap in the plugin's log audit and the
-    # open question in SparkLogScrubber's remarks. The preimage assertion inside the suite is a hard one; if the
-    # scrubber ever lets a preimage through, this job reports a real failure with the value in the message.
-    # Someone has to look at the run summary — the same standing caveat integration-test carries.
-    continue-on-error: true
+    # Scheduled and push runs stay advisory because the suite depends on a third-party service and on a
+    # *wallet with a balance*: it goes red when the CI wallet runs dry, which is an operations event and not
+    # a defect in main. A drained wallet fails with an instruction to top it up, not an assertion about
+    # numbers — on a PR, fund the wallet and re-run rather than reading that as a code failure. Fork PRs are
+    # unaffected: without the seed secret the gate below skips the suite and the job passes trivially.
+    #
+    # What makes the job worth watching outside PRs is the artefact. This is the only job in the repository
+    # that produces the log output of a *completed* payment, which is the one stated gap in the plugin's log
+    # audit and the open question in SparkLogScrubber's remarks. The preimage assertion inside the suite is a
+    # hard one; if the scrubber ever lets a preimage through, this job reports a real failure with the value
+    # in the message. On schedule and push runs, someone still has to look at the run summary — the same
+    # standing caveat integration-test carries.
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
