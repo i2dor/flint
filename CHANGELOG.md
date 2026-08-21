@@ -8,10 +8,14 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
-## [Unreleased]
+## [0.1.4] — 2026-08-21
 
 ### Changed
 
+- **The Spark SDK is now 0.22.2**, up from 0.22.0. A patch-range bump with, as with the last bump, no
+  release notes published upstream. No API surface change reached this plugin: the build and every test
+  suite — including the live and funded regtest suites against the real SSP — passed without a single
+  call-site change, and the build ran on both test servers before this release was cut.
 - **Sweep labels validate the provider's transaction id before writing it to the wallet.** The txid that
   labels a sweep comes from the Spark provider's payment data, so it is now checked as a well-formed Bitcoin
   transaction id (64 hex characters) — the same guard the plugin already applies to externally-supplied
