@@ -103,7 +103,19 @@ Full index: **[docs/](docs/README.md)**.
 The reasoning behind each guard is written where the guard is, in the doc comments — every one of them names
 the failure it exists to prevent, and several name a bug this project has already shipped once.
 
-## Licence and attribution
+## AI disclosure
+
+**This codebase is written by AI.** Every line of code and documentation in this repository is
+AI-authored, produced under human direction and review. It is not casually generated, though:
+changes are heavily peer-reviewed by other AI models before they land, and **no release is
+published until it has passed a full security audit by a quorum of three independent models —
+Kimi K3, GLM 5.3 and Grok 4.6** — each reviewing the release separately.
+
+None of this is a substitute for your own judgement. Hold this plugin to the same standard you
+would hold any code that touches money: read the [trust model](docs/trust-model.md), verify the
+release signatures, and start with amounts you can afford to lose.
+
+## License and attribution
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Seth For Privacy.
 
