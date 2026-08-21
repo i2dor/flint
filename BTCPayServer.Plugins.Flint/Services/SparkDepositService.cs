@@ -373,7 +373,16 @@ public sealed class SparkDepositService
         // The identity is read from the cache rather than forced to sync: this runs on a request thread, and a
         // stale identity would only mean a cache miss, never a wrong address.
         var info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
-        var key = (storeId, info.IdentityPubkey ?? string.Empty);
+
+        // No identity, no cache — in either direction. An empty identity is not a wallet identity, it is the
+        // absence of one, and using it as a cache key would make every wallet this store has ever had share
+        // one slot: after a seed change, a request racing the new wallet's first sync would be handed the
+        // previous wallet's deposit address. The SDK itself is always current for this store, so the fallback
+        // is a fresh (idempotent) address read, not a guess.
+        if (string.IsNullOrEmpty(info.IdentityPubkey))
+            return await sdk.GetBitcoinDepositAddressAsync(cancellationToken).ConfigureAwait(false);
+
+        var key = (storeId, info.IdentityPubkey);
 
         if (_addresses.TryGetValue(key, out var cached))
             return cached;

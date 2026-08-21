@@ -88,7 +88,8 @@ public class FileSparkStorageProvider : ISparkStorageProvider
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
         var path = GetStorageDirectory(_dataDirectories.Value.DataDir, storeId);
-        System.IO.Directory.CreateDirectory(path);
+        // Owner-only from the first instant it exists — never created at the umask and restricted afterwards.
+        SparkDirectoryPermissions.CreateOwnerOnly(path);
         // Never throws: a host whose filesystem will not take the mode is a weaker host, not a reason to
         // refuse to run the merchant's wallet. Applied whether or not this call created the directory, which
         // is what hardens an install laid down by an earlier version of the plugin.

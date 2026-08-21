@@ -152,6 +152,19 @@ public sealed class SparkSweepEngine
     internal static readonly TimeSpan UnresolvedGrace = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// How long a balance shortfall may keep a write-off candidate blocking before it is written off anyway.
+    /// </summary>
+    /// <remarks>
+    /// The shortfall gate reads "no payment under the key, and less balance than the sweep would have sent" as
+    /// a possible accepted-but-unrecorded exit, and blocks. But the same observation is produced by any other
+    /// spend — a Lightning payout, a Stable Balance conversion — happening near a sweep that genuinely never
+    /// went out, and an unbounded gate would wedge the store's sweeping permanently on that coincidence, with
+    /// no operator escape short of removing Spark. An hour is many passes, each with a forced sync and a fresh
+    /// point lookup; an exit the SDK still has not surfaced after that is no longer the likely explanation.
+    /// </remarks>
+    internal static readonly TimeSpan ShortfallWriteOffAge = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// How far back the crash-recovery walk looks.
     /// </summary>
     /// <remarks>
@@ -1253,8 +1266,12 @@ public sealed class SparkSweepEngine
                     asset, string.Join(", ", UsdStablecoins)));
         }
 
-        // What arrives, in dollars.
+        // What arrives, in dollars. Null means the number did not fit a decimal — a value this method cannot
+        // check is a quote it must refuse, not wave through: treating "too large to convert" as "nothing to
+        // check" would exempt exactly the absurdly-sized quotes this guard exists to catch.
         var deliveredUsd = ToDecimal(quote.EstimatedOut, quote.Route.Decimals);
+        if (deliveredUsd is null)
+            return UnverifiableValueRefusal(quote.EstimatedOut, quote.Route.Decimals, "deliver");
         if (deliveredUsd <= 0)
             return null; // Already refused by the quote-shape check.
 
@@ -1263,7 +1280,10 @@ public sealed class SparkSweepEngine
         {
             case SparkSendAmount.Token token:
                 // Both sides are USD-pegged, so no price is needed and none is fetched.
-                debitedUsd = ToDecimal(token.BaseUnits, token.Decimals);
+                var debited = ToDecimal(token.BaseUnits, token.Decimals);
+                if (debited is null)
+                    return UnverifiableValueRefusal(token.BaseUnits, token.Decimals, "take out of the wallet");
+                debitedUsd = debited.Value;
                 break;
 
             case SparkSendAmount.Bitcoin:
@@ -1304,15 +1324,24 @@ public sealed class SparkSweepEngine
             debitedUsd, deliveredUsd, lossPercent, MaxCrossChainValueLossPercent));
     }
 
-    private static decimal ToDecimal(BigInteger baseUnits, uint decimals)
+    private static SweepRefusal UnverifiableValueRefusal(BigInteger baseUnits, uint decimals, string direction) =>
+        new(SweepRefusalCode.CrossChainValueUnverifiable, string.Format(
+            CultureInfo.InvariantCulture,
+            "This quote would {0} an amount ({1} base units at {2} decimals) too large for this plugin to "
+            + "convert to a dollar value, so it cannot be checked for sane pricing and nothing was sent.",
+            direction, baseUnits, decimals));
+
+    private static decimal? ToDecimal(BigInteger baseUnits, uint decimals)
     {
         var scale = BigInteger.Pow(10, (int)Math.Min(decimals, 28));
         var whole = BigInteger.DivRem(baseUnits, scale, out var fraction);
 
-        // Guarded against decimal overflow, which an 18-decimal token reaches for quite ordinary sums. A value
-        // that does not fit is not a value this can check, and returning zero makes the caller refuse.
+        // Guarded against decimal overflow, which an 18-decimal token reaches for quite ordinary sums. Null,
+        // not zero: zero already means "the quote-shape check refused this before we got here", and a caller
+        // reading an overflowed value as zero would skip its check exactly when the number is at its most
+        // absurd. Callers must refuse on null.
         if (whole > new BigInteger(decimal.MaxValue / 2))
-            return 0m;
+            return null;
 
         return (decimal)whole + ((decimal)fraction / (decimal)scale);
     }
@@ -1582,6 +1611,9 @@ public sealed class SparkSweepEngine
 
         SweepRecord? blocking = null;
         var refundNeeded = false;
+        // Set by the first write-off candidate, once per pass: the balance after an explicit SyncWallet, which
+        // is what the write-off gate below compares against. Null means no candidate has forced a sync yet.
+        long? syncedBalance = null;
         foreach (var record in records)
         {
             SparkPayment? payment;
@@ -1606,6 +1638,52 @@ public sealed class SparkSweepEngine
                 continue;
             }
 
+            if (payment is null && record.IsInFlight && now - record.CreatedAt >= UnresolvedGrace)
+            {
+                // This row is a write-off candidate, and the write-off below is the one decision in this pass
+                // that can unblock a re-sweep — so it may not run on stale storage. The null above was read
+                // before any sync, and an SSP-accepted exit the SDK has not replayed locally yet looks exactly
+                // like "never sent". One explicit sync per pass (GetInfo(ensureSynced) alone was observed
+                // staying stale; see the class remarks), then the lookup is repeated. A sync or re-read
+                // failure keeps the row blocking: refusing to sweep is always the safe direction.
+                if (syncedBalance is null)
+                {
+                    try
+                    {
+                        await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
+                        var info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken)
+                            .ConfigureAwait(false);
+                        syncedBalance = info.BalanceSats;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Store {StoreId}: could not sync the Spark wallet to confirm sweep "
+                            + "{IdempotencyKey} was never sent; keeping it blocking",
+                            storeId, record.IdempotencyKey);
+                        blocking ??= record;
+                        continue;
+                    }
+                }
+
+                try
+                {
+                    payment = record.IdempotencyKeyAccepted
+                        ? await sdk.GetPaymentAsync(record.IdempotencyKey, cancellationToken)
+                            .ConfigureAwait(false)
+                        : await ResolveByQuoteIdAsync(storeId, sdk, record, cancellationToken)
+                            .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: could not re-read sweep {IdempotencyKey} after a sync",
+                        storeId, record.IdempotencyKey);
+                    blocking ??= record;
+                    continue;
+                }
+            }
+
             if (payment is null)
             {
                 if (!record.IsInFlight)
@@ -1617,6 +1695,43 @@ public sealed class SparkSweepEngine
                     continue;
                 }
 
+                // The last gate before the write-off, for the rows whose send would have debited sats: if the
+                // synced balance no longer holds what this sweep would have sent, "no payment under the key"
+                // stops being evidence of "never sent" and starts looking like an accepted exit the SDK has
+                // not recorded — the one case where closing the row and re-planning would send real money
+                // twice. The gate is bounded rather than absolute, because a shortfall is not proof: this
+                // engine is not the store's only spender — Lightning payouts and Stable Balance conversions
+                // both debit sats with no sweep record, and a sweep's amount is close enough to the whole
+                // balance that any of them trips the comparison. An unbounded refusal would turn one payout
+                // into a permanently wedged store with no operator escape short of removing Spark. So the row
+                // blocks for ShortfallWriteOffAge — enough passes and forced syncs that an accepted exit
+                // still absent from local storage is no longer the likely explanation — and then falls
+                // through to a write-off whose reason says exactly what was observed. Token-funded rows are
+                // not gated: their amount is not in sats, and their write-off never re-sends.
+                var shortfall = record.IdempotencyKeyAccepted && syncedBalance < record.AmountSats;
+                if (shortfall && now - record.CreatedAt < ShortfallWriteOffAge)
+                {
+                    _logger.LogError(
+                        "Store {StoreId}: sweep {IdempotencyKey} has no payment record, but the synced balance "
+                        + "({BalanceSats} sat) is below the {AmountSats} sat it would have sent — refusing to "
+                        + "write it off as never sent, because the shortfall suggests it was. The store stays "
+                        + "blocked until the payment surfaces or the sweep is {Age} old; check the wallet's "
+                        + "history and the destination in the meantime",
+                        storeId, record.IdempotencyKey, syncedBalance, record.AmountSats, ShortfallWriteOffAge);
+                    blocking ??= record;
+                    continue;
+                }
+
+                if (shortfall)
+                {
+                    _logger.LogWarning(
+                        "Store {StoreId}: writing off sweep {IdempotencyKey} despite a balance shortfall — it "
+                        + "is {Age} old, every pass since its grace expired has synced and found no payment, "
+                        + "and other spenders (payouts, Stable Balance) can explain the shortfall. Verify the "
+                        + "wallet history against the sweep history",
+                        storeId, record.IdempotencyKey, now - record.CreatedAt);
+                }
+
                 // Worded as what is known rather than as a conclusion. That the SDK would replay a service-provider
                 // -accepted transfer into its own storage after a crash and reconnect is an assumption, and the
                 // spike lists it as unverified — so "Spark has no record of this" is honest and "it was never sent"
@@ -1626,7 +1741,13 @@ public sealed class SparkSweepEngine
                 // this record's provider quote id, and a send whose persistence step never completed might not
                 // be in that history at all. So the row is closed and the store is unblocked, but the sentence
                 // does not claim the money is safe — and, crucially, nothing re-sends it.
-                var reason = record.IdempotencyKeyAccepted
+                var reason = shortfall
+                    ? "Spark has no record of this sweep, but the wallet held less than the sweep would have "
+                      + "sent when it was checked, so sweeping was blocked for an hour of re-checks before "
+                      + "this was written off. Most likely another spend — a payout, or a Stable Balance "
+                      + "conversion — moved the balance and nothing was sent, but verify the wallet's payment "
+                      + "history and the destination address before assuming so."
+                    : record.IdempotencyKeyAccepted
                     ? "Spark has no record of this sweep. Most likely nothing was sent and the balance is still "
                       + "on the Spark wallet, in which case the next pass will try again — but check the Spark "
                       + "balance against your sweep history before assuming so."

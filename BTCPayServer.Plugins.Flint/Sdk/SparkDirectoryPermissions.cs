@@ -24,6 +24,33 @@ namespace BTCPayServer.Plugins.Flint.Sdk;
 /// </remarks>
 internal static class SparkDirectoryPermissions
 {
+    private const UnixFileMode OwnerOnly =
+        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    /// <summary>
+    /// Creates <paramref name="directory"/> owner-only from the first instant it exists.
+    /// </summary>
+    /// <remarks>
+    /// The mode is passed to the creation itself rather than applied afterwards, because "afterwards" is a
+    /// window: a directory created at the process umask and then restricted spends its first moments at 0755,
+    /// and what lands in it during those moments was readable. A umask can only clear bits from 0700, never
+    /// add them, so the result is owner-only regardless of the host's umask. Creating a directory that already
+    /// exists changes nothing — pair with <see cref="RestrictToOwner"/> where a pre-existing directory from an
+    /// older plugin version needs hardening too.
+    /// </remarks>
+    internal static void CreateOwnerOnly(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // Same posture as RestrictToOwner: directory ACLs on Windows are a different mechanism with
+            // different defaults, and the plugin makes no claim about them.
+            Directory.CreateDirectory(directory);
+            return;
+        }
+
+        Directory.CreateDirectory(directory, OwnerOnly);
+    }
+
     /// <summary>
     /// Makes <paramref name="directory"/> owner-only, so far as the platform allows.
     /// </summary>
@@ -53,9 +80,7 @@ internal static class SparkDirectoryPermissions
 
         try
         {
-            File.SetUnixFileMode(
-                directory,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(directory, OwnerOnly);
         }
         catch (Exception ex)
         {

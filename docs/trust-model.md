@@ -32,7 +32,9 @@ can save it on *another* store on the same server and drive this store's wallet 
 and spend from it. The embedded store id binds the key to a wallet; it does not bind the string to the store
 it was saved on, because BTCPay's `ILightningConnectionStringHandler` never tells a handler which store is
 being configured. This is the same property an LND macaroon has, with one difference worth knowing: the
-plugin generated this credential for you rather than you choosing to issue it, and it is **not rotated** when
-Spark is re-provisioned, so it outlives the access of whoever saw it and is invalidated only by removing
-Spark from the store and setting it up again. Treat it like a macaroon, and keep the sweep threshold low
-enough that the balance it could reach is a balance you can afford to lose.
+plugin generated this credential for you rather than you choosing to issue it. It **is rotated on every
+provision** — setting Spark up again (same seed or a new one) mints a fresh key and rewrites the store's
+Lightning configuration with it, invalidating every copy of the old string — so a leaked string is revoked
+by re-running setup, without waiting for a removal. Between provisions it never expires. Treat it like a
+macaroon, and keep the sweep threshold low enough that the balance it could reach is a balance you can
+afford to lose.

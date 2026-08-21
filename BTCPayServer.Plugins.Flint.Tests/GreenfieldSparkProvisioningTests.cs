@@ -361,8 +361,11 @@ public class GreenfieldSparkProvisioningTests
         Assert.Equal(400_000, sweep.BalanceThresholdSats);
         Assert.Equal(1.25, sweep.MaxFeePercent);
 
-        // And the payment key is kept rather than rotated, so a Lightning configuration already written stays valid.
-        Assert.Equal(SparkSurfaceHarness.VictimPaymentKey, h.Settings.Settings[Store]!.PaymentKey);
+        // And the payment key is rotated, not kept: the connection string is a bearer spend credential, and a
+        // re-provision that left every previously issued copy able to drive the new wallet would quietly
+        // defeat the reset. The Lightning wiring is rewritten with the new key in the same operation.
+        Assert.NotEqual(SparkSurfaceHarness.VictimPaymentKey, h.Settings.Settings[Store]!.PaymentKey);
+        Assert.False(string.IsNullOrEmpty(h.Settings.Settings[Store]!.PaymentKey));
     }
 
     [Fact]

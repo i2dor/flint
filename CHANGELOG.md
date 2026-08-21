@@ -8,6 +8,62 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Security
+
+Findings from the v0.1.4 external security review (a three-model quorum over the release tag), each verified
+against the source before fixing:
+
+- **A sweep write-off can no longer unblock a re-sweep on stale storage.** After the five-minute grace, a
+  pending sweep the SDK had no payment for was written off as never sent — but that lookup ran before the
+  pass's forced sync, and an SSP-accepted exit the SDK had not replayed locally yet looks exactly like
+  "never sent". The write-off now forces an explicit wallet sync and repeats the lookup first, and for
+  sats-funded rows it additionally refuses to close the row while the synced balance no longer holds the
+  amount the sweep would have sent — the shape that suggests the exit actually happened. A row the gate
+  refuses keeps blocking new sweeps, which is the safe direction.
+- **A cross-chain send now checks the provider's echoed recipient against the requested destination.** The
+  prepared payment's recipient is an echo from the provider, and every guard downstream is amount-shaped —
+  none of them would have noticed the money going to the right chain at the wrong address. A mismatch
+  refuses the send.
+- **The cross-chain value guard refuses amounts too large to value, instead of skipping itself.** The
+  base-unit-to-dollar conversion reported an overflowing value as zero, and the guard read zero as "already
+  refused upstream" — so the most absurdly sized quotes were exactly the ones that bypassed the value check.
+  Overflow is now an explicit refusal.
+- **The payment key is rotated on every provision.** The connection string is a bearer spend credential;
+  re-provisioning previously carried the old key over, so every previously issued copy of the string could
+  drive the new wallet. Setting Spark up again now mints a fresh key and rewrites the store's Lightning
+  configuration with it in the same operation — which also makes re-running setup the way to revoke a
+  leaked string.
+- **A wallet that has not reported its identity yet bypasses the deposit-address cache.** The cache was
+  keyed on an empty identity like any other, so after a seed change a request racing the new wallet's first
+  sync could be handed the previous wallet's deposit address. An unknown identity now always fetches a live
+  address and caches nothing.
+- **The plugin's directories are owner-only from the instant they exist.** Storage and log directories were
+  created at the process umask (0755) and restricted to 0700 afterwards, leaving a window in which what
+  landed there was world-readable; the mode is now passed to the creation itself, and the storage lock file
+  is created owner-only too.
+
+Two follow-ups from the quorum's review of the fixes themselves:
+
+- **The write-off shortfall gate is bounded, not absolute.** The gate's observation — funds missing with no
+  payment record — is also produced by a Lightning payout or a Stable Balance conversion landing near a
+  sweep that genuinely never went out, and sweeps are close enough to the whole balance that any spend trips
+  it. Unbounded, that coincidence would wedge the store's sweeping permanently with no operator escape; the
+  gate now blocks for an hour of synced re-checks and then writes the row off with a reason stating exactly
+  what was observed and what to verify.
+- **A provisioning rollback now also covers a throwing Lightning-configuration write.** With the key
+  rotating, settings carrying a new key beside a configuration still holding the old string is a store whose
+  checkout fails; a throw out of the wiring write now restores the previous settings the same way a refused
+  write always did. A process crash inside that window is still detectable and repairable from the status
+  page, which inspects the wiring against the stored key.
+
+### Changed
+
+- **The Spark SDK is now 0.22.3**, up from 0.22.2, on the review's recommendation: the one upstream change
+  ("stop cross-chain sends claiming their own outgoing transfer") is an accounting fix directly on the
+  cross-chain rail this plugin uses.
+
 ## [0.1.4] — 2026-08-21
 
 ### Changed

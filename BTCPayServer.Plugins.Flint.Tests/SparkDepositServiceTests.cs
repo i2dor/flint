@@ -288,6 +288,36 @@ public class SparkDepositServiceTests
         Assert.Equal(h.Sdk.DepositAddress, view.Address);
     }
 
+    /// <summary>
+    /// A wallet that has not reported its identity yet gets a live address, never a cached one.
+    /// </summary>
+    /// <remarks>
+    /// An empty identity is the absence of a cache key, not a cache key: keyed on it, every wallet this store
+    /// has ever had would share one slot, and a request racing a new wallet's first sync after a seed change
+    /// would be handed the previous wallet's address — a merchant top-up sent to a wallet the plugin may no
+    /// longer hold the seed for. The SDK client is always the store's current wallet, so the fallback is a
+    /// fresh read on every call until the identity is known.
+    /// </remarks>
+    [Fact]
+    public async Task An_unknown_wallet_identity_bypasses_the_address_cache_in_both_directions()
+    {
+        var h = Harness();
+
+        // The previous wallet cached its address under an empty identity...
+        h.Sdk.IdentityPubkey = "";
+        h.Sdk.DepositAddress = "bc1poldwalletaddress00000000000000000000000000000000000000000000";
+        var first = await h.Service.ReadAsync(StoreId, Ct);
+        Assert.Equal(h.Sdk.DepositAddress, first.Address);
+
+        // ...and the new wallet, identity still unknown, must not be handed it.
+        h.Sdk.DepositAddress = "bc1pnewwalletaddress00000000000000000000000000000000000000000000";
+        var second = await h.Service.ReadAsync(StoreId, Ct);
+
+        Assert.Equal(h.Sdk.DepositAddress, second.Address);
+        // Two reads, two round trips: nothing was written into the cache under the empty key either.
+        Assert.Equal(2, h.Log.Entries.Count(e => e == "sdk:deposit-address"));
+    }
+
     #endregion
 
     #region Claiming
