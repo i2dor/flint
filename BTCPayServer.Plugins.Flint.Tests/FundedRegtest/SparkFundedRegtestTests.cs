@@ -274,9 +274,9 @@ public class SparkFundedRegtestTests
     /// then hand the store to a fresh engine and let its recovery walk find the payment.
     /// </para>
     /// <para>
-    /// <b>The assertion that matters is the negative one.</b> Recovery must resolve, never re-send. The store's
-    /// payment history is counted before and after, and the resolved row must point at the payment that already
-    /// existed rather than at a second one.
+    /// <b>The assertion that matters is the negative one.</b> Recovery must resolve, never re-send. The wallet's
+    /// withdrawal ids are snapshotted before and after, and the only id allowed to appear between the two is the
+    /// staged send's own — the resolved row must point at the payment that already existed, not at a second one.
     /// </para>
     /// <para>
     /// The engine's threshold is set above the balance so its only possible action is the recovery walk. A
@@ -311,7 +311,7 @@ public class SparkFundedRegtestTests
             },
             Ct);
 
-        var before = await CountWithdrawalsAsync();
+        var before = await ListWithdrawalIdsAsync();
 
         // ...and then the crash, immediately after the SSP accepted. Out of band on purpose: the engine must
         // never learn about this send from anything except the key on the row.
@@ -358,13 +358,19 @@ public class SparkFundedRegtestTests
         Assert.Null(resolved.Error);
         Assert.Equal(send.Payment.TxId, resolved.TxId);
 
-        // The negative. One record in the store, and exactly one new withdrawal on the wallet.
+        // The negative. One record in the store, and exactly one new withdrawal on the wallet — the staged
+        // send itself, identified by the payment id the SDK minted from the idempotency key.
         Assert.Single(records.Records);
-        var after = await CountWithdrawalsAsync();
+        var after = await ListWithdrawalIdsAsync();
+        var appeared = after.Except(before).OrderBy(id => id).ToList();
         Assert.True(
-            after == before + 1,
-            $"recovery re-sent: the wallet had {before} withdrawals before the staged send and {after} after "
-            + $"the recovery pass, where it should have {before + 1}. A second cooperative exit is real money.");
+            appeared.Contains(send.Payment.SdkPaymentId),
+            $"the staged send ({send.Payment.SdkPaymentId}) never appeared in the wallet's withdrawal listing, "
+            + "so the recovery pass resolved a payment the wallet does not show.");
+        Assert.True(
+            appeared.Count == 1,
+            $"recovery re-sent: withdrawals [{string.Join(", ", appeared)}] appeared where only the staged send "
+            + $"({send.Payment.SdkPaymentId}) should have. A second cooperative exit is real money.");
     }
 
     /// <summary>
@@ -409,11 +415,23 @@ public class SparkFundedRegtestTests
         return await _wallet.SyncBalanceAsync(Ct);
     }
 
-    private async Task<int> CountWithdrawalsAsync()
+    /// <summary>
+    /// The payment ids of the newest withdrawals on the wallet, for a before/after diff.
+    /// </summary>
+    /// <remarks>
+    /// Ids, not a count: the funded wallet's send history outgrew the listing window long ago, so every new
+    /// withdrawal pushes an old one off the end and a count over the window never moves. The window is
+    /// newest-first, which is the one property the diff needs — a withdrawal made between two calls is always
+    /// inside it.
+    /// </remarks>
+    private async Task<IReadOnlySet<string>> ListWithdrawalIdsAsync()
     {
         var payments = await _wallet.Sdk.ListPaymentsAsync(
             new SparkListPaymentsQuery(SparkPaymentDirection.Send, Limit: 200), Ct);
-        return payments.Count(p => p.Method is SparkPaymentMethod.Withdraw);
+        return payments
+            .Where(p => p.Method is SparkPaymentMethod.Withdraw)
+            .Select(p => p.SdkPaymentId)
+            .ToHashSet();
     }
 
     /// <summary>
