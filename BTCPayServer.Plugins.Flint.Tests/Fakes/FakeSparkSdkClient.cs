@@ -99,11 +99,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         return Task.FromResult(new SparkNodeInfo(IdentityPubkey, BalanceSats, TokenBalances.ToList()));
     }
 
+    /// <summary>
+    /// Runs inside <see cref="SyncWalletAsync"/>, after the count. What a real sync does — surface a payment
+    /// the wallet had not stored yet, move the balance — a test expresses here; a thrown exception is a sync
+    /// that failed.
+    /// </summary>
+    public Action<FakeSparkSdkClient>? OnSync { get; set; }
+
     public Task SyncWalletAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
         SyncCount++;
         _writeLog?.Record("sdk:sync");
+        OnSync?.Invoke(this);
         return Task.CompletedTask;
     }
 

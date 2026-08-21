@@ -1253,8 +1253,12 @@ public sealed class SparkSweepEngine
                     asset, string.Join(", ", UsdStablecoins)));
         }
 
-        // What arrives, in dollars.
+        // What arrives, in dollars. Null means the number did not fit a decimal — a value this method cannot
+        // check is a quote it must refuse, not wave through: treating "too large to convert" as "nothing to
+        // check" would exempt exactly the absurdly-sized quotes this guard exists to catch.
         var deliveredUsd = ToDecimal(quote.EstimatedOut, quote.Route.Decimals);
+        if (deliveredUsd is null)
+            return UnverifiableValueRefusal(quote.EstimatedOut, quote.Route.Decimals, "deliver");
         if (deliveredUsd <= 0)
             return null; // Already refused by the quote-shape check.
 
@@ -1263,7 +1267,10 @@ public sealed class SparkSweepEngine
         {
             case SparkSendAmount.Token token:
                 // Both sides are USD-pegged, so no price is needed and none is fetched.
-                debitedUsd = ToDecimal(token.BaseUnits, token.Decimals);
+                var debited = ToDecimal(token.BaseUnits, token.Decimals);
+                if (debited is null)
+                    return UnverifiableValueRefusal(token.BaseUnits, token.Decimals, "take out of the wallet");
+                debitedUsd = debited.Value;
                 break;
 
             case SparkSendAmount.Bitcoin:
@@ -1304,15 +1311,24 @@ public sealed class SparkSweepEngine
             debitedUsd, deliveredUsd, lossPercent, MaxCrossChainValueLossPercent));
     }
 
-    private static decimal ToDecimal(BigInteger baseUnits, uint decimals)
+    private static SweepRefusal UnverifiableValueRefusal(BigInteger baseUnits, uint decimals, string direction) =>
+        new(SweepRefusalCode.CrossChainValueUnverifiable, string.Format(
+            CultureInfo.InvariantCulture,
+            "This quote would {0} an amount ({1} base units at {2} decimals) too large for this plugin to "
+            + "convert to a dollar value, so it cannot be checked for sane pricing and nothing was sent.",
+            direction, baseUnits, decimals));
+
+    private static decimal? ToDecimal(BigInteger baseUnits, uint decimals)
     {
         var scale = BigInteger.Pow(10, (int)Math.Min(decimals, 28));
         var whole = BigInteger.DivRem(baseUnits, scale, out var fraction);
 
-        // Guarded against decimal overflow, which an 18-decimal token reaches for quite ordinary sums. A value
-        // that does not fit is not a value this can check, and returning zero makes the caller refuse.
+        // Guarded against decimal overflow, which an 18-decimal token reaches for quite ordinary sums. Null,
+        // not zero: zero already means "the quote-shape check refused this before we got here", and a caller
+        // reading an overflowed value as zero would skip its check exactly when the number is at its most
+        // absurd. Callers must refuse on null.
         if (whole > new BigInteger(decimal.MaxValue / 2))
-            return 0m;
+            return null;
 
         return (decimal)whole + ((decimal)fraction / (decimal)scale);
     }
@@ -1582,6 +1598,9 @@ public sealed class SparkSweepEngine
 
         SweepRecord? blocking = null;
         var refundNeeded = false;
+        // Set by the first write-off candidate, once per pass: the balance after an explicit SyncWallet, which
+        // is what the write-off gate below compares against. Null means no candidate has forced a sync yet.
+        long? syncedBalance = null;
         foreach (var record in records)
         {
             SparkPayment? payment;
@@ -1606,6 +1625,52 @@ public sealed class SparkSweepEngine
                 continue;
             }
 
+            if (payment is null && record.IsInFlight && now - record.CreatedAt >= UnresolvedGrace)
+            {
+                // This row is a write-off candidate, and the write-off below is the one decision in this pass
+                // that can unblock a re-sweep — so it may not run on stale storage. The null above was read
+                // before any sync, and an SSP-accepted exit the SDK has not replayed locally yet looks exactly
+                // like "never sent". One explicit sync per pass (GetInfo(ensureSynced) alone was observed
+                // staying stale; see the class remarks), then the lookup is repeated. A sync or re-read
+                // failure keeps the row blocking: refusing to sweep is always the safe direction.
+                if (syncedBalance is null)
+                {
+                    try
+                    {
+                        await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
+                        var info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken)
+                            .ConfigureAwait(false);
+                        syncedBalance = info.BalanceSats;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Store {StoreId}: could not sync the Spark wallet to confirm sweep "
+                            + "{IdempotencyKey} was never sent; keeping it blocking",
+                            storeId, record.IdempotencyKey);
+                        blocking ??= record;
+                        continue;
+                    }
+                }
+
+                try
+                {
+                    payment = record.IdempotencyKeyAccepted
+                        ? await sdk.GetPaymentAsync(record.IdempotencyKey, cancellationToken)
+                            .ConfigureAwait(false)
+                        : await ResolveByQuoteIdAsync(storeId, sdk, record, cancellationToken)
+                            .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: could not re-read sweep {IdempotencyKey} after a sync",
+                        storeId, record.IdempotencyKey);
+                    blocking ??= record;
+                    continue;
+                }
+            }
+
             if (payment is null)
             {
                 if (!record.IsInFlight)
@@ -1613,6 +1678,26 @@ public sealed class SparkSweepEngine
 
                 if (now - record.CreatedAt < UnresolvedGrace)
                 {
+                    blocking ??= record;
+                    continue;
+                }
+
+                // The last gate before the write-off, for the rows whose send would have debited sats: if the
+                // synced balance no longer holds what this sweep would have sent, "no payment under the key"
+                // stops being evidence of "never sent" and starts looking like an accepted exit the SDK has
+                // not recorded — the one case where closing the row and re-planning would send real money
+                // twice. Receives only ever raise the balance and this engine is the store's only spender, so
+                // a shortfall here is not explainable by ordinary traffic. The row keeps blocking until the
+                // payment surfaces or an operator intervenes. Token-funded rows are not gated — their amount
+                // is not in sats — but their write-off never re-sends, so the hazard this guards is absent.
+                if (record.IdempotencyKeyAccepted && syncedBalance < record.AmountSats)
+                {
+                    _logger.LogError(
+                        "Store {StoreId}: sweep {IdempotencyKey} has no payment record, but the synced balance "
+                        + "({BalanceSats} sat) is below the {AmountSats} sat it would have sent — refusing to "
+                        + "write it off as never sent, because the shortfall suggests it was. The store stays "
+                        + "blocked; check the wallet's history and the destination before intervening",
+                        storeId, record.IdempotencyKey, syncedBalance, record.AmountSats);
                     blocking ??= record;
                     continue;
                 }

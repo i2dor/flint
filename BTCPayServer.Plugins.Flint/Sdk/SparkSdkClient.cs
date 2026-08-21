@@ -698,6 +698,17 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 + "than a cross-chain address; refusing to send.");
         }
 
+        // The prepared payment's recipient is an echo from the provider, and every guard downstream of here is
+        // amount-shaped — none of them would notice the money going to the right chain at the wrong address.
+        // Case-insensitive because the request may carry an EIP-55 mixed-case address and the echo a lowercased
+        // one: those are the same account, and a checksum-only difference is not a redirection.
+        if (!string.Equals(crossChain.recipientAddress, recipientAddress, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Spark prepared this cross-chain send for {crossChain.recipientAddress}, which is not the "
+                + "destination that was requested; refusing to send.");
+        }
+
         var context = crossChain.providerContext as CrossChainProviderContext.Orchestra;
 
         return (prepared, new SparkCrossChainQuote(

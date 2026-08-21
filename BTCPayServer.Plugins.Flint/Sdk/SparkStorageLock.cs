@@ -73,15 +73,24 @@ internal sealed class SparkStorageLock : IDisposable
         reason = null;
         try
         {
-            Directory.CreateDirectory(directory);
+            // Owner-only at creation, matching the storage provider that hardens this same directory: the lock
+            // is usually the first thing to create it, and a directory born at the umask is world-listable
+            // until the provider's retroactive pass reaches it.
+            SparkDirectoryPermissions.CreateOwnerOnly(directory);
 
-            var stream = new FileStream(
-                path,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None,
-                bufferSize: 1,
-                FileOptions.None);
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.OpenOrCreate,
+                Access = FileAccess.ReadWrite,
+                Share = FileShare.None,
+                BufferSize = 1
+            };
+            // The note inside is only a pid and a timestamp, but there is no reason for the file to be more
+            // readable than the directory it sits in. Windows keeps its own defaults, as everywhere else.
+            if (!OperatingSystem.IsWindows())
+                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+            var stream = new FileStream(path, options);
 
             try
             {

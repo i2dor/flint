@@ -1224,6 +1224,69 @@ public class SparkSweepEngineTests
     }
 
     [Fact]
+    public async Task A_write_off_is_refused_when_the_synced_balance_no_longer_holds_the_sweeps_amount()
+    {
+        // The row says 450k sat should still be in the wallet if nothing was sent; the synced balance says
+        // 400k. "No payment under the key" plus a shortfall is the accepted-but-unrecorded shape — the one
+        // case where closing the row and re-planning would send real money twice — so the store stays blocked.
+        var h = CreateHarness(balanceSats: 400_000);
+        const string key = "5d0a1cf1-2b3e-4b17-9c8a-7f0c2a0f9e16";
+        await h.Records.AddAsync(NewPending(key), Ct);
+
+        h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
+        Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
+        Assert.Empty(h.Sdk.OnchainSendCalls);
+    }
+
+    [Fact]
+    public async Task A_payment_that_surfaces_only_after_an_explicit_sync_resolves_instead_of_being_written_off()
+    {
+        // The exact window the write-off used to misread: the SSP accepted the exit, the SDK's local storage
+        // has not replayed it yet, and the pass's first lookup returns null. The forced sync surfaces it, and
+        // the repeated lookup must resolve the row rather than declare it never sent. The threshold is
+        // unreachable so the pass can only resolve — a send here could only be a recovery re-send.
+        var h = CreateHarness(new SweepSettings
+        {
+            Enabled = true,
+            BalanceThresholdSats = long.MaxValue / 4,
+            MinimumSweepSats = long.MaxValue / 4
+        });
+        const string key = "5d0a1cf1-2b3e-4b17-9c8a-7f0c2a0f9e17";
+        await h.Records.AddAsync(NewPending(key), Ct);
+        h.Sdk.OnSync = sdk => sdk.PaymentsById[key] = CompletedExit(key, 450_000, 2_190);
+
+        h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        var record = await h.Records.GetAsync(StoreId, key, Ct);
+        Assert.NotEqual(SweepRecordStatus.Failed, record!.Status);
+        Assert.Null(record.Error);
+        // And crucially, nothing was re-sent under this row's mandate.
+        Assert.Empty(h.Sdk.OnchainSendCalls);
+    }
+
+    [Fact]
+    public async Task A_sync_that_fails_keeps_a_write_off_candidate_blocking()
+    {
+        // The write-off is the one decision that can unblock a re-sweep, so it may not run on storage the
+        // pass could not freshen. Refusing to sweep is always the safe direction.
+        var h = CreateHarness();
+        const string key = "5d0a1cf1-2b3e-4b17-9c8a-7f0c2a0f9e18";
+        await h.Records.AddAsync(NewPending(key), Ct);
+        h.Sdk.OnSync = _ => throw new SdkException.NetworkException("@v1=offline");
+
+        h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
+        Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
+        Assert.Empty(h.Sdk.OnchainSendCalls);
+    }
+
+    [Fact]
     public async Task An_SDK_that_cannot_be_read_keeps_an_unresolved_sweep_blocking()
     {
         // Refusing to sweep is always the safe direction.

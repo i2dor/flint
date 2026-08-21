@@ -555,6 +555,29 @@ public class SparkCrossChainSweepTests
     }
 
     /// <summary>
+    /// An amount too large to convert to dollars is refused, never waved through unchecked.
+    /// </summary>
+    /// <remarks>
+    /// The fail-open this closes: the conversion used to report an overflowing value as zero, and the guard
+    /// read zero as "the quote-shape check already refused this" — so the quotes at their most absurd were
+    /// exactly the ones that skipped the value check. A value the guard cannot express is a quote it cannot
+    /// vouch for, and a quote it cannot vouch for does not send.
+    /// </remarks>
+    [Fact]
+    public async Task An_amount_too_large_to_value_is_refused_rather_than_skipping_the_value_guard()
+    {
+        // 10^40 base units of a 6-decimal token: 10^34 whole dollars, far beyond what a decimal can carry.
+        var h = Harness(balanceSats: 500_000, stableBalance: BigInteger.Pow(10, 40));
+
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
+        Assert.Equal(SweepRefusalCode.CrossChainValueUnverifiable, result.Record!.RefusalCode);
+        Assert.Contains("too large", result.Reason, StringComparison.Ordinal);
+        Assert.Empty(h.Sdk.CrossChainSendCalls);
+    }
+
+    /// <summary>
     /// No rate means no sweep, rather than a sweep nobody checked.
     /// </summary>
     /// <remarks>

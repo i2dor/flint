@@ -272,11 +272,12 @@ public class SparkStoreProvisionerTests
     }
 
     [Fact]
-    public async Task Provision_keeps_the_payment_key_and_sweep_settings_across_a_seed_change()
+    public async Task Provision_rotates_the_payment_key_and_keeps_sweep_settings_across_a_seed_change()
     {
-        // The payment key is a store-binding token, not a secret that ages, and rotating it would invalidate a
-        // Lightning configuration that is already live. The sweep settings are the merchant's, and changing a
-        // seed is not a request to lose them — this is what lets Wave 4 hang its settings off the same blob.
+        // The payment key is a bearer spend credential — the connection string carrying it drives this store's
+        // wallet from anywhere it is pasted — so a re-provision mints a fresh one rather than handing the new
+        // wallet to every old copy of the string. The sweep settings are the merchant's, and changing a seed
+        // is not a request to lose them — this is what lets Wave 4 hang its settings off the same blob.
         var h = Create();
         Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
 
@@ -289,7 +290,7 @@ public class SparkStoreProvisionerTests
         Assert.True((await h.Provisioner.ProvisionAsync(StoreId, replacement, SeedSource.Imported)).Succeeded);
 
         var second = h.Settings.Settings[StoreId]!;
-        Assert.Equal(first.PaymentKey, second.PaymentKey);
+        Assert.NotEqual(first.PaymentKey, second.PaymentKey);
         Assert.True(second.Sweep.Enabled);
         Assert.Equal(100_000, second.Sweep.BalanceThresholdSats);
         Assert.Equal("merchant-key", second.ApiKeyOverride);

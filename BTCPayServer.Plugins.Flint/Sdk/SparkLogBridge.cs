@@ -124,7 +124,7 @@ public static class SparkLogging
 
         try
         {
-            Directory.CreateDirectory(logDirectory);
+            SparkDirectoryPermissions.CreateOwnerOnly(logDirectory);
             // The SDK creates sdk.log itself, at the process umask — 0644 as observed, world-readable. The
             // plugin cannot choose the file's mode, but it owns the directory, and a directory without
             // other-execute cannot be traversed to reach the file inside it. Shared with the per-store storage
