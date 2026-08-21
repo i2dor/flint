@@ -44,6 +44,20 @@ against the source before fixing:
   landed there was world-readable; the mode is now passed to the creation itself, and the storage lock file
   is created owner-only too.
 
+Two follow-ups from the quorum's review of the fixes themselves:
+
+- **The write-off shortfall gate is bounded, not absolute.** The gate's observation — funds missing with no
+  payment record — is also produced by a Lightning payout or a Stable Balance conversion landing near a
+  sweep that genuinely never went out, and sweeps are close enough to the whole balance that any spend trips
+  it. Unbounded, that coincidence would wedge the store's sweeping permanently with no operator escape; the
+  gate now blocks for an hour of synced re-checks and then writes the row off with a reason stating exactly
+  what was observed and what to verify.
+- **A provisioning rollback now also covers a throwing Lightning-configuration write.** With the key
+  rotating, settings carrying a new key beside a configuration still holding the old string is a store whose
+  checkout fails; a throw out of the wiring write now restores the previous settings the same way a refused
+  write always did. A process crash inside that window is still detectable and repairable from the status
+  page, which inspects the wiring against the stored key.
+
 ### Changed
 
 - **The Spark SDK is now 0.22.3**, up from 0.22.2, on the review's recommendation: the one upstream change

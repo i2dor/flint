@@ -1242,6 +1242,39 @@ public class SparkSweepEngineTests
     }
 
     [Fact]
+    public async Task A_shortfall_blocked_write_off_escalates_after_an_hour_rather_than_wedging_the_store()
+    {
+        // The gate's premise — funds missing means the exit happened — is also produced by a payout or a
+        // Stable Balance conversion landing near a sweep that genuinely never went out. Unbounded, that
+        // coincidence would block sweeping forever with no operator escape; bounded, the row is written off
+        // after an hour of synced re-checks, with a reason that says exactly what was observed.
+        var h = CreateHarness(new SweepSettings
+        {
+            Enabled = true,
+            BalanceThresholdSats = long.MaxValue / 4,
+            MinimumSweepSats = long.MaxValue / 4
+        }, balanceSats: 400_000);
+        const string key = "5d0a1cf1-2b3e-4b17-9c8a-7f0c2a0f9e19";
+        await h.Records.AddAsync(NewPending(key), Ct);
+
+        // Inside the escalation window the shortfall blocks...
+        h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
+        Assert.Equal(
+            SweepOutcomeKind.InFlight, (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Kind);
+        Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
+
+        // ...and past it, the row closes and sweeping is free again.
+        h.Time.Advance(SparkSweepEngine.ShortfallWriteOffAge);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        var record = await h.Records.GetAsync(StoreId, key, Ct);
+        Assert.Equal(SweepRecordStatus.Failed, record!.Status);
+        Assert.Contains("held less than the sweep would have sent", record.Error);
+        Assert.Contains("verify the wallet's payment history", record.Error);
+        Assert.Empty(h.Sdk.OnchainSendCalls);
+    }
+
+    [Fact]
     public async Task A_payment_that_surfaces_only_after_an_explicit_sync_resolves_instead_of_being_written_off()
     {
         // The exact window the write-off used to misread: the SSP accepted the exit, the SDK's local storage

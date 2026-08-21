@@ -272,6 +272,29 @@ public class SparkStoreProvisionerTests
     }
 
     [Fact]
+    public async Task Provision_rolls_back_when_the_lightning_configuration_write_throws()
+    {
+        // Since the key rotates, settings carrying the new key beside a Lightning configuration still holding
+        // the old string is a store whose checkout fails until someone intervenes — so a throw out of the
+        // wiring write must restore the old settings exactly as a false return does.
+        var h = Create();
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        var original = h.Settings.Settings[StoreId];
+        var originalWiring = h.Config.Stores[StoreId].ConnectionString;
+
+        h.Config.FailNextSetWith = new InvalidOperationException("the store repository write failed");
+        var replacement = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+
+        var result = await h.Provisioner.ProvisionAsync(StoreId, replacement, SeedSource.Imported);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("previous Spark configuration was restored", result.Error);
+        Assert.Equal(original!.PaymentKey, h.Settings.Settings[StoreId]!.PaymentKey);
+        // And the wiring still carries the string those settings agree with.
+        Assert.Equal(originalWiring, h.Config.Stores[StoreId].ConnectionString);
+    }
+
+    [Fact]
     public async Task Provision_rotates_the_payment_key_and_keeps_sweep_settings_across_a_seed_change()
     {
         // The payment key is a bearer spend credential — the connection string carrying it drives this store's

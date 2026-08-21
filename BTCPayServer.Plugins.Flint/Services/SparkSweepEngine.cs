@@ -152,6 +152,19 @@ public sealed class SparkSweepEngine
     internal static readonly TimeSpan UnresolvedGrace = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// How long a balance shortfall may keep a write-off candidate blocking before it is written off anyway.
+    /// </summary>
+    /// <remarks>
+    /// The shortfall gate reads "no payment under the key, and less balance than the sweep would have sent" as
+    /// a possible accepted-but-unrecorded exit, and blocks. But the same observation is produced by any other
+    /// spend — a Lightning payout, a Stable Balance conversion — happening near a sweep that genuinely never
+    /// went out, and an unbounded gate would wedge the store's sweeping permanently on that coincidence, with
+    /// no operator escape short of removing Spark. An hour is many passes, each with a forced sync and a fresh
+    /// point lookup; an exit the SDK still has not surfaced after that is no longer the likely explanation.
+    /// </remarks>
+    internal static readonly TimeSpan ShortfallWriteOffAge = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// How far back the crash-recovery walk looks.
     /// </summary>
     /// <remarks>
@@ -1686,20 +1699,37 @@ public sealed class SparkSweepEngine
                 // synced balance no longer holds what this sweep would have sent, "no payment under the key"
                 // stops being evidence of "never sent" and starts looking like an accepted exit the SDK has
                 // not recorded — the one case where closing the row and re-planning would send real money
-                // twice. Receives only ever raise the balance and this engine is the store's only spender, so
-                // a shortfall here is not explainable by ordinary traffic. The row keeps blocking until the
-                // payment surfaces or an operator intervenes. Token-funded rows are not gated — their amount
-                // is not in sats — but their write-off never re-sends, so the hazard this guards is absent.
-                if (record.IdempotencyKeyAccepted && syncedBalance < record.AmountSats)
+                // twice. The gate is bounded rather than absolute, because a shortfall is not proof: this
+                // engine is not the store's only spender — Lightning payouts and Stable Balance conversions
+                // both debit sats with no sweep record, and a sweep's amount is close enough to the whole
+                // balance that any of them trips the comparison. An unbounded refusal would turn one payout
+                // into a permanently wedged store with no operator escape short of removing Spark. So the row
+                // blocks for ShortfallWriteOffAge — enough passes and forced syncs that an accepted exit
+                // still absent from local storage is no longer the likely explanation — and then falls
+                // through to a write-off whose reason says exactly what was observed. Token-funded rows are
+                // not gated: their amount is not in sats, and their write-off never re-sends.
+                var shortfall = record.IdempotencyKeyAccepted && syncedBalance < record.AmountSats;
+                if (shortfall && now - record.CreatedAt < ShortfallWriteOffAge)
                 {
                     _logger.LogError(
                         "Store {StoreId}: sweep {IdempotencyKey} has no payment record, but the synced balance "
                         + "({BalanceSats} sat) is below the {AmountSats} sat it would have sent — refusing to "
                         + "write it off as never sent, because the shortfall suggests it was. The store stays "
-                        + "blocked; check the wallet's history and the destination before intervening",
-                        storeId, record.IdempotencyKey, syncedBalance, record.AmountSats);
+                        + "blocked until the payment surfaces or the sweep is {Age} old; check the wallet's "
+                        + "history and the destination in the meantime",
+                        storeId, record.IdempotencyKey, syncedBalance, record.AmountSats, ShortfallWriteOffAge);
                     blocking ??= record;
                     continue;
+                }
+
+                if (shortfall)
+                {
+                    _logger.LogWarning(
+                        "Store {StoreId}: writing off sweep {IdempotencyKey} despite a balance shortfall — it "
+                        + "is {Age} old, every pass since its grace expired has synced and found no payment, "
+                        + "and other spenders (payouts, Stable Balance) can explain the shortfall. Verify the "
+                        + "wallet history against the sweep history",
+                        storeId, record.IdempotencyKey, now - record.CreatedAt);
                 }
 
                 // Worded as what is known rather than as a conclusion. That the SDK would replay a service-provider
@@ -1711,7 +1741,13 @@ public sealed class SparkSweepEngine
                 // this record's provider quote id, and a send whose persistence step never completed might not
                 // be in that history at all. So the row is closed and the store is unblocked, but the sentence
                 // does not claim the money is safe — and, crucially, nothing re-sends it.
-                var reason = record.IdempotencyKeyAccepted
+                var reason = shortfall
+                    ? "Spark has no record of this sweep, but the wallet held less than the sweep would have "
+                      + "sent when it was checked, so sweeping was blocked for an hour of re-checks before "
+                      + "this was written off. Most likely another spend — a payout, or a Stable Balance "
+                      + "conversion — moved the balance and nothing was sent, but verify the wallet's payment "
+                      + "history and the destination address before assuming so."
+                    : record.IdempotencyKeyAccepted
                     ? "Spark has no record of this sweep. Most likely nothing was sent and the balance is still "
                       + "on the Spark wallet, in which case the next pass will try again — but check the Spark "
                       + "balance against your sweep history before assuming so."

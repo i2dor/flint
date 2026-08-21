@@ -249,7 +249,31 @@ public sealed class SparkStoreProvisioner
                 applied.Reason ?? "The Spark wallet did not start. Check the server logs for the reason.");
         }
 
-        if (!await _lightningWiring.EnableAsync(storeId, paymentKey, cancellationToken).ConfigureAwait(false))
+        // A throw here needs the same rollback the `false` return gets: since the key rotates, settings
+        // carrying the new key beside a Lightning configuration still holding the old string is a store whose
+        // checkout fails until someone intervenes. Rolling back restores the old settings, and the
+        // configuration those settings agree with was never touched. What no code here can catch is the
+        // process dying between SetAsync above and the write inside EnableAsync — that mismatch survives the
+        // crash, and the status page is what covers it: it inspects the wiring against the stored key, reports
+        // the disagreement, and its enable action rewrites the configuration from the stored key in one click.
+        bool wired;
+        try
+        {
+            wired = await _lightningWiring.EnableAsync(storeId, paymentKey, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: the Lightning payment method could not be rewritten after provisioning; "
+                + "rolling the Spark settings back", storeId);
+            await RollBackAsync(storeId, existing).ConfigureAwait(false);
+            return SparkProvisionResult.Failed(
+                "The store's Lightning configuration could not be updated, so the previous Spark configuration "
+                + "was restored. Try again, and check the server logs if it persists.");
+        }
+
+        if (!wired)
         {
             await RollBackAsync(storeId, existing).ConfigureAwait(false);
             return SparkProvisionResult.Failed(

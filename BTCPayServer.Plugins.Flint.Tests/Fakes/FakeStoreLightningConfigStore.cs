@@ -48,11 +48,20 @@ public sealed class FakeStoreLightningConfigStore : IStoreLightningConfigStore
     public Task<StoreLightningConfig?> GetAsync(string storeId, CancellationToken cancellationToken = default) =>
         Task.FromResult(Stores.TryGetValue(storeId, out var config) ? config : null);
 
+    /// <summary>Thrown by the next <see cref="SetAsync"/> — a store repository whose write failed.</summary>
+    public Exception? FailNextSetWith { get; set; }
+
     public Task<bool> SetAsync(
         string storeId,
         string? connectionString,
         CancellationToken cancellationToken = default)
     {
+        if (FailNextSetWith is { } failure)
+        {
+            FailNextSetWith = null;
+            throw failure;
+        }
+
         Writes.Add((storeId, connectionString));
         _writeLog?.Record($"lightning:{storeId}:{(connectionString is null ? "cleared" : "set")}");
 
