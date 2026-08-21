@@ -174,8 +174,11 @@ jobs:
           built="$(basename "$ARTIFACT_DIR")"
           IFS=. read -r major minor patch _rest <<< "$built"
           built3="${major:-0}.${minor:-0}.${patch:-0}"
-          if [ "v$built3" != "$TAG" ]; then
-            echo "error: tag $TAG does not match the built plugin version v$built3" \
+          # A tag may name three components (v0.1.4) or all four (v0.1.4.1, a point release whose fourth
+          # component is real, not the assembly-version padding built3 exists to strip). Accept the tag when
+          # it matches either reading; reject everything else.
+          if [ "v$built3" != "$TAG" ] && [ "v$built" != "$TAG" ]; then
+            echo "error: tag $TAG does not match the built plugin version v$built3 or v$built" \
                  "(PluginPacker reported '$built')." >&2
             echo "Bump <Version> in $PROJECT_PATH, or retag." >&2
             exit 1

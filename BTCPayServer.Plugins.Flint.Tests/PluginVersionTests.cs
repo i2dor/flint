@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -38,9 +39,11 @@ public class PluginVersionTests
     {
         var declared = CsprojVersion();
 
-        // The csproj carries three components and the assembly attribute is padded to four, so compare on the
-        // three that are authored. Revision is never set deliberately and must not become a fourth thing to bump.
-        Assert.Equal(declared, ThreeComponents(ReportedVersion));
+        // The assembly attribute is always padded to four components, so compare on however many the csproj
+        // actually authors: three normally, four for a point release (0.1.4.1). An unauthored revision is
+        // padding to strip, never a fourth thing to bump.
+        var authored = declared.Count(c => c == '.') + 1;
+        Assert.Equal(declared, Components(ReportedVersion, authored));
     }
 
     [Fact]
@@ -50,7 +53,7 @@ public class PluginVersionTests
 
         // The newest entry is the first "## [x.y.z]" heading in the file. Keep-a-Changelog order is
         // newest-first, so anything else means the file has been edited in the wrong place.
-        var newest = Regex.Match(changelog, @"^##\s*\[(?<version>\d+\.\d+\.\d+)\]", RegexOptions.Multiline);
+        var newest = Regex.Match(changelog, @"^##\s*\[(?<version>\d+\.\d+\.\d+(?:\.\d+)?)\]", RegexOptions.Multiline);
         Assert.True(newest.Success, "CHANGELOG.md has no '## [x.y.z]' heading; the newest release must have one.");
 
         Assert.Equal(CsprojVersion(), newest.Groups["version"].Value);
@@ -89,12 +92,15 @@ public class PluginVersionTests
         Assert.True(match.Success, "BTCPayServer.Plugins.Flint.csproj has no <Version> property.");
 
         var version = match.Groups["version"].Value.Trim();
-        Assert.Matches(@"^\d+\.\d+\.\d+$", version);
+        // Three components normally; a fourth only for a point release cut from an already-tagged version.
+        Assert.Matches(@"^\d+\.\d+\.\d+(\.\d+)?$", version);
         return version;
     }
 
-    private static string ThreeComponents(Version version) =>
-        $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
+    private static string Components(Version version, int count) =>
+        count >= 4
+            ? $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}.{Math.Max(version.Revision, 0)}"
+            : $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
 
     private static string RepoRoot()
     {
