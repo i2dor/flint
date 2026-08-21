@@ -3,17 +3,19 @@
 # CI, releases & upstream updates
 
 - **`.github/workflows/ci.yml`** runs on every push to `main`, on all PRs, and on a daily schedule so
-  SSP/SDK drift shows up on days with no commits. Four jobs, two of which gate a merge:
+  SSP/SDK drift shows up on days with no commits. Four jobs, three of which gate a pull request:
 
   | job | gates a merge? | why |
   |---|---|---|
   | `build-and-test` | **yes** | no external dependency; a failure is always our bug |
   | `store-test` | **yes** | real Postgres in a service container, no third-party network |
   | `integration-test` | no — `continue-on-error` | depends on Lightspark's hosted regtest; an outage there would block merges |
-  | `funded-regtest-test` | no — `continue-on-error` | the above, plus it depends on a faucet-funded balance, so it goes red when the CI wallet drains — an operations event, not a defect in whichever PR was open |
+  | `funded-regtest-test` | **on PRs** — advisory on schedule/push | a human is present on a PR to judge a failure; scheduled and push runs stay advisory because the suite also depends on a faucet-funded balance, and the CI wallet draining is an operations event, not a defect in main |
 
-  Both advisory jobs report their real pass/fail in the run summary. **Someone has to look**: an SDK
-  error-string re-wording, or a preimage reaching the log, shows as a failed job inside a green run.
+  The advisory runs still report their real pass/fail in the run summary. **Someone has to look**: an SDK
+  error-string re-wording, or a preimage reaching the log, shows as a failed job inside a green
+  scheduled run. A drained wallet failing a PR is answered by funding the wallet and re-running, not by
+  reading it as a code failure.
 - **`.github/workflows/spark-regtest-wallet.yml`** is manual-only. It prints the CI regtest wallet's
   static deposit address and balance so a maintainer can fund it — see
   ["A funded regtest wallet for CI"](testing.md#a-funded-regtest-wallet-for-ci). It never prints the seed, and
@@ -45,5 +47,7 @@
   discovery logic in `scripts/check-btcpayserver-update.sh`.
 - **Branch protection**: not configured by these workflows. For `main`, enable "Require status
   checks to pass before merging" with `ci.yml`'s `build-and-test` **and `store-test`** jobs required
-  (and `integration-test` and `funded-regtest-test` intentionally *not* required, since both are
-  `continue-on-error` by design), plus "Require branches to be up to date before merging".
+  (`integration-test` intentionally *not* required, since it is `continue-on-error` by design), plus
+  "Require branches to be up to date before merging". `funded-regtest-test` blocks PRs since it is
+  no longer `continue-on-error` there; requiring it in branch protection as well is a choice —
+  doing so means a drained CI wallet holds every merge until someone funds it.
