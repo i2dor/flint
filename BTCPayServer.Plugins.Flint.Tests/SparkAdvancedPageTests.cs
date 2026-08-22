@@ -62,6 +62,77 @@ public class SparkAdvancedPageTests
     }
 
     [Fact]
+    public async Task Saving_an_api_key_override_stores_it_trimmed_and_restarts_the_wallet()
+    {
+        // The override is the revocation-resilience valve Breez suggested: the plugin-wide embedded key is
+        // shared by every install, and a merchant holding their own survives its revocation. Storing settings
+        // is what reconciles the running wallet, so the save is also the restart.
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+
+        var result = await h.Mvc.AdvancedApiKey(
+            Store,
+            new SparkAdvancedViewModel { ApiKeyOverride = "  merchant-owned-key  " },
+            CancellationToken.None);
+
+        Assert.IsType<RedirectToActionResult>(result);
+        Assert.Equal("merchant-owned-key", h.Settings.Settings[Store]!.ApiKeyOverride);
+        Assert.Single(h.Settings.Writes);
+    }
+
+    [Fact]
+    public async Task Clearing_the_api_key_override_returns_the_store_to_the_built_in_key()
+    {
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        h.Settings.Settings[Store]!.ApiKeyOverride = "merchant-owned-key";
+
+        var result = await h.Mvc.AdvancedApiKey(
+            Store,
+            new SparkAdvancedViewModel { ApiKeyOverride = "   " },
+            CancellationToken.None);
+
+        Assert.IsType<RedirectToActionResult>(result);
+        Assert.Null(h.Settings.Settings[Store]!.ApiKeyOverride);
+    }
+
+    [Fact]
+    public async Task An_unchanged_api_key_does_not_bounce_the_wallet()
+    {
+        // Storing settings tears the SDK instance down and reconnects it. A no-op save must not pay that
+        // cost — or interrupt an in-flight receive — for nothing.
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        h.Settings.Settings[Store]!.ApiKeyOverride = "merchant-owned-key";
+
+        var result = await h.Mvc.AdvancedApiKey(
+            Store,
+            new SparkAdvancedViewModel { ApiKeyOverride = "merchant-owned-key" },
+            CancellationToken.None);
+
+        Assert.IsType<RedirectToActionResult>(result);
+        Assert.Empty(h.Settings.Writes);
+    }
+
+    [Fact]
+    public async Task A_key_the_wallet_cannot_start_with_is_rolled_back()
+    {
+        // The store must not be left holding a key its wallet will not start with: the save would read as
+        // success while every checkout failed — the exact quiet failure the settings store's contract exists
+        // to surface.
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        h.Settings.Settings[Store]!.ApiKeyOverride = "old-key";
+        h.Settings.NextSetDeclinesWith = "the service provider rejected the API key";
+
+        var result = await h.Mvc.AdvancedApiKey(
+            Store,
+            new SparkAdvancedViewModel { ApiKeyOverride = "bad-key" },
+            CancellationToken.None);
+
+        Assert.IsType<ViewResult>(result);
+        Assert.False(h.Mvc.ModelState.IsValid);
+        // The revert re-applied the previous settings, so the old key is what is stored and running.
+        Assert.Equal("old-key", h.Settings.Settings[Store]!.ApiKeyOverride);
+    }
+
+    [Fact]
     public async Task An_invalid_combination_is_refused_and_nothing_is_written()
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);

@@ -149,8 +149,9 @@ public class SparkSettings
 /// </para>
 /// <para>
 /// <b>Neither property here has a write path, and that is deliberate.</b> Nothing binds them from the MVC
-/// forms or from Greenfield; like <c>ApiKeyOverride</c> they are operator-level overrides, reachable only by
-/// editing the store's settings blob. The defaults are the policy, both surfaces show what is in force
+/// forms or from Greenfield; they are operator-level overrides, reachable only by editing the store's
+/// settings blob. (<c>ApiKeyOverride</c> used to share this posture but is editable on the Advanced page
+/// now — it moves no money, which is exactly the line these two sit on the other side of.) The defaults are the policy, both surfaces show what is in force
 /// (deposit page and <c>GET .../spark/deposits</c>), and adding a form would put a fee ceiling that moves
 /// money in front of every merchant who does not need one. The consequence is that <b>every value here has to
 /// be safe against a blob nobody validated</b> — hence the clamping on the effective properties rather than at
