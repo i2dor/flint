@@ -8,7 +8,7 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
-## [Unreleased]
+## [0.1.5.1] — 2026-08-22
 
 ### Added
 
