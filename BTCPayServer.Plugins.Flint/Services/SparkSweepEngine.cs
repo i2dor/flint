@@ -2052,7 +2052,8 @@ public sealed class SparkSweepEngine
                     storeId, record.IdempotencyKey, allowedFrom,
                     new SweepResolution(
                         status, null, null, error, now, SweepRefusalCode.None, conversionStatus,
-                        conversion?.DeliveredAmount?.ToString(CultureInfo.InvariantCulture)),
+                        conversion?.DeliveredAmount?.ToString(CultureInfo.InvariantCulture),
+                        conversion?.ProviderOrderId),
                     cancellationToken)
                 .ConfigureAwait(false))
         {

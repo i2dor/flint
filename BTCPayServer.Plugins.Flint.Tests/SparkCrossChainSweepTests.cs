@@ -993,6 +993,10 @@ public class SparkCrossChainSweepTests
         Assert.Equal(SweepRecordStatus.Confirmed, resolved!.Status);
         Assert.Equal(SparkConversionStatus.Completed, resolved.ConversionStatus);
         Assert.Equal("35100000", resolved.DeliveredAmountBaseUnits);
+        // The provider order id rides on the same recovery resolution as the delivered amount: it is the handle
+        // a stuck-delivery investigation quotes at the provider, and the crash-recovery poll is exactly the
+        // path that used to drop it (the initial send had already persisted it).
+        Assert.Equal("order-1", resolved.ProviderOrderId);
 
         // Never looked the row's own key up as a payment id — it is not one.
         Assert.DoesNotContain(row.IdempotencyKey, h.Sdk.GetPaymentCalls);
@@ -1062,6 +1066,10 @@ public class SparkCrossChainSweepTests
         var recovered = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.Equal(SweepRecordStatus.Sent, recovered!.Status);
         Assert.Equal(SparkConversionStatus.Pending, recovered.ConversionStatus);
+        // The order id the crash-window recovery poll resolves from is the same one the send reported: the
+        // crash happened before the initial resolution, so the recovery poll is the only thing that can
+        // persist it.
+        Assert.Equal(payment.Conversion!.ProviderOrderId, recovered.ProviderOrderId);
 
         // Found by scanning, not by a point lookup, and never re-sent.
         Assert.DoesNotContain(key, h.Sdk.GetPaymentCalls);

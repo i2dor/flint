@@ -51,9 +51,12 @@ Findings from a third external review pass, each verified against the source bef
   read downstream as "no amount".
 - **The release tag guard rejects a three-part tag on a four-part build** (`v0.1.4` for a 0.1.4.1
   artifact), which would have published a release page disagreeing with its own artifact.
-- **A dropped settlement push's log line now names the real recovery mechanism** — BTCPay's own
-  invoice polling over the durable Paid row — instead of crediting the reconciliation task, which only
-  scans unpaid rows.
+- **A dropped settlement push is retried instead of lost.** A listener that falls behind has its push
+  held back and re-delivered on a short timer once it catches up — bounded by a per-subscription
+  allowance and a delivery deadline, after which the log names the truth (the payment reaches BTCPay
+  when it next reads the invoice, typically after a restart). This replaces a log line that credited a
+  BTCPay one-minute invoice poll that does not exist, and a reconciliation task that only scans unpaid
+  rows.
 - **The funded regtest suite fails hard when the wallet seed appears in any log surface**, instead of
   quietly withholding the artifact; and its Postgres race test only counts a unique-key violation as
   losing the race, so an unrelated error can no longer masquerade as the loser.
