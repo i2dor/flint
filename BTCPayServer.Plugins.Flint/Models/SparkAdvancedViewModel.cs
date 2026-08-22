@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
@@ -35,4 +36,12 @@ public class SparkAdvancedViewModel
     /// </summary>
     [ValidateNever]
     public SweepSettingsInput Settings { get; set; } = new();
+
+    /// <summary>
+    /// The merchant's own Breez API key, empty when the plugin's built-in one is in use. Not a secret in
+    /// Breez's model — displayed back rather than masked — but it is what the SDK connects with, so saving it
+    /// restarts the store's wallet.
+    /// </summary>
+    [Display(Name = "Breez API key")]
+    public string? ApiKeyOverride { get; set; }
 }

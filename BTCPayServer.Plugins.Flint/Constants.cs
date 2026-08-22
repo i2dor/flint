@@ -289,7 +289,9 @@ public static class Constants
     /// Breez API keys are <b>per-application</b> identifiers, not per-user credentials — the same
     /// model a first-party mobile app uses. Shipping one plugin-wide key keeps merchant setup friction at zero
     /// and matches the Boltz <c>referralId="btcpay"</c> precedent. A merchant may still supply
-    /// their own via <c>SparkSettings.ApiKeyOverride</c>.
+    /// their own via <c>SparkSettings.ApiKeyOverride</c>, editable on the Advanced page — the
+    /// revocation-resilience valve Breez themselves suggested, so a revocation of this shared key
+    /// (never seen, but possible) costs a prepared merchant nothing.
     /// </para>
     /// <para>
     /// <b>The obfuscation is not encryption and is not security.</b> The mask is in this repository

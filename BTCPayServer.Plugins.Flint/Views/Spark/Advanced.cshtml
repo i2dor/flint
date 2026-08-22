@@ -123,6 +123,31 @@
             <button type="submit" class="btn btn-primary" id="SparkSaveAdvancedSweep">Save</button>
         </form>
 
+        <form method="post" asp-action="AdvancedApiKey" asp-route-storeId="@Model.StoreId"
+              permission="@Policies.CanModifyStoreSettings">
+            <h3 class="mt-5 mb-3">Breez API key</h3>
+            <p class="text-secondary">
+                Every install of this plugin shares a built-in Breez API key. Setting your own here keeps this
+                store's wallet working even if that shared key is ever revoked or rate-limited — request one
+                for free from
+                <a href="https://breez.technology/request-api-key/#contact-us-form-sdk" target="_blank"
+                   rel="noreferrer noopener">Breez</a>.
+            </p>
+            <div class="row">
+                <div class="col-md-8 form-group">
+                    <label asp-for="ApiKeyOverride" class="form-label"></label>
+                    <input asp-for="ApiKeyOverride" class="form-control" autocomplete="off" spellcheck="false"
+                           placeholder="Using the plugin's built-in key" />
+                    <span asp-validation-for="ApiKeyOverride" class="text-danger"></span>
+                    <div class="form-text">
+                        Leave empty to use the built-in key. Saving restarts this store's Spark wallet so the
+                        change takes effect immediately; a key Spark refuses is rolled back.
+                    </div>
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary" id="SparkSaveApiKey">Save API key</button>
+        </form>
+
         <div permission="@Policies.CanModifyStoreSettings">
             <h3 class="mt-5 mb-3">Remove</h3>
             <div id="danger-zone" class="d-flex flex-wrap align-items-center gap-3 mb-5 mt-2">

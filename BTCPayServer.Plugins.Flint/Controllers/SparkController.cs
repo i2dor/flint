@@ -663,6 +663,69 @@ public class SparkController : Controller
     }
 
     /// <summary>
+    /// Saves the merchant's own Breez API key, or clears it back to the plugin's built-in one.
+    /// </summary>
+    /// <remarks>
+    /// The override exists for revocation resilience: every install shares the plugin's embedded key, and
+    /// Breez's own suggestion is to let a merchant hold their own so a revocation of the shared key — never
+    /// seen, but possible — costs them nothing. Storing the settings reconciles the running wallet, so the
+    /// new key is what the SDK connects with immediately; a key the SDK refuses to start with is rolled back
+    /// to the previous settings rather than left stored in front of a dead wallet.
+    /// </remarks>
+    [HttpPost("advanced/api-key")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> AdvancedApiKey(
+        [FromRoute] string storeId,
+        SparkAdvancedViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        var previous = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        if (previous is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var trimmed = vm.ApiKeyOverride?.Trim();
+        var newKey = string.IsNullOrEmpty(trimmed) ? null : trimmed;
+
+        if (string.Equals(newKey, previous.ApiKeyOverride, StringComparison.Ordinal))
+        {
+            // Nothing changed; do not bounce the wallet for it.
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
+        var updated = previous.Clone();
+        updated.ApiKeyOverride = newKey;
+
+        var applied = await _settingsStore.SetAsync(storeId, updated).ConfigureAwait(false);
+        if (!applied.WalletRunning)
+        {
+            // The store must not be left holding a key its wallet will not start with. The revert re-applies
+            // the previous settings, which brings the previous key's wallet back up.
+            await _settingsStore.SetAsync(storeId, previous).ConfigureAwait(false);
+            ModelState.AddModelError(
+                nameof(vm.ApiKeyOverride),
+                "The Spark wallet could not start with this API key"
+                + (applied.Reason is { } reason ? $": {reason}" : ".")
+                + " The previous key is back in effect.");
+
+            var status = await _statusReader.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+            var model = await BuildAdvancedViewModel(storeId, status, input: null, cancellationToken)
+                .ConfigureAwait(false);
+            model.ApiKeyOverride = vm.ApiKeyOverride;
+            return View("Advanced", model);
+        }
+
+        TempData[WellKnownTempData.SuccessMessage] = newKey is null
+            ? "This store now uses the plugin's built-in Breez API key."
+            : "This store now uses its own Breez API key.";
+        return RedirectToAction(nameof(Advanced), new { storeId });
+    }
+
+    /// <summary>
     /// Fills in everything the Advanced page shows. <paramref name="input"/> is the merchant's rejected form
     /// on a re-render, or null to show what is stored.
     /// </summary>
@@ -678,6 +741,8 @@ public class SparkController : Controller
             input = current.Settings;
         }
 
+        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+
         return new SparkAdvancedViewModel
         {
             StoreId = storeId,
@@ -685,7 +750,8 @@ public class SparkController : Controller
             WalletRunning = status.WalletRunning,
             IdentityPubkey = status.IdentityPubkey,
             StorageDirectory = status.StorageDirectoryFor(User),
-            Settings = input
+            Settings = input,
+            ApiKeyOverride = settings?.ApiKeyOverride
         };
     }
 

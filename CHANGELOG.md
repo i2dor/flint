@@ -8,6 +8,18 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Added
+
+- **A store can use its own Breez API key.** The Advanced page gains a field for it, with a link to
+  Breez's request form. The plugin's built-in key is shared by every install; on Breez's own suggestion,
+  a merchant holding their own key loses nothing if the shared key is ever revoked or rate-limited.
+  Saving restarts the store's wallet so the key takes effect immediately, and a key Spark refuses to
+  start with is rolled back rather than left stored in front of a dead wallet. Leaving the field empty
+  returns the store to the built-in key. (The setting itself predates this release; it was previously
+  reachable only by editing the store's settings blob.)
+
 ## [0.1.5] — 2026-08-21
 
 ### Security
