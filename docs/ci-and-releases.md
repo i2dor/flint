@@ -34,9 +34,15 @@
     or offline against the `attestation.jsonl` bundle attached to the release. The reasoning, and
     what this deliberately does *not* protect against, is in the header comment of
     [`package.yml`](../.github/workflows/package.yml).
-- **Breez.Sdk.Spark / test / GitHub Actions version bumps** are handled by
+- **Test / GitHub Actions version bumps** are handled by
   [Dependabot](../.github/dependabot.yml) (`nuget` and `github-actions` ecosystems); CI on the PRs
   it opens is the gate.
+- **Breez.Sdk.Spark bumps** are *not* Dependabot's (it is ignored there): Breez pushes tag-only
+  patch versions to NuGet with no release entry, and a PR per push is churn.
+  **`.github/workflows/breez-sdk-update.yml`** runs weekly (and on manual dispatch, with a dry-run
+  option) and opens a bump PR only for a version upstream has published a GitHub Release for that
+  also exists on NuGet — see `scripts/check-breez-sdk-update.sh`. A tag-only fix worth shipping
+  early is bumped by hand, exactly as 0.22.2 and 0.22.3 were.
 - **`btcpayserver` submodule bumps** are *not* handled by Dependabot: its `gitsubmodule` ecosystem
   tracks the latest commit on a branch, not release tags, which is the wrong model for a submodule
   pinned to stable releases. Instead, **`.github/workflows/btcpayserver-update.yml`** runs weekly

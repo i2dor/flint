@@ -1,0 +1,145 @@
+name: Breez SDK update
+
+# Dependabot's nuget ecosystem proposes a PR for every Breez.Sdk.Spark version pushed to NuGet,
+# and Breez tags and pushes patch versions with no GitHub Release and no notes (0.22.1 through
+# 0.22.3 all shipped that way) — a PR per push is churn, not signal. This workflow is the
+# release-aware equivalent, mirroring btcpayserver-update.yml for the same reason that one
+# replaced Dependabot's gitsubmodule ecosystem: weekly plus on-demand, it looks for the newest
+# version breez/spark-sdk has a *published GitHub Release* for (that also exists on NuGet, so
+# the PR can restore), and opens a bump PR only then. Breez.Sdk.Spark is ignored in
+# dependabot.yml so the two do not both propose bumps. A tag-only fix worth shipping early is a
+# human decision: bump the PackageReference by hand, exactly as 0.22.2 and 0.22.3 were.
+#
+# Token: default GITHUB_TOKEN, with the same workflow_dispatch re-dispatch trick as
+# btcpayserver-update.yml so ci.yml actually runs on the PR this opens (GITHUB_TOKEN-authored
+# pushes do not fire pull_request workflows; workflow_dispatch is exempt from that rule).
+
+on:
+  schedule:
+    - cron: "0 6 * * 2"  # Tuesdays 06:00 UTC — offset from the Monday btcpayserver check
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Detect only: print the result and diff, but do not push or open a PR"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write  # to re-dispatch ci.yml on the bump branch, see above
+
+jobs:
+  check:
+    name: Check for a newer Breez SDK release
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      current: ${{ steps.check.outputs.current }}
+      latest: ${{ steps.check.outputs.latest }}
+      release_url: ${{ steps.check.outputs.release_url }}
+    steps:
+      # No submodule checkout needed: the discovery script only reads the csproj and queries the
+      # GitHub and NuGet APIs, so this stays cheap enough to run unconditionally every week.
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run discovery script
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          out="$(scripts/check-breez-sdk-update.sh)"
+          echo "Discovery result: $out"
+          {
+            echo "changed=$(jq -r .changed <<<"$out")"
+            echo "current=$(jq -r .current <<<"$out")"
+            echo "latest=$(jq -r .latest <<<"$out")"
+            echo "release_url=$(jq -r .release_url <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+
+  bump:
+    name: Open bump PR
+    needs: check
+    if: ${{ needs.check.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CURRENT: ${{ needs.check.outputs.current }}
+      LATEST: ${{ needs.check.outputs.latest }}
+      RELEASE_URL: ${{ needs.check.outputs.release_url }}
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump Breez.Sdk.Spark to ${{ needs.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+          sed -i -E \
+            "s|(<PackageReference Include=\"Breez.Sdk.Spark\" Version=\")[0-9][0-9.]*(\")|\1$LATEST\2|" \
+            BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+          if ! grep -q "Include=\"Breez.Sdk.Spark\" Version=\"$LATEST\"" \
+            BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj; then
+            echo "error: the PackageReference did not end up at $LATEST; refusing to open a PR" >&2
+            exit 1
+          fi
+          git add BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+          git status --short
+
+      - name: Create branch and commit
+        id: commit
+        run: |
+          set -euo pipefail
+          branch="chore/breez-sdk-$LATEST"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — diff only, not pushing:"
+            git --no-pager diff --cached
+            exit 0
+          fi
+
+          git switch -c "$branch"
+          git commit -m "Bump Breez.Sdk.Spark to $LATEST"
+          git push -f origin "$branch"
+
+      - name: Open or update PR
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+        run: |
+          set -euo pipefail
+          title="Bump Breez.Sdk.Spark: $CURRENT -> $LATEST"
+          body="$(cat <<BODY
+          Bumps \`Breez.Sdk.Spark\` from \`$CURRENT\` to \`$LATEST\`, a version upstream has published
+          a GitHub Release for — tag-only NuGet pushes are deliberately not proposed (see
+          \`.github/workflows/breez-sdk-update.yml\`).
+
+          Upstream release notes: $RELEASE_URL
+
+          The SDK is pre-1.0 with no stability promise between releases: read the notes (when they
+          exist) and the API-surface diff before merging, per the pinning comment on the
+          PackageReference. CI on this PR — including the live and funded regtest suites — is the
+          merge gate, not a substitute for that read.
+          BODY
+          )"
+
+          open_count="$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')"
+          if [ "$open_count" = "0" ]; then
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+            echo "Opened PR for $BRANCH."
+          else
+            gh pr edit "$BRANCH" --title "$title" --body "$body"
+            echo "PR already open for $BRANCH; force-pushed branch updated it."
+          fi
+
+          # See the workflow-level comment: workflow_dispatch is exempt from GITHUB_TOKEN's
+          # loop-prevention rule, so this is what actually gets ci.yml to run on the PR.
+          gh workflow run ci.yml --ref "$BRANCH"
