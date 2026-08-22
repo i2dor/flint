@@ -1,4 +1,6 @@
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Sdk;
+using BTCPayServer.Plugins.Flint.Services;
 
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 
@@ -106,10 +108,16 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
         DateTimeOffset sentCreatedAfter,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<SweepRecord>>(_records.Values
-            // Pending unbounded, Sent age-bounded — as in the EF store.
+            // Pending unbounded, Sent age-bounded, non-terminal cross-chain conversions exempt from the age
+            // bound — as in the EF store.
             .Where(r => r.StoreId == storeId
                         && (r.Status is SweepRecordStatus.Pending
-                            || (r.Status is SweepRecordStatus.Sent && r.CreatedAt > sentCreatedAfter)))
+                            || (r.Status is SweepRecordStatus.Sent
+                                && (r.CreatedAt > sentCreatedAfter
+                                    || (r.DestinationKind is SweepDestinationKind.EvmAddress
+                                        && r.ConversionStatus is not (SparkConversionStatus.Completed
+                                            or SparkConversionStatus.Failed
+                                            or SparkConversionStatus.Refunded))))))
             .OrderBy(r => r.CreatedAt)
             .ThenBy(r => r.IdempotencyKey, StringComparer.Ordinal)
             .Select(Copy)
@@ -223,6 +231,7 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
         record.ConversionStatus = resolution.ConversionStatus ?? record.ConversionStatus;
         record.DeliveredAmountBaseUnits =
             resolution.DeliveredAmountBaseUnits ?? record.DeliveredAmountBaseUnits;
+        record.ProviderOrderId = resolution.ProviderOrderId ?? record.ProviderOrderId;
 
         _writeLog?.Record($"sweep:resolve:{idempotencyKey}:{resolution.Status}");
         return Task.FromResult(true);

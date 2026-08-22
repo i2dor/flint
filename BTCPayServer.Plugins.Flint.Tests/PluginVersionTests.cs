@@ -105,7 +105,9 @@ public class PluginVersionTests
     private static string RepoRoot()
     {
         var dir = AppContext.BaseDirectory;
-        while (dir is not null && !File.Exists(Path.Combine(dir, "LICENSE")))
+        // The solution file, not LICENSE: LICENSE is copied into the build output so it ships inside the
+        // .btcpay, which made it match the bin directory before it matched the repository root.
+        while (dir is not null && !File.Exists(Path.Combine(dir, "BTCPayServer.Plugins.Flint.slnx")))
             dir = Directory.GetParent(dir)?.FullName;
         return dir ?? throw new InvalidOperationException("repo root not found");
     }

@@ -1,5 +1,7 @@
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests.Postgres;
@@ -260,8 +262,11 @@ public class PostgresConcurrencyTests
                 await store.AddAsync(NewSweep(key), Ct);
                 return true;
             }
-            catch (Exception)
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: "23505" })
             {
+                // Only a unique-key violation counts as losing the race. Any other exception — a connection
+                // failure, a mapping bug — must fail the test rather than masquerade as the loser: swallowed
+                // whole, a store that errored on every insert would pass the "exactly one won" assertion.
                 return false;
             }
         }).ToArray();

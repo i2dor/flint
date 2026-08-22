@@ -892,6 +892,46 @@ public class SparkLightningClientTests
     }
 
     [Fact]
+    public void Pay_refuses_a_negative_fee_quote_under_every_limit()
+    {
+        // A provider u64 fee cast raw to long wraps negative past long.MaxValue, and every limit here is a
+        // `<=` — so a wrapped fee would pass the caller's limit, the default limit, all of them. The
+        // conversions saturate now, and this refusal is the backstop for any path that missed one.
+        var negative = new SparkSendQuote(1000, -1, Hash);
+
+        Assert.NotNull(SparkLightningClient.ApproveFee(negative, null, 1000));
+        Assert.NotNull(SparkLightningClient.ApproveFee(
+            negative, new PayInvoiceParams { MaxFeeFlat = Money.Satoshis(1_000_000) }, 1000));
+        Assert.NotNull(SparkLightningClient.ApproveFee(
+            new SparkSendQuote(1000, long.MinValue, Hash), new PayInvoiceParams(), 1000));
+    }
+
+    [Fact]
+    public void Provider_fee_conversions_saturate_instead_of_wrapping()
+    {
+        Assert.Equal(5, SparkSdkClient.ToSatsSaturating(5));
+        Assert.Equal(long.MaxValue, SparkSdkClient.ToSatsSaturating((ulong)long.MaxValue));
+        Assert.Equal(long.MaxValue, SparkSdkClient.ToSatsSaturating((ulong)long.MaxValue + 1));
+        Assert.Equal(long.MaxValue, SparkSdkClient.ToSatsSaturating(ulong.MaxValue));
+
+        Assert.Equal(7, SparkSdkClient.SaturatingAdd(3, 4));
+        Assert.Equal(long.MaxValue, SparkSdkClient.SaturatingAdd(long.MaxValue, 1));
+        Assert.Equal(long.MaxValue, SparkSdkClient.SaturatingAdd(long.MaxValue - 3, 10));
+        Assert.Equal(long.MaxValue, SparkSdkClient.SaturatingAdd(long.MaxValue, long.MaxValue));
+    }
+
+    [Fact]
+    public void An_extreme_requested_amount_does_not_wrap_into_an_amountless_invoice()
+    {
+        // (msat + 999) / 1000 wraps negative near long.MaxValue, and a non-positive result downstream means
+        // "amountless invoice" — an absurd requested amount must stay absurd, never become anything-goes.
+        var sats = SparkLightningClient.ToAmountSats(LightMoney.MilliSatoshis(long.MaxValue));
+
+        Assert.NotNull(sats);
+        Assert.Equal(long.MaxValue / 1000 + 1, sats);
+    }
+
+    [Fact]
     public async Task Pay_requires_an_amount_for_an_amountless_invoice()
     {
         var (client, sdk, _, _, _) = Create(new Bolt11Info(Hash, DateTimeOffset.UtcNow.AddHours(1), null));

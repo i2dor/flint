@@ -48,11 +48,6 @@ public class SparkSetupViewModel
     public string? ImportedMnemonic { get; set; }
 
     /// <summary>
-    /// True when this store already has a Spark wallet, so the page can frame itself as replacing a seed
-    /// rather than as first-time setup.
-    /// </summary>
-    [BindNever]
-    /// <summary>
     /// Turn auto-sweeping on as part of setup, rather than sending the merchant to a second page for it.
     /// </summary>
     /// <remarks>
@@ -67,6 +62,17 @@ public class SparkSetupViewModel
     [Display(Name = "Sweep when the balance passes")]
     public long SweepBalanceThresholdSats { get; set; } = SweepSettings.DefaultBalanceThresholdSats;
 
+    /// <summary>
+    /// True when this store already has a Spark wallet, so the page can frame itself as replacing a seed
+    /// rather than as first-time setup.
+    /// </summary>
+    /// <remarks>
+    /// <c>[BindNever]</c> attaches to the declaration that follows it, comments notwithstanding — this
+    /// attribute once drifted onto <see cref="EnableSweeping"/> when this property was moved without it,
+    /// which both let a poster set this flag and silently discarded the setup page's sweeping opt-in.
+    /// <c>SparkSetupViewModelBindingTests</c> pins the placement.
+    /// </remarks>
+    [BindNever]
     public bool AlreadyConfigured { get; set; }
 
     /// <summary>

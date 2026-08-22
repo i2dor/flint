@@ -26,7 +26,7 @@ side; until it does, they are neither on Spark nor at the destination. The plugi
 quote id before sending and reports what it says it delivered, which is the most the SDK exposes.
 
 **The store's Lightning connection string is a bearer spend credential.** Setup writes a
-`type=breezspark;store-id=…;key=…` string into the store's Lightning payment method. Anyone who can read it
+`type=flint;store-id=…;key=…` string into the store's Lightning payment method. Anyone who can read it
 — any principal with `CanModifyStoreSettings` on the store, plus anything that string was ever pasted into —
 can save it on *another* store on the same server and drive this store's wallet from there: receive into it
 and spend from it. The embedded store id binds the key to a wallet; it does not bind the string to the store

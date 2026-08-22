@@ -8,6 +8,66 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Security
+
+Findings from a third external review pass, each verified against the source before fixing:
+
+- **Provider-supplied fees can no longer wrap negative past every fee ceiling.** Two fee sums cast the
+  SDK's u64 components to `long` raw (Lightning) or clamped each component but added them unchecked
+  (cooperative exits); a wrapped-negative fee would have passed every `<=` limit, including the 50% hard
+  backstop. All conversions now saturate at `long.MaxValue`, and both fee approvers additionally refuse a
+  negative fee outright as a backstop.
+- **The setup page's sweeping opt-in works again.** A `[BindNever]` attribute intended for the
+  `AlreadyConfigured` flag had drifted onto `EnableSweeping` when the property moved — attributes attach to
+  the next declaration, comments notwithstanding — so a merchant who ticked "sweep automatically" at setup
+  got a success message and no sweeping, while the flag it was written for was overpostable. A reflection
+  test now pins the placement.
+- **A token-funded write-off is gated on the token balance, exactly as a sats write-off is gated on sats.**
+  Writing off a token row unblocks the same pass to plan a fresh keyless bridge send — nothing at the
+  provider can dedupe a second one — so a held balance below what the row says was sent now keeps the row
+  blocking, bounded by the same one-hour escalation as the sats gate.
+- **The packaged `.btcpay` now carries NOTICE and LICENSE.** The artifact redistributes Breez's
+  MIT-licensed binaries and their notices did not travel with it; the build output now includes both files
+  and the packaging workflow refuses to ship an artifact without them.
+
+### Fixed
+
+- **Cross-chain `Sent` rows with an undecided conversion no longer age out of the recovery poll.** The
+  conversion's outcome has no event and is learned only from that poll, so the 24-hour cutoff could strand
+  a slow conversion silently, with a needed refund never requested. Undecided conversions are now exempt
+  from the cutoff; terminal ones age out as before.
+- **Invoice reconciliation resumes where the previous pass stopped** instead of re-examining the same
+  oldest 1,000 invoices every pass, which starved everything behind them on a large backlog.
+- **Switching the Stable Balance token is refused while the previous token still holds a balance**, which
+  would otherwise become invisible to the plugin — only the configured token is converted, displayed and
+  swept.
+- **The bridge provider's order id is persisted.** It was set on the in-memory record but absent from the
+  durable resolution, so restarting BTCPay lost the one handle a stuck-delivery investigation quotes at
+  the provider.
+- **An extreme requested invoice amount can no longer wrap into an amountless invoice.** The
+  millisatoshi-to-satoshi ceiling used the `+999` idiom, which wraps negative near `long.MaxValue` and
+  read downstream as "no amount".
+- **The release tag guard rejects a three-part tag on a four-part build** (`v0.1.4` for a 0.1.4.1
+  artifact), which would have published a release page disagreeing with its own artifact.
+- **A dropped settlement push is retried instead of lost.** A listener that falls behind has its push
+  held back and re-delivered on a short timer once it catches up — bounded by a per-subscription
+  allowance and a delivery deadline, after which the log names the truth (the payment reaches BTCPay
+  when it next reads the invoice, typically after a restart). This replaces a log line that credited a
+  BTCPay one-minute invoice poll that does not exist, and a reconciliation task that only scans unpaid
+  rows.
+- **The funded regtest suite fails hard when the wallet seed appears in any log surface**, instead of
+  quietly withholding the artifact; and its Postgres race test only counts a unique-key violation as
+  losing the race, so an unrelated error can no longer masquerade as the loser.
+
+### Documentation
+
+- The connection-string example is `type=flint` (not the pre-rename `breezspark`), the storage path is
+  `<DataDir>/Plugins/Flint/` throughout, the registry entry to search for is **Flint**, the built-against
+  BTCPay version reads 2.4.2, the clone instructions `cd` into the right directory, and the
+  connection-string handler's remarks reflect the 0.1.4.1 key rotation.
+
 ## [0.1.4.1] — 2026-08-21
 
 ### Security

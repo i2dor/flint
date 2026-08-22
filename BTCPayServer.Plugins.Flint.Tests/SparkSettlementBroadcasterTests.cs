@@ -151,6 +151,61 @@ public class SparkSettlementBroadcasterTests
 
 
     [Fact]
+    public async Task A_saturated_settlement_is_retried_once_the_consumer_catches_up()
+    {
+        // The refusal is not the end of the story: BTCPay does not re-poll listened invoices and the
+        // reconciliation task only scans unpaid rows, so a refused push that is simply dropped would leave
+        // the BTCPay invoice unpaid until a restart. The broadcaster must hold it and re-deliver when the
+        // listener drains.
+        var broadcaster = Create();
+        using var subscription = broadcaster.Subscribe("store-1");
+
+        // Fill the bounded queue so the next publish is refused and held for retry.
+        for (var i = 0; i < 256; i++)
+            broadcaster.Publish(Settlement(hash: i.ToString("x64")));
+
+        var retried = Settlement(hash: "f".PadLeft(64, 'f'));
+        broadcaster.Publish(retried);
+
+        // The consumer catches up, draining the queue…
+        for (var i = 0; i < 256; i++)
+            await subscription.ReadAsync(TestContext.Current.CancellationToken);
+
+        // …and the retry tick re-delivers what was refused.
+        broadcaster.DrainRetries(DateTimeOffset.UtcNow);
+
+        Assert.Same(retried, await subscription.ReadAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task A_retry_that_never_delivers_is_given_up_on_after_the_deadline()
+    {
+        // A consumer wedged past the delivery deadline is not going to drain, so the retry must stop
+        // retrying and say so rather than hold memory or deliver absurdly late.
+        var broadcaster = new SparkSettlementBroadcaster(
+            NullLogger<SparkSettlementBroadcaster>.Instance,
+            pushRetryInterval: TimeSpan.FromMilliseconds(100),
+            pushRetryLifetime: TimeSpan.FromMilliseconds(50),
+            pendingPushCap: 4);
+        using var subscription = broadcaster.Subscribe("store-1");
+
+        for (var i = 0; i < 256; i++)
+            broadcaster.Publish(Settlement(hash: i.ToString("x64")));
+        for (var i = 0; i < 4; i++)
+            broadcaster.Publish(Settlement(hash: (i + 1_000).ToString("x64")));
+
+        // The consumer catches up, but the retry deadline has already passed.
+        for (var i = 0; i < 256; i++)
+            await subscription.ReadAsync(TestContext.Current.CancellationToken);
+        broadcaster.DrainRetries(DateTimeOffset.UtcNow.AddMinutes(1));
+
+        // Nothing more arrives: the held pushes were given up on rather than delivered late.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await subscription.ReadAsync(cts.Token));
+    }
+
+    [Fact]
     public async Task Many_concurrent_subscribers_all_receive()
     {
         var broadcaster = Create();

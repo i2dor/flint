@@ -34,14 +34,14 @@ exists — before you configure anything.
 What a server needs to *run* this plugin:
 
 - **BTCPay Server 2.4.1 or newer.** That is the declared support floor, and BTCPay refuses to load the
-  plugin on anything older. It is compiled against 2.4.1 as well.
+  plugin on anything older. It is compiled against 2.4.2.
 - **A supported platform.** The Breez Spark SDK ships around 200 MB of native libraries for
   `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` and `win-x86`. There is **no**
   `linux-musl` (Alpine) or `win-arm64` payload, so the plugin will not load on those platforms.
   Standard BTCPay Docker images (Debian-based) are fine.
 - **Mainnet or regtest.** The SDK offers no testnet or signet, so neither is supported. Stable Balance
   and cross-chain sweeps are mainnet-only even on a supported network.
-- **Disk for the SDK's per-store state**, under `<DataDir>/Plugins/Spark/`, plus an unrotated
+- **Disk for the SDK's per-store state**, under `<DataDir>/Plugins/Flint/`, plus an unrotated
   `sdk.log` you are expected to point `logrotate` at — see [Known limitations](docs/limitations.md).
 - **Server-admin rights, or the *Non-admins can create Hot Wallets for their Store* policy**, to set a
   store up. Spark keeps keys on the server, so the plugin sits behind BTCPay's own hot-wallet gate.
@@ -52,7 +52,7 @@ Requires **BTCPay Server 2.4.1 or newer** on a host the Breez SDK has native lib
 [Requirements](#requirements) before you start, because Alpine-based images are not among them.
 
 **From the BTCPay plugin registry** *(once this plugin is listed there — it is not yet)*: in your BTCPay
-Server, go to **Server settings → Plugins**, find **Spark**, and install it. BTCPay restarts itself to
+Server, go to **Server settings → Plugins**, find **Flint**, and install it. BTCPay restarts itself to
 complete the install.
 
 **From a release artifact**, which is the route available today: download

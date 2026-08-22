@@ -41,7 +41,8 @@ public sealed record SweepResolution(
     DateTimeOffset CompletedAt,
     SweepRefusalCode RefusalCode = SweepRefusalCode.None,
     SparkConversionStatus? ConversionStatus = null,
-    string? DeliveredAmountBaseUnits = null);
+    string? DeliveredAmountBaseUnits = null,
+    string? ProviderOrderId = null);
 
 /// <summary>
 /// Durable storage for <see cref="SweepRecord"/>s.

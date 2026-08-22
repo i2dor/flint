@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Flint.Sdk;
+using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace BTCPayServer.Plugins.Flint.Data;
@@ -96,10 +98,19 @@ public class EfSweepRecordStore : ISweepRecordStore
         return await context.SweepRecords
             .AsNoTracking()
             // Pending is unbounded and Sent is age-bounded, for the reason on the interface: a Pending row is the
-            // one thing that must be chased until Spark answers, however long the wallet stays down.
+            // one thing that must be chased until Spark answers, however long the wallet stays down. One
+            // exception to the age bound: a cross-chain Sent row whose conversion has not reached a terminal
+            // state. The conversion's outcome has no event — it is learned solely from this poll — so ageing
+            // such a row out would strand a pending conversion silently and a needed refund would never be
+            // requested, however old the row grows.
             .Where(r => r.StoreId == storeId
                         && (r.Status == SweepRecordStatus.Pending
-                            || (r.Status == SweepRecordStatus.Sent && r.CreatedAt > sentCreatedAfter)))
+                            || (r.Status == SweepRecordStatus.Sent
+                                && (r.CreatedAt > sentCreatedAfter
+                                    || (r.DestinationKind == SweepDestinationKind.EvmAddress
+                                        && r.ConversionStatus != SparkConversionStatus.Completed
+                                        && r.ConversionStatus != SparkConversionStatus.Failed
+                                        && r.ConversionStatus != SparkConversionStatus.Refunded)))))
             .OrderBy(r => r.CreatedAt)
             .ThenBy(r => EF.Functions.Collate(r.IdempotencyKey, ByteOrderCollation))
             .ToListAsync(cancellationToken);
@@ -206,6 +217,7 @@ public class EfSweepRecordStore : ISweepRecordStore
         var refusalCode = resolution.RefusalCode;
         var conversionStatus = resolution.ConversionStatus;
         var delivered = resolution.DeliveredAmountBaseUnits;
+        var providerOrderId = resolution.ProviderOrderId;
 
         await using var context = _contextFactory.CreateContext();
 
@@ -233,7 +245,11 @@ public class EfSweepRecordStore : ISweepRecordStore
                     // an earlier one did.
                     .SetProperty(r => r.ConversionStatus, r => conversionStatus ?? r.ConversionStatus)
                     .SetProperty(
-                        r => r.DeliveredAmountBaseUnits, r => delivered ?? r.DeliveredAmountBaseUnits),
+                        r => r.DeliveredAmountBaseUnits, r => delivered ?? r.DeliveredAmountBaseUnits)
+                    // The bridge provider's own order id — the handle an investigation into a stuck delivery
+                    // quotes at the provider. Coalesced like the rest; it arrives once and must survive
+                    // every later Sent → Confirmed poll.
+                    .SetProperty(r => r.ProviderOrderId, r => providerOrderId ?? r.ProviderOrderId),
                 cancellationToken);
 
         return updated == 1;

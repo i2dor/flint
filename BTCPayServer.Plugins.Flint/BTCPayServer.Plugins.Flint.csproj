@@ -85,6 +85,17 @@
 
   <ItemGroup>
     <!--
+      The packaged .btcpay redistributes Breez's compiled binaries, and NOTICE records the MIT copyright and
+      permission notices that must travel with them (LICENSE is this plugin's own). PluginPacker zips the
+      build output directory, so copying both there is what puts them inside the artifact; package.yml
+      refuses to ship a .btcpay that lacks either.
+    -->
+    <None Include="..\NOTICE" Link="NOTICE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
       The unit tests assert on pure helpers (amount rounding, expiry clamping, UTF-8 truncation, payment-hash
       normalisation, fee-limit arithmetic) that have no business being part of the plugin's public surface.
     -->

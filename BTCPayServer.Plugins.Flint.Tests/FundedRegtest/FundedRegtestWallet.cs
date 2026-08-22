@@ -241,14 +241,16 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         if (_mnemonic is null)
             return;
 
+        string? seedLeak = null;
         try
         {
-            WriteAudit();
+            seedLeak = WriteAudit();
         }
         catch (Exception ex)
         {
             // A failed artefact write must not turn a green suite red: the artefact is evidence for a human,
-            // not a result. The tests carry their own assertions.
+            // not a result. The tests carry their own assertions. A *detected seed leak* is the one exception,
+            // thrown below — outside this catch — so a broken artefact writer cannot swallow it.
             Console.WriteLine($"funded-regtest: could not write the log-audit artefact: {ex}");
         }
 
@@ -267,6 +269,14 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         }
 
         TryDeleteStorage();
+
+        if (seedLeak is not null)
+        {
+            // Hard failure, not just a withheld attachment: a run that leaked the funded wallet's seed into a
+            // log is a security regression, and a red suite is the only signal nobody can skim past. Thrown
+            // last so the artefacts are written and the SDK is torn down before the run turns red.
+            throw new InvalidOperationException($"funded-regtest seed leak: {seedLeak}");
+        }
     }
 
     /// <summary>
@@ -287,7 +297,11 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
     /// assert against it — but it must not also be a publication.
     /// </para>
     /// </remarks>
-    private void WriteAudit()
+    /// <returns>
+    /// A leak description when the wallet seed appeared in either log surface, null otherwise. Returned rather
+    /// than thrown so the artefact — the evidence — is fully written before the caller turns the run red.
+    /// </returns>
+    private string? WriteAudit()
     {
         var directory = Environment.GetEnvironmentVariable(ArtifactVariable) is { } configured
             && !string.IsNullOrWhiteSpace(configured)
@@ -355,8 +369,9 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
             report.AppendLine($"| {identifier.Kind} | `{identifier.Value}` | {inForwarded} | {inRaw} |");
         }
 
+        var forwardedCarriesSeed = SeedAppearsIn(forwardedText, _mnemonic!);
         report.AppendLine("| wallet seed | *(not printed)* | "
-            + $"{(SeedAppearsIn(forwardedText, _mnemonic!) ? "**PRESENT — this is a leak**" : "0")} | "
+            + $"{(forwardedCarriesSeed ? "**PRESENT — this is a leak**" : "0")} | "
             + $"{(raw is null ? "n/a" : rawCarriesSeed ? "**PRESENT — this is a leak**" : "0")} |");
         report.AppendLine();
 
@@ -405,6 +420,19 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
             + "measurement. That is the whole point of this artefact.");
 
         File.WriteAllText(Path.Combine(directory, "preimage-audit.md"), report.ToString());
+
+        // The verdict, after the evidence is on disk. Never includes a seed word — the fingerprint is enough
+        // to match the report, and the report itself withholds the leaking file.
+        if (forwardedCarriesSeed)
+        {
+            return "the wallet seed appears in the FORWARDED (post-scrub) log — the scrubber has a hole. "
+                   + $"Seed fingerprint {SeedFingerprint}; see preimage-audit.md in the run artefacts.";
+        }
+
+        return rawCarriesSeed
+            ? "the wallet seed appears in the raw sdk.log written by the Rust SDK. The file was withheld from "
+              + $"the artefacts; seed fingerprint {SeedFingerprint}, details in preimage-audit.md."
+            : null;
     }
 
     private IReadOnlyList<KnownIdentifier> Snapshot()

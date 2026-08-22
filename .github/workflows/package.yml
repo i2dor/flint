@@ -150,6 +150,25 @@ jobs:
           artifact_dir="$(dirname "$btcpay_file")"
           echo "dir=$artifact_dir" >> "$GITHUB_OUTPUT"
 
+      # The .btcpay redistributes Breez's MIT-licensed binaries, and the licence requires their copyright
+      # and permission notices to travel with them — NOTICE carries those, LICENSE is this plugin's own.
+      # The csproj copies both into the build output PluginPacker zips; this step is what makes forgetting
+      # that copy a failed build instead of a non-redistributable artifact.
+      - name: Licence notices are inside the artifact
+        env:
+          ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
+        run: |
+          set -euo pipefail
+          btcpay_file="$(find "$ARTIFACT_DIR" -name '*.btcpay' -print -quit)"
+          for required in NOTICE LICENSE; do
+            if ! python3 -c "import sys, zipfile; sys.exit(0 if '$required' in zipfile.ZipFile('$btcpay_file').namelist() else 1)"; then
+              echo "error: $required is not inside $btcpay_file; the packaged plugin redistributes" \
+                   "Breez's MIT-licensed binaries and must carry their notices" >&2
+              exit 1
+            fi
+          done
+          echo "NOTICE and LICENSE are inside the artifact."
+
       # A tag is the one input to this workflow that nothing else validates. Note what is and is not
       # at stake: the plugin registry does *not* key anything off the tag -- it reads the version out
       # of the PluginPacker manifest, and takes a git ref only as something to clone -- and BTCPay
@@ -175,15 +194,19 @@ jobs:
           IFS=. read -r major minor patch _rest <<< "$built"
           built3="${major:-0}.${minor:-0}.${patch:-0}"
           # A tag may name three components (v0.1.4) or all four (v0.1.4.1, a point release whose fourth
-          # component is real, not the assembly-version padding built3 exists to strip). Accept the tag when
-          # it matches either reading; reject everything else.
-          if [ "v$built3" != "$TAG" ] && [ "v$built" != "$TAG" ]; then
-            echo "error: tag $TAG does not match the built plugin version v$built3 or v$built" \
+          # component is real). The three-component reading is only valid when the built fourth component is
+          # assembly padding — absent or zero — because accepting v0.1.4 for a 0.1.4.1 build would publish a
+          # release page that lies about its own artifact, which is the exact thing this guard exists to stop.
+          if [ "v$built" = "$TAG" ]; then
+            echo "Tag $TAG matches the built plugin version exactly."
+          elif [ "v$built3" = "$TAG" ] && { [ -z "${_rest:-}" ] || [ "${_rest}" = "0" ]; }; then
+            echo "Tag $TAG matches the built plugin version (fourth component is padding)."
+          else
+            echo "error: tag $TAG does not match the built plugin version" \
                  "(PluginPacker reported '$built')." >&2
             echo "Bump <Version> in $PROJECT_PATH, or retag." >&2
             exit 1
           fi
-          echo "Tag $TAG matches the built plugin version."
 
       # Keyless signing. See the note at the top of this file for why this rather than a GPG key in
       # a repository secret. Runs on workflow_dispatch too, so the path is proven before a release

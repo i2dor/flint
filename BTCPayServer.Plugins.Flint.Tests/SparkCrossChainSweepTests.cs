@@ -993,6 +993,10 @@ public class SparkCrossChainSweepTests
         Assert.Equal(SweepRecordStatus.Confirmed, resolved!.Status);
         Assert.Equal(SparkConversionStatus.Completed, resolved.ConversionStatus);
         Assert.Equal("35100000", resolved.DeliveredAmountBaseUnits);
+        // The provider order id rides on the same recovery resolution as the delivered amount: it is the handle
+        // a stuck-delivery investigation quotes at the provider, and the crash-recovery poll is exactly the
+        // path that used to drop it (the initial send had already persisted it).
+        Assert.Equal("order-1", resolved.ProviderOrderId);
 
         // Never looked the row's own key up as a payment id — it is not one.
         Assert.DoesNotContain(row.IdempotencyKey, h.Sdk.GetPaymentCalls);
@@ -1062,6 +1066,10 @@ public class SparkCrossChainSweepTests
         var recovered = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.Equal(SweepRecordStatus.Sent, recovered!.Status);
         Assert.Equal(SparkConversionStatus.Pending, recovered.ConversionStatus);
+        // The order id the crash-window recovery poll resolves from is the same one the send reported: the
+        // crash happened before the initial resolution, so the recovery poll is the only thing that can
+        // persist it.
+        Assert.Equal(payment.Conversion!.ProviderOrderId, recovered.ProviderOrderId);
 
         // Found by scanning, not by a point lookup, and never re-sent.
         Assert.DoesNotContain(key, h.Sdk.GetPaymentCalls);
@@ -1159,6 +1167,55 @@ public class SparkCrossChainSweepTests
         Assert.Equal(SweepRecordStatus.Failed, closed!.Status);
         Assert.Contains("not proof", closed.Error!, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("not be retried", closed.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// A token write-off is gated on the token balance exactly as a sats write-off is gated on sats.
+    /// </summary>
+    /// <remarks>
+    /// The hazard is sharper here than on the sats rail: the row itself is never retried, but writing it off
+    /// unblocks this very pass to plan a fresh sweep from the token balance — and a token send cannot carry an
+    /// idempotency key, so nothing at the provider can dedupe a second one. When the held balance is below what
+    /// the row says was sent, the send may well have happened and just not be visible yet; the row must block,
+    /// bounded by the same escalation window as the sats gate.
+    /// </remarks>
+    [Fact]
+    public async Task A_token_write_off_is_blocked_while_the_token_balance_suggests_the_send_happened()
+    {
+        // The row says 35.6 USDB went out; the wallet holds 30. The shortfall keeps it blocking...
+        var h = Harness(balanceSats: 500_000, stableBalance: 30_000_000);
+
+        await h.Records.AddAsync(
+            new SweepRecord
+            {
+                IdempotencyKey = "row-key-3",
+                StoreId = StoreId,
+                DestinationMode = SweepDestinationMode.EvmAddress,
+                DestinationKind = SweepDestinationKind.EvmAddress,
+                IdempotencyKeyAccepted = false,
+                ProviderQuoteId = "q_that_matches_nothing",
+                SourceTokenIdentifier = FakeSparkSdkClient.Usdb.Value,
+                SourceAmountBaseUnits = "35600000",
+                Status = SweepRecordStatus.Pending,
+                CreatedAt = Origin,
+                AttemptCount = 1
+            },
+            Ct);
+
+        h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromMinutes(1));
+        var blocked = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        Assert.Equal(SweepOutcomeKind.InFlight, blocked.Kind);
+        Assert.Empty(h.Sdk.CrossChainSendCalls);
+        Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, "row-key-3", Ct))!.Status);
+
+        // ...and past the escalation window it closes with a reason naming what was observed.
+        h.Time.Advance(SparkSweepEngine.ShortfallWriteOffAge);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
+
+        var closed = await h.Records.GetAsync(StoreId, "row-key-3", Ct);
+        Assert.Equal(SweepRecordStatus.Failed, closed!.Status);
+        Assert.Contains("held less than the sweep would have sent", closed.Error);
     }
 
     /// <summary>

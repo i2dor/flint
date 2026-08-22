@@ -39,7 +39,9 @@ public class BreezApiKeyTests
     private static string RepoRoot()
     {
         var dir = System.AppContext.BaseDirectory;
-        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, "LICENSE")))
+        // The solution file, not LICENSE: LICENSE is copied into the build output so it ships inside the
+        // .btcpay, which made it match the bin directory before it matched the repository root.
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, "BTCPayServer.Plugins.Flint.slnx")))
             dir = System.IO.Directory.GetParent(dir)?.FullName;
         return dir ?? throw new System.InvalidOperationException("repo root not found");
     }
