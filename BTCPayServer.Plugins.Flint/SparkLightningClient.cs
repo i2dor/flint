@@ -807,7 +807,11 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     {
         if (amount is null || amount.MilliSatoshi <= 0)
             return null;
-        return (amount.MilliSatoshi + 999) / 1000;
+        // Ceiling without the +999 idiom: for a millisatoshi value near long.MaxValue the addition wraps
+        // negative, and a negative result here maps to "amountless invoice" downstream — an absurd requested
+        // amount must stay absurd (and fail loudly), never turn into an invoice for anything-goes.
+        var msat = amount.MilliSatoshi;
+        return msat / 1000 + (msat % 1000 > 0 ? 1 : 0);
     }
 
     /// <summary>
@@ -929,6 +933,17 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// </remarks>
     internal static string? ApproveFee(SparkSendQuote quote, PayInvoiceParams? payParams, long amountSats)
     {
+        // Every limit below is a <=, so a negative fee — the shape a wrapped provider u64 takes — would pass
+        // them all. The SDK client's conversions saturate rather than wrap; this is the backstop.
+        if (quote.FeeSats < 0)
+        {
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "The Spark fee for this payment is negative ({0} sat), which is not a number a fee limit can "
+                + "bound. The payment was refused.",
+                quote.FeeSats);
+        }
+
         long? maxFeeSats = null;
 
         if (payParams?.MaxFeeFlat is { } flat)

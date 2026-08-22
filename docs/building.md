@@ -12,7 +12,7 @@ Clone with submodules, or initialise them after the fact:
 
 ```bash
 git clone --recurse-submodules https://github.com/sethforprivacy/flint.git
-cd btcpayserver-plugin-spark
+cd flint
 ```
 
 ```bash

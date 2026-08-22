@@ -295,7 +295,39 @@ public sealed class SparkStableBalanceService
         var updated = settings.Clone();
         var stable = (updated.StableBalance ?? new StableBalanceSettings()).Clone();
         var wasActive = stable.Enabled;
+        var previousToken = stable.TokenIdentifier;
         input.ApplyTo(stable);
+
+        // Switching tokens while the old one still holds a balance would strand it: only the configured token
+        // is converted, displayed and swept, so the old balance would sit invisible on the wallet with nothing
+        // in the UI even acknowledging it exists. Refused rather than warned — convert or sweep it out first.
+        if (!string.IsNullOrEmpty(previousToken)
+            && !string.Equals(previousToken, stable.TokenIdentifier, StringComparison.Ordinal))
+        {
+            try
+            {
+                var info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+                var held = info.Tokens.FirstOrDefault(t =>
+                    string.Equals(t.Identifier.Value, previousToken, StringComparison.Ordinal));
+                if (held is { BaseUnits.Sign: > 0 })
+                {
+                    return SparkStableBalanceResult.Invalid(new SparkSweepSettingsError(
+                        nameof(StableBalanceInput.TokenIdentifier),
+                        $"This wallet still holds {held.Describe()}. Changing the token would leave that "
+                        + "balance invisible to this plugin — convert it back to Bitcoin or sweep it out "
+                        + "before switching."));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Store {StoreId}: could not read token balances to allow a stable-balance token switch "
+                    + "({Reason})", storeId, SparkErrors.Describe(ex));
+                return SparkStableBalanceResult.Unavailable(
+                    "The wallet's token balances could not be read, so the token cannot be switched safely "
+                    + "right now. Try again once the wallet is reachable.");
+            }
+        }
 
         // Verified against the SDK before anything is written, not after. An identifier the wallet does not
         // know is not a setting to store and correct later — activating on it would fail at the point the

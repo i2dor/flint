@@ -50,11 +50,11 @@ namespace BTCPayServer.Plugins.Flint;
 /// config is being saved. Copy a store's whole string onto another store on the same server and that
 /// store drives the original's wallet: confirmed live in the 2026-08-07 audit, which read the victim's
 /// balance and minted an invoice into the victim's wallet through the attacker's store. The string is
-/// therefore a <b>bearer spend credential</b>, exactly like an LND macaroon, and
-/// <see cref="Services.SparkStoreProvisioner"/> keeps the payment key across re-provisioning rather than
-/// rotating it — so a leaked string outlives the leaker's access and dies only with full Spark removal.
-/// Treat it as a secret, and do not restate the older, stronger claim that store binding closes
-/// cross-store hijack outright.
+/// therefore a <b>bearer spend credential</b>, exactly like an LND macaroon.
+/// <see cref="Services.SparkStoreProvisioner"/> rotates the payment key on every provision, so re-running
+/// setup revokes every previously issued string; between provisions the string never expires. Treat it as
+/// a secret, and do not restate the older, stronger claim that store binding closes cross-store hijack
+/// outright.
 /// </para>
 /// <para>There is deliberately no <c>server=</c> key, so
 /// BTCPay's <c>IsSafe</c> check passes and non-admin store owners can save the configuration.</para>

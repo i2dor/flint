@@ -219,6 +219,39 @@ public abstract class SweepRecordStoreContractTests
     }
 
     [Fact]
+    public async Task Unresolved_never_ages_out_a_Sent_cross_chain_record_whose_conversion_is_undecided()
+    {
+        // A cross-chain conversion's outcome has no event: it is learned only from the crash-recovery poll
+        // over this very list. Ageing an undecided one out with the sats rows would strand it silently — the
+        // status stuck at Sent forever and a needed refund never requested. Terminal conversions age out
+        // normally; there is nothing left to learn about them.
+        var store = await CreateStoreAsync();
+
+        SweepRecord CrossChain(string key, SparkConversionStatus? conversion)
+        {
+            var record = NewRecord(key, minutesOld: 5_000, status: SweepRecordStatus.Sent);
+            record.DestinationKind = SweepDestinationKind.EvmAddress;
+            record.ConversionStatus = conversion;
+            return record;
+        }
+
+        await store.AddAsync(CrossChain("key-undecided-null", null), Ct);
+        await store.AddAsync(CrossChain("key-undecided-pending", SparkConversionStatus.Pending), Ct);
+        await store.AddAsync(CrossChain("key-refund-needed", SparkConversionStatus.RefundNeeded), Ct);
+        await store.AddAsync(CrossChain("key-completed", SparkConversionStatus.Completed), Ct);
+        await store.AddAsync(CrossChain("key-conversion-failed", SparkConversionStatus.Failed), Ct);
+        await store.AddAsync(CrossChain("key-refunded", SparkConversionStatus.Refunded), Ct);
+        // And an aged sats Sent row, to pin that the exemption is cross-chain-only.
+        await store.AddAsync(NewRecord("key-sats-ancient", minutesOld: 5_000, status: SweepRecordStatus.Sent), Ct);
+
+        var unresolved = await store.ListUnresolvedAsync(StoreId, Origin.AddMinutes(-60), Ct);
+
+        Assert.Equal(
+            ["key-refund-needed", "key-undecided-null", "key-undecided-pending"],
+            unresolved.Select(r => r.IdempotencyKey).OrderBy(k => k, StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task Unresolved_never_ages_out_a_Pending_record()
     {
         // The bug this pins: an earlier revision aged Pending rows out too, so a store whose wallet stayed down
@@ -611,7 +644,7 @@ public abstract class SweepRecordStoreContractTests
             StoreId, "key-cc2", [SweepRecordStatus.Pending],
             new SweepResolution(
                 SweepRecordStatus.Confirmed, null, null, null, Origin, SweepRefusalCode.None,
-                SparkConversionStatus.Completed, "35480000"),
+                SparkConversionStatus.Completed, "35480000", "order-7f3a"),
             Ct));
 
         // A second pass that learned nothing new — which is the normal case once a sweep has settled.
@@ -623,6 +656,9 @@ public abstract class SweepRecordStoreContractTests
         var stored = await store.GetAsync(StoreId, "key-cc2", Ct);
         Assert.Equal("35480000", stored!.DeliveredAmountBaseUnits);
         Assert.Equal(SparkConversionStatus.Completed, stored.ConversionStatus);
+        // The bridge provider's order id is durable — it is the handle an investigation into a stuck delivery
+        // quotes at the provider, and it used to live only on the in-memory copy the resolving pass held.
+        Assert.Equal("order-7f3a", stored.ProviderOrderId);
     }
 
     #endregion

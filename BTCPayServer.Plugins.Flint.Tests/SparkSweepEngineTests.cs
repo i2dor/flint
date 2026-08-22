@@ -1738,6 +1738,20 @@ public class SparkSweepEngineTests
     }
 
     [Fact]
+    public void ApproveQuote_refuses_a_negative_fee_outright()
+    {
+        // The shape a wrapped provider u64 takes. Every ceiling in this guard is a <=, so a negative fee would
+        // pass all of them — including the 50% hard backstop no configuration can lift.
+        var quote = new SparkOnchainQuote(
+            100_000, -1, true, new SparkOnchainFeeQuote("q", Origin, -1, -1, -1));
+
+        var refusal = SparkSweepEngine.ApproveQuote(new SweepSettings(), quote);
+
+        Assert.NotNull(refusal);
+        Assert.Contains("negative", refusal.Message);
+    }
+
+    [Fact]
     public void ApproveQuote_allows_a_fee_exactly_on_the_limit()
     {
         // 2% of 100,000 delivered is exactly 2,000.

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -75,6 +76,12 @@ public class SparkSettlementReconciler
     private readonly IInvoiceRecordStore _invoiceStore;
     private readonly SparkSettlementBroadcaster _broadcaster;
     private readonly ILogger<SparkSettlementReconciler> _logger;
+
+    /// <summary>
+    /// Where the last capped reconciliation pass stopped, per store, so the next pass resumes rather than
+    /// re-examining the same oldest invoices — see the note at the cursor's initialisation.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, InvoiceReconciliationCursor> _resumeCursors = new();
 
     public SparkSettlementReconciler(
         IInvoiceRecordStore invoiceStore,
@@ -379,7 +386,12 @@ public class SparkSettlementReconciler
 
         var settled = 0;
         var examined = 0;
-        InvoiceReconciliationCursor? cursor = null;
+        // Resumed from where the previous pass stopped, not from the top. The per-pass cap exists to bound a
+        // pass's work, but restarting at the oldest invoice every pass would make it a starvation line: with
+        // more settleable invoices than the cap, the same oldest set is re-examined forever and everything
+        // behind it is never reached. The cursor carries across passes and resets only when a pass drains the
+        // set, so every invoice is reached within a bounded number of passes.
+        InvoiceReconciliationCursor? cursor = _resumeCursors.TryGetValue(storeId, out var resume) ? resume : null;
 
         while (examined < MaxInvoicesPerPass)
         {
@@ -432,12 +444,20 @@ public class SparkSettlementReconciler
                 break;
         }
 
-        if (examined >= MaxInvoicesPerPass)
+        if (examined >= MaxInvoicesPerPass && cursor is { } stopped)
         {
+            // The next pass resumes here rather than restarting at the oldest invoice, which is what makes the
+            // sentence below true rather than a starvation line.
+            _resumeCursors[storeId] = stopped;
             _logger.LogInformation(
-                "Store {StoreId}: reconciliation examined its per-pass limit of {Count} Spark invoices; any "
-                + "remaining ones are picked up by the next pass, oldest first",
+                "Store {StoreId}: reconciliation examined its per-pass limit of {Count} Spark invoices; the "
+                + "next pass resumes where this one stopped",
                 storeId, MaxInvoicesPerPass);
+        }
+        else
+        {
+            // The set drained; the next pass starts from the top again.
+            _resumeCursors.TryRemove(storeId, out _);
         }
 
         if (settled > 0)

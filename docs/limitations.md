@@ -11,7 +11,7 @@
   will not settle the BTCPay invoice, and the mismatch is logged as a warning.
 - **Testnet and signet are unsupported**, because the SDK only offers mainnet and regtest.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
-  logging subscriber, which writes `<DataDir>/Plugins/Spark/logs/sdk.log` *and* forwards every line into
+  logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into
   BTCPay's log. What it emits at each level was read line by line against a throwaway regtest wallet: at
   `info` and `debug` — the level Breez's production checklist asks for — nothing secret appears, but at
   `trace` the service provider's GraphQL **session token** is logged in full inside raw response bodies. That
@@ -21,7 +21,7 @@
   plugin does not control. One gap worth knowing: the probe wallet was never paid, so the lines a completed
   payment produces are unaudited — the scrubbing is written against that gap rather than around it.
 - **`sdk.log` is not rotated, and rotating it is yours to arrange.** The file at
-  `<DataDir>/Plugins/Spark/logs/sdk.log` is opened and written by the Rust SDK, not by this plugin — nothing
+  `<DataDir>/Plugins/Flint/logs/sdk.log` is opened and written by the Rust SDK, not by this plugin — nothing
   on the C# side can truncate, roll or size-cap it, so the plugin makes no promise about how large it gets.
   At the shipped `info` level it is not fast-growing, but it is unbounded and it grows for as long as the
   server runs. **Treat it as a file your host is responsible for**: point `logrotate` (or your container's
@@ -29,7 +29,7 @@
   the file needs `copytruncate` rather than `create`. It is safe to delete while the server is stopped.
   Nothing in the plugin reads it back; it exists for you and for a bug report.
 - **Everything the plugin writes under the data directory is owner-only, and that is the only protection
-  it has.** Each store's SDK state lives in `<DataDir>/Plugins/Spark/<storeId>/`, beside the log directory,
+  it has.** Each store's SDK state lives in `<DataDir>/Plugins/Flint/<storeId>/`, beside the log directory,
   and both are created `0700` — a directory without other-execute cannot be traversed to reach the files
   inside it, whatever mode the SDK gives them. The correction is applied on every start rather than only at
   creation, so an install laid down by an earlier version is hardened when it next runs. On a host where the

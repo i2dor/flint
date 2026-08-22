@@ -204,10 +204,14 @@ public sealed class SparkSdkClient : ISparkSdkClient
 
         // Prepare succeeds even with a zero balance — the funds check happens in SendPayment — so this
         // quote is free to obtain and must be checked before committing.
+        // Saturating, never a raw cast: these are provider-supplied u64s, and the fee guard downstream is a
+        // `<=` against a ceiling — a value that wrapped negative would sail under any ceiling, which is the
+        // exact number the guard exists to stop. Saturated to long.MaxValue, the same value fails every guard.
         var feeSats = prepared.paymentMethod switch
         {
-            SendPaymentMethod.Bolt11Invoice bolt11Method =>
-                (long)bolt11Method.lightningFeeSats + (long)(bolt11Method.sparkTransferFeeSats ?? 0),
+            SendPaymentMethod.Bolt11Invoice bolt11Method => SaturatingAdd(
+                ToSatsSaturating(bolt11Method.lightningFeeSats),
+                ToSatsSaturating(bolt11Method.sparkTransferFeeSats ?? 0)),
             SendPaymentMethod.SparkAddress sparkAddress => SparkPaymentMapper.ToSats(sparkAddress.fee),
             _ => 0
         };
@@ -338,10 +342,24 @@ public sealed class SparkSdkClient : ISparkSdkClient
             FastFeeSats: Total(feeQuote.speedFast)));
 
         // The executed payment's `fees` equalled this sum exactly on every observed coop exit, so the sum is the
-        // fee; neither half is meaningful on its own.
+        // fee; neither half is meaningful on its own. Clamping each half and then adding them raw would still
+        // wrap for two near-max halves, so the addition saturates too — see the fee-quote note above.
         static long Total(SendOnchainSpeedFeeQuote tier) =>
-            (long)Math.Min(tier.userFeeSat, long.MaxValue) + (long)Math.Min(tier.l1BroadcastFeeSat, long.MaxValue);
+            SaturatingAdd(ToSatsSaturating(tier.userFeeSat), ToSatsSaturating(tier.l1BroadcastFeeSat));
     }
+
+    /// <summary>A provider u64 as satoshi, saturated at <see cref="long.MaxValue"/> instead of cast raw.</summary>
+    /// <remarks>
+    /// A raw <c>(long)</c> of a u64 past <c>long.MaxValue</c> wraps negative, and every fee guard in this plugin
+    /// is a <c>&lt;=</c> against a ceiling — a negative fee passes all of them. Saturated, the same absurd value
+    /// fails all of them, which is the direction a guard on provider-supplied numbers must fail in.
+    /// </remarks>
+    internal static long ToSatsSaturating(ulong value) =>
+        value > long.MaxValue ? long.MaxValue : (long)value;
+
+    /// <summary>Adds two non-negative fee components without wrapping past <see cref="long.MaxValue"/>.</summary>
+    internal static long SaturatingAdd(long a, long b) =>
+        a > long.MaxValue - b ? long.MaxValue : a + b;
 
     /// <remarks>
     /// Mapped explicitly rather than cast. The SDK's enum is ordered <c>Fast = 0, Medium = 1, Slow = 2</c> and

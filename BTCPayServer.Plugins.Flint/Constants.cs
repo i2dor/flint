@@ -121,7 +121,7 @@ public static class Constants
 
     /// <summary>
     /// Sub-directory of the BTCPay data directory holding per-store SDK storage
-    /// (<c>&lt;DataDir&gt;/Plugins/Spark/&lt;storeId&gt;</c>).
+    /// (<c>&lt;DataDir&gt;/Plugins/Flint/&lt;storeId&gt;</c>).
     /// </summary>
     public const string WorkDirName = "Flint";
 

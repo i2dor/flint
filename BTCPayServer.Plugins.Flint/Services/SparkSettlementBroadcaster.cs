@@ -134,9 +134,15 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
                     continue;
 
                 default:
+                    // Not "recovered by the reconciliation task": the reconciler scans Unpaid rows and this
+                    // invoice's row is already Paid — the push was minted on that very transition. What
+                    // actually recovers a dropped push is BTCPay's own LightningListener, which polls every
+                    // listened invoice through GetInvoice on a one-minute timer, and GetInvoice reads the
+                    // durable Paid row. The settlement is never lost; only this push was.
                     _logger.LogWarning(
                         "A Spark settlement listener for store {StoreId} is not keeping up; dropped a "
-                        + "notification for {PaymentHash}, which will be recovered by the reconciliation task",
+                        + "notification for {PaymentHash}. The invoice is settled in this plugin's records and "
+                        + "BTCPay's own invoice polling picks it up from there, typically within a minute",
                         settlement.StoreId, settlement.PaymentHash);
                     continue;
             }
