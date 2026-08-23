@@ -8,7 +8,33 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
-## [0.1.5.2] — 2026-08-22
+## [0.1.6.0] - 2026-08-23
+
+### Added
+
+- **`POST /api/v1/stores/{storeId}/spark/sync` forces a wallet sync and returns the current balance.**
+  The balance returned by other endpoints is read from the SDK cache without forcing a sync and may lag
+  settlement by up to 20 seconds. The new endpoint forces an explicit sync before reading, so the
+  returned `balanceSats` is current at call time. Requires `btcpay.store.canmodifystoresettings`.
+  Response: `{ "walletRunning": bool, "balanceSats": long, "syncedAt": timestamp }`.
+- **Sweep webhook.** Setting `sweepWebhookUrl` in the sweep configuration causes Flint to POST a JSON
+  payload to that URL after each successful sweep. The payload includes `storeId`, `idempotencyKey`,
+  `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`.
+  Delivery failures are logged as warnings and never retried; the sweep record is the authoritative
+  source. The field is included in `SweepSettings.Clone()` so it survives a seed change.
+- **Sweep configuration warnings.** `GET /api/v1/stores/{storeId}/spark/sweep` now includes a `warnings`
+  array. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the
+  recommended defaults (which were measured on regtest and may not hold on mainnet).
+- **`scripts/setup-stores.sh`** - bash script for headless provisioning of one or more stores via the
+  Greenfield API. Saves each store's recovery phrase (optionally GPG-encrypted) immediately on
+  provisioning, since the API returns it exactly once.
+- **`scripts/flint-logrotate.conf`** - logrotate configuration for `sdk.log`. Uses `copytruncate`
+  because the Rust SDK holds the file handle open; a rename-based rotation leaves the SDK writing to
+  the renamed file.
+- **`docs/railway.md`** - deployment guide for Railway: persistent volume requirements, environment
+  variables, log rotation options, and a post-deploy verification script.
+
+## [0.1.5.2] - 2026-08-22
 
 ### Changed
 

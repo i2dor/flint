@@ -180,6 +180,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
             provider.GetRequiredService<StoreRepository>);
         services.AddSingleton<ICrossChainValueOracle, BTCPayCrossChainValueOracle>();
 
+        // Webhook notifier for post-sweep notifications. Named client so the timeout applies to delivery
+        // alone and does not share the catalogue's socket pool. Failures are logged as warnings.
+        services.AddHttpClient(SparkSweepWebhookNotifier.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddSingleton<SparkSweepWebhookNotifier>();
+
         // The sweep engine. One path for automatic and manual sweeps; every economic and safety guard lives here
         // rather than in the controller or the view.
         services.TryAddSingleton(TimeProvider.System);
