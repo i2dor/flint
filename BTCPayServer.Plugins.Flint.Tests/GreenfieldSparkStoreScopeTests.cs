@@ -228,6 +228,7 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData("deposit-claim")]
     [InlineData("stable-get")]
     [InlineData("stable-put")]
+    [InlineData("sync")]
     public async Task Every_endpoint_refuses_when_no_store_was_authorised_at_all(string endpoint)
     {
         // The other half of the guard: HttpContext carries no authorised store, which is what a future filter
@@ -256,6 +257,7 @@ public class GreenfieldSparkStoreScopeTests
                 SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             "stable-put" => await h.Api.UpdateStableBalance(
                 SparkSurfaceHarness.AttackerStore, new StableBalanceInput(), CancellationToken.None),
+            "sync" => await h.Api.SyncBalance(SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             _ => await h.Api.Sweep(SparkSurfaceHarness.AttackerStore, null, CancellationToken.None)
         };
 

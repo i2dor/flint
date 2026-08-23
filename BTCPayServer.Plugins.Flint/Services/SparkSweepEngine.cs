@@ -220,6 +220,7 @@ public sealed class SparkSweepEngine
     private readonly ICrossChainValueOracle _valueOracle;
     private readonly TimeProvider _timeProvider;
     private readonly ISweepTransactionLabeler _transactionLabeler;
+    private readonly SparkSweepWebhookNotifier? _webhookNotifier;
     private readonly ILogger<SparkSweepEngine> _logger;
 
     /// <summary>
@@ -237,7 +238,8 @@ public sealed class SparkSweepEngine
         ICrossChainValueOracle valueOracle,
         ISweepTransactionLabeler transactionLabeler,
         TimeProvider timeProvider,
-        ILogger<SparkSweepEngine> logger)
+        ILogger<SparkSweepEngine> logger,
+        SparkSweepWebhookNotifier? webhookNotifier = null)
     {
         _settingsStore = settingsStore;
         _runtime = runtime;
@@ -247,6 +249,7 @@ public sealed class SparkSweepEngine
         _valueOracle = valueOracle;
         _transactionLabeler = transactionLabeler;
         _timeProvider = timeProvider;
+        _webhookNotifier = webhookNotifier;
         _logger = logger;
     }
 
@@ -270,7 +273,20 @@ public sealed class SparkSweepEngine
 
         try
         {
-            return await RunGuardedAsync(storeId, trigger, cancellationToken).ConfigureAwait(false);
+            var result = await RunGuardedAsync(storeId, trigger, cancellationToken).ConfigureAwait(false);
+
+            if (result.Kind is SweepOutcomeKind.Swept
+                && result.Record is { } record
+                && _webhookNotifier is { } notifier)
+            {
+                var stored = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+                var webhookUrl = stored?.Sweep?.SweepWebhookUrl;
+                if (!string.IsNullOrWhiteSpace(webhookUrl))
+                    await notifier.NotifyAsync(webhookUrl, storeId, record, cancellationToken)
+                        .ConfigureAwait(false);
+            }
+
+            return result;
         }
         finally
         {

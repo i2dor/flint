@@ -210,6 +210,30 @@ public class SparkSweepConfigurationData
 
     /// <summary>The requested page of sweep history, newest first.</summary>
     public IReadOnlyList<SparkSweepRecordData> History { get; set; } = [];
+
+    /// <summary>
+    /// Advisory warnings about the current sweep configuration.
+    /// Empty when there is nothing worth flagging. On mainnet, low thresholds or fee ceilings
+    /// produce entries here; the defaults were measured on regtest and may need adjustment.
+    /// </summary>
+    public IReadOnlyList<string> Warnings { get; set; } = [];
+}
+
+/// <summary>
+/// Response to <c>POST /api/v1/stores/{storeId}/spark/sync</c>: the balance after a forced wallet sync.
+/// </summary>
+public class SparkBalanceSyncData
+{
+    /// <summary>
+    /// Spark balance in satoshi after forcing a wallet sync. Zero when the wallet is not running.
+    /// </summary>
+    public long BalanceSats { get; set; }
+
+    /// <summary>Whether a Spark wallet is live for this store.</summary>
+    public bool WalletRunning { get; set; }
+
+    /// <summary>When the sync was performed, UTC.</summary>
+    public DateTimeOffset SyncedAt { get; set; }
 }
 
 /// <summary>

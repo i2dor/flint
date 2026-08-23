@@ -508,6 +508,47 @@
                     }
                 ]
             }
+        },
+        "/api/v1/stores/{storeId}/spark/sync": {
+            "post": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Force a wallet sync and return the current balance",
+                "description": "The status endpoint caches balance for up to 20 seconds. `POST /spark/sync` forces an explicit sync before reading — use it when you need the current balance immediately rather than a cached value. `walletRunning: false` means no Spark wallet is live for this store; `balanceSats` will be 0 in that case.",
+                "operationId": "Spark_SyncBalance",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The balance after a forced wallet sync",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SparkBalanceSyncData"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to modify the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found, the request named a store it was not authorised for, or Spark is not set up for this store"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canmodifystoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            }
         }
     },
     "components": {
@@ -700,6 +741,11 @@
                         "type": "integer",
                         "format": "int64",
                         "description": "Smallest cross-chain sweep to make from a stablecoin balance, in **whole units** of that token — 20 means twenty dollars. Used only when Stable Balance is on, because only then is the amount not in satoshi."
+                    },
+                    "sweepWebhookUrl": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Optional HTTP(S) URL that receives a POST after each successful sweep. The payload includes `storeId`, `idempotencyKey`, `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`. Delivery failures are logged and never retried."
                     }
                 }
             },
@@ -752,6 +798,13 @@
                         "description": "The requested page of sweep history, newest first.",
                         "items": {
                             "$ref": "#/components/schemas/SparkSweepRecordData"
+                        }
+                    },
+                    "warnings": {
+                        "type": "array",
+                        "description": "Advisory warnings about the current sweep configuration. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the recommended defaults (which were measured on regtest).",
+                        "items": {
+                            "type": "string"
                         }
                     }
                 }
@@ -1542,6 +1595,27 @@
                     "BitcoinAddress",
                     "EvmAddress"
                 ]
+            },
+            "SparkBalanceSyncData": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The Spark balance after a forced wallet sync.",
+                "properties": {
+                    "walletRunning": {
+                        "type": "boolean",
+                        "description": "Whether a Spark wallet is live for this store."
+                    },
+                    "balanceSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Spark balance in satoshi after forcing a wallet sync. Zero when the wallet is not running."
+                    },
+                    "syncedAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the sync was performed, UTC."
+                    }
+                }
             }
         }
     }
