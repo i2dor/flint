@@ -8,6 +8,16 @@ The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/
 is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
 below — so a release that forgets this file fails the test suite.
 
+## [Unreleased]
+
+### Changed
+
+- **The Advanced page no longer displays the stored Breez API key.** The key is not a secret in Breez's
+  model, but nobody else should be using a store's key either, so the page has no reason to print it into
+  the DOM. The form now shows only whether an override is set; a new key replaces the current one, and an
+  explicit "use the built-in key" button clears it — an empty field is what an untouched form looks like,
+  so it no longer means "clear" and is refused instead.
+
 ## [0.1.5.1] — 2026-08-22
 
 ### Added

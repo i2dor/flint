@@ -133,19 +133,42 @@
                 <a href="https://breez.technology/request-api-key/#contact-us-form-sdk" target="_blank"
                    rel="noreferrer noopener">Breez</a>.
             </p>
+            <p id="SparkApiKeyState">
+                @if (Model.HasApiKeyOverride)
+                {
+                    <span class="badge bg-info">Own key</span>
+                    <span>This store uses its own API key. It is not displayed; enter a new one to replace it.</span>
+                }
+                else
+                {
+                    <span class="badge bg-secondary">Built-in key</span>
+                    <span>This store uses the plugin's built-in API key.</span>
+                }
+            </p>
             <div class="row">
                 <div class="col-md-8 form-group">
                     <label asp-for="ApiKeyOverride" class="form-label"></label>
                     <input asp-for="ApiKeyOverride" class="form-control" autocomplete="off" spellcheck="false"
-                           placeholder="Using the plugin's built-in key" />
+                           placeholder="@(Model.HasApiKeyOverride ? "Enter a key to replace the current one" : "Enter your own key")" />
                     <span asp-validation-for="ApiKeyOverride" class="text-danger"></span>
                     <div class="form-text">
-                        Leave empty to use the built-in key. Saving restarts this store's Spark wallet so the
-                        change takes effect immediately; a key Spark refuses is rolled back.
+                        Saving restarts this store's Spark wallet so the change takes effect immediately; a key
+                        Spark refuses is rolled back.
                     </div>
                 </div>
             </div>
-            <button type="submit" class="btn btn-primary" id="SparkSaveApiKey">Save API key</button>
+            <div class="d-flex gap-3">
+                <button type="submit" class="btn btn-primary" id="SparkSaveApiKey">
+                    @(Model.HasApiKeyOverride ? "Replace API key" : "Save API key")
+                </button>
+                @if (Model.HasApiKeyOverride)
+                {
+                    <button type="submit" name="UseBuiltInKey" value="true" class="btn btn-secondary"
+                            id="SparkUseBuiltInKey">
+                        Use the built-in key instead
+                    </button>
+                }
+            </div>
         </form>
 
         <div permission="@Policies.CanModifyStoreSettings">

@@ -38,10 +38,22 @@ public class SparkAdvancedViewModel
     public SweepSettingsInput Settings { get; set; } = new();
 
     /// <summary>
-    /// The merchant's own Breez API key, empty when the plugin's built-in one is in use. Not a secret in
-    /// Breez's model — displayed back rather than masked — but it is what the SDK connects with, so saving it
-    /// restarts the store's wallet.
+    /// A replacement Breez API key, inbound only — <b>the stored key is never written into this model</b>.
+    /// Not a secret in Breez's model, but nobody else should be using this store's key either, so the page
+    /// has no reason to hand it out: the form shows only whether an override is set, an empty field to
+    /// replace it, and a button to return to the built-in key.
     /// </summary>
-    [Display(Name = "Breez API key")]
+    [Display(Name = "New Breez API key")]
     public string? ApiKeyOverride { get; set; }
+
+    /// <summary>Whether this store has its own key set. Display only; the key itself stays server-side.</summary>
+    [BindNever]
+    public bool HasApiKeyOverride { get; set; }
+
+    /// <summary>
+    /// True when the merchant pressed the "use built-in key" button, which is the only way to clear the
+    /// override: with the stored key never displayed, an empty field cannot be allowed to mean "clear" — it
+    /// is what the form looks like when nothing was touched.
+    /// </summary>
+    public bool UseBuiltInKey { get; set; }
 }
