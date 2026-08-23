@@ -689,7 +689,28 @@ public class SparkController : Controller
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
         var trimmed = vm.ApiKeyOverride?.Trim();
-        var newKey = string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        string? newKey;
+        if (vm.UseBuiltInKey)
+        {
+            newKey = null;
+        }
+        else if (string.IsNullOrEmpty(trimmed))
+        {
+            // The stored key is never displayed, so an empty field is what an untouched form looks like — it
+            // cannot be allowed to mean "clear", which is what the explicit button is for.
+            ModelState.AddModelError(
+                nameof(vm.ApiKeyOverride),
+                "Enter a key to save, or use the built-in-key button to remove the override.");
+
+            var current = await _statusReader.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
+            return View("Advanced",
+                await BuildAdvancedViewModel(storeId, current, input: null, cancellationToken)
+                    .ConfigureAwait(false));
+        }
+        else
+        {
+            newKey = trimmed;
+        }
 
         if (string.Equals(newKey, previous.ApiKeyOverride, StringComparison.Ordinal))
         {
@@ -751,7 +772,10 @@ public class SparkController : Controller
             IdentityPubkey = status.IdentityPubkey,
             StorageDirectory = status.StorageDirectoryFor(User),
             Settings = input,
-            ApiKeyOverride = settings?.ApiKeyOverride
+            // Presence only — the key itself never leaves the settings blob for this page. Nobody else should
+            // be using a store's key even though Breez does not treat it as a secret, so the page has no
+            // business printing it into the DOM.
+            HasApiKeyOverride = !string.IsNullOrEmpty(settings?.ApiKeyOverride)
         };
     }
 

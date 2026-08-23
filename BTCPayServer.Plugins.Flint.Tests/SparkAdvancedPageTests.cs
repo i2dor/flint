@@ -80,7 +80,24 @@ public class SparkAdvancedPageTests
     }
 
     [Fact]
-    public async Task Clearing_the_api_key_override_returns_the_store_to_the_built_in_key()
+    public async Task The_built_in_key_button_is_what_clears_the_override()
+    {
+        // The stored key is never displayed, so an empty field is what an untouched form looks like — only
+        // the explicit button may mean "clear".
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        h.Settings.Settings[Store]!.ApiKeyOverride = "merchant-owned-key";
+
+        var result = await h.Mvc.AdvancedApiKey(
+            Store,
+            new SparkAdvancedViewModel { UseBuiltInKey = true },
+            CancellationToken.None);
+
+        Assert.IsType<RedirectToActionResult>(result);
+        Assert.Null(h.Settings.Settings[Store]!.ApiKeyOverride);
+    }
+
+    [Fact]
+    public async Task A_blank_submit_is_refused_and_never_echoes_the_stored_key()
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
         h.Settings.Settings[Store]!.ApiKeyOverride = "merchant-owned-key";
@@ -90,8 +107,16 @@ public class SparkAdvancedPageTests
             new SparkAdvancedViewModel { ApiKeyOverride = "   " },
             CancellationToken.None);
 
-        Assert.IsType<RedirectToActionResult>(result);
-        Assert.Null(h.Settings.Settings[Store]!.ApiKeyOverride);
+        var view = Assert.IsType<ViewResult>(result);
+        Assert.False(h.Mvc.ModelState.IsValid);
+        Assert.Equal("merchant-owned-key", h.Settings.Settings[Store]!.ApiKeyOverride);
+        Assert.Empty(h.Settings.Writes);
+
+        // The re-rendered model says an override exists, but never carries the key itself: the page has no
+        // reason to hand out a value nobody else should be using, secret or not.
+        var model = Assert.IsType<SparkAdvancedViewModel>(view.Model);
+        Assert.True(model.HasApiKeyOverride);
+        Assert.True(string.IsNullOrEmpty(model.ApiKeyOverride));
     }
 
     [Fact]
