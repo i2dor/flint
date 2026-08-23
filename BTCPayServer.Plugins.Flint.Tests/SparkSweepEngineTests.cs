@@ -5,6 +5,7 @@ using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Globalization;
 using Network = NBitcoin.Network;
 using Xunit;
 
@@ -313,12 +314,12 @@ public class SparkSweepEngineTests
         var record = h.Records.Single()!;
         Assert.Equal(expectedRecipientSats, record.RecipientAmountSats);
         Assert.Equal(
-            $"Sweep of {expectedRecipientSats:N0} sat accepted for a 2,190 sat fee. It confirms on-chain shortly.",
+            $"Sweep of {expectedRecipientSats.ToString("N0", CultureInfo.InvariantCulture)} sat accepted for a 2,190 sat fee. It confirms on-chain shortly.",
             result.Reason);
 
         // The sentence and the row must never disagree: they are the same fact shown in two places, and the
         // merchant has no way to tell which one is lying.
-        Assert.Contains($"{record.RecipientAmountSats:N0} sat", result.Reason);
+        Assert.Contains($"{record.RecipientAmountSats.ToString("N0", CultureInfo.InvariantCulture)} sat", result.Reason);
     }
 
     /// <summary>
