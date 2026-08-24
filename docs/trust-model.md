@@ -25,16 +25,22 @@ wallet as an ordinary transfer to the provider's address and depend on the provi
 side; until it does, they are neither on Spark nor at the destination. The plugin records the provider's own
 quote id before sending and reports what it says it delivered, which is the most the SDK exposes.
 
-**The store's Lightning connection string is a bearer spend credential.** Setup writes a
-`type=flint;store-id=…;key=…` string into the store's Lightning payment method. Anyone who can read it
-— any principal with `CanModifyStoreSettings` on the store, plus anything that string was ever pasted into —
-can save it on *another* store on the same server and drive this store's wallet from there: receive into it
-and spend from it. The embedded store id binds the key to a wallet; it does not bind the string to the store
-it was saved on, because BTCPay's `ILightningConnectionStringHandler` never tells a handler which store is
-being configured. This is the same property an LND macaroon has, with one difference worth knowing: the
-plugin generated this credential for you rather than you choosing to issue it. It **is rotated on every
-provision** — setting Spark up again (same seed or a new one) mints a fresh key and rewrites the store's
-Lightning configuration with it, invalidating every copy of the old string — so a leaked string is revoked
-by re-running setup, without waiting for a removal. Between provisions it never expires. Treat it like a
-macaroon, and keep the sweep threshold low enough that the balance it could reach is a balance you can
-afford to lose.
+**The store's Lightning connection string is a bearer spend credential, store-bound at save time.**
+Setup writes a `type=flint;store-id=…;key=…` string into the store's Lightning payment method. The
+embedded store id binds the key to a wallet, and the plugin refuses to save the string on any *other*
+store: `SparkLightningClient.Validate` runs inside every save request — the store's own Lightning settings
+page and the Greenfield PUT alike — where core has placed the store being configured, and rejects a string
+naming a different store. A cross-store configuration that predates or bypasses that check is cleared at
+startup by the plugin's configuration sweep, which also rotates the victim's payment key so every
+previously leaked copy of the victim's string stops resolving. What this leaves: anyone who can *read* the
+string still holds a live credential for the wallet it names — save it on the victim's own store and it
+works — so it must still be treated as a secret; what is closed is the import onto another store through
+any HTTP save path, which is exactly the cross-store drive this paragraph used to describe as open. The
+caveats on the enforcement are that BTCPay's `ILightningConnectionStringHandler` is still never told which
+store is being configured, so the two plugin layers (*save-time refusal* and *startup sweep*) carry the
+enforcement rather than the string itself, and that the plugin generated this credential for you rather
+than you choosing to issue it. It **is rotated on every provision** — setting Spark up again (same seed or
+a new one) mints a fresh key and rewrites the store's Lightning configuration with it, invalidating every
+copy of the old string — so a leaked string is revoked by re-running setup, without waiting for a removal.
+Between provisions it never expires. Treat it like a macaroon, and keep the sweep threshold low enough that
+the balance it could reach is a balance you can afford to lose.

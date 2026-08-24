@@ -2,7 +2,9 @@ using BTCPayServer.Lightning;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using BTCPayServer.Data;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using NBitcoin;
 using Xunit;
@@ -23,7 +25,7 @@ public class SparkLightningClientTests
         SparkSettlementBroadcaster Broadcaster,
         InMemoryOutgoingPaymentStore Outgoing);
 
-    private static Harness Create(Bolt11Info? bolt11Info = null)
+    private static Harness Create(Bolt11Info? bolt11Info = null, IHttpContextAccessor? httpContextAccessor = null)
     {
         var sdk = new FakeSparkSdkClient { NextPaymentRequest = Bolt11 };
         var store = new InMemoryInvoiceRecordStore();
@@ -35,7 +37,8 @@ public class SparkLightningClientTests
             store, broadcaster, NullLogger<SparkSettlementReconciler>.Instance);
 
         var client = new SparkLightningClient(
-            StoreId, PaymentKey, sdk, store, outgoing, reconciler, broadcaster, parser, NullLogger.Instance);
+            StoreId, PaymentKey, sdk, store, outgoing, reconciler, broadcaster, parser, NullLogger.Instance,
+            httpContextAccessor);
         return new Harness(client, sdk, store, broadcaster, outgoing);
     }
 
@@ -400,7 +403,7 @@ public class SparkLightningClientTests
     #region CancelInvoice
 
     [Fact]
-    public async Task CancelInvoice_marks_the_record_and_then_settlement_is_refused()
+    public async Task CancelInvoice_keeps_a_late_payment_settleable_and_creditable()
     {
         var (client, sdk, store, _, _) = Create();
         Seed(store);
@@ -408,13 +411,32 @@ public class SparkLightningClientTests
         await client.CancelInvoice(Hash, Ct);
         Assert.Equal(InvoiceRecordStatus.Expired, store.Records[Hash].Status);
 
-        // A payment can still arrive: Spark cannot withdraw the invoice from the SSP.
+        // A payment can still arrive: Spark cannot withdraw the invoice from the SSP. Refusing to settle it
+        // would leave the money unattributed in the wallet and the BTCPay invoice unpaid, so it must be
+        // reported paid with the received amount.
         sdk.Payments.Add(Receive());
         var invoice = await client.GetInvoice(Hash, Ct);
 
-        Assert.Equal(LightningInvoiceStatus.Expired, invoice.Status);
+        Assert.Equal(LightningInvoiceStatus.Paid, invoice.Status);
+        Assert.Equal(100_000, invoice.AmountReceived!.MilliSatoshi);
+        Assert.Equal("sdk-1", store.Records[Hash].SdkPaymentId);
+        Assert.NotNull(store.Records[Hash].SettledAt);
+    }
+
+    [Fact]
+    public async Task GetInvoice_reports_a_cancelled_but_unpaid_invoice_as_unpaid()
+    {
+        // BTCPay's Lightning listener drops an invoice whose status reads expired — the very listener that
+        // would deliver a late payment's credit. A cancelled Spark invoice is still payable, so it must keep
+        // reporting unpaid until it settles.
+        var (client, _, store, _, _) = Create();
+        Seed(store);
+        await client.CancelInvoice(Hash, Ct);
+
+        var invoice = await client.GetInvoice(Hash, Ct);
+
+        Assert.Equal(LightningInvoiceStatus.Unpaid, invoice.Status);
         Assert.Null(invoice.AmountReceived);
-        Assert.Null(store.Records[Hash].SettledAt);
     }
 
     [Fact]
@@ -552,6 +574,53 @@ public class SparkLightningClientTests
         Assert.NotNull(result.ErrorMessage);
         // Never the raw "@v1=..." UniFFI message.
         Assert.DoesNotContain("@v1=", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Validate_refuses_a_connection_string_saved_on_another_store()
+    {
+        // The save-time layer of cross-store enforcement. This client is bound to store-1 (the store id
+        // embedded in its connection string); the request is authorised for store-2. Accepting the save
+        // would let store-2 receive into and spend from store-1's wallet, which is the cross-store hijack.
+        var (client, _, _, _, _) = Create(httpContextAccessor: ContextAuthorisedFor("store-2"));
+
+        var result = await client.Validate();
+
+        Assert.NotNull(result);
+        Assert.Contains("another store", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Validate_accepts_a_connection_string_saved_on_its_own_store()
+    {
+        // The legitimate save: store-1's own string, saved on store-1, passes the store check and reaches
+        // the live wallet check.
+        var (client, _, _, _, _) = Create(httpContextAccessor: ContextAuthorisedFor(StoreId));
+
+        Assert.Null(await client.Validate());
+    }
+
+    [Fact]
+    public async Task Validate_with_no_request_context_still_runs_the_live_check()
+    {
+        // A background resolution has no request and therefore no store to compare; the store check must pass
+        // silently (not fail closed on missing context) while the live wallet check still runs.
+        var (client, sdk, _, _, _) = Create();
+        sdk.FailWith = new ObjectDisposedException("BreezSdk");
+
+        var result = await client.Validate();
+
+        Assert.NotNull(result);
+        Assert.NotNull(result.ErrorMessage);
+    }
+
+    private static IHttpContextAccessor ContextAuthorisedFor(string storeId)
+    {
+        // Reproduces an authorised store route: core's authorisation middleware places the configured store
+        // in HttpContext.Items under "BTCPAY.STOREDATA" (the GetStoreData family of extensions).
+        var context = new DefaultHttpContext();
+        context.SetStoreData(new StoreData { Id = storeId });
+        return new FakeHttpContextAccessor { HttpContext = context };
     }
 
     [Fact]

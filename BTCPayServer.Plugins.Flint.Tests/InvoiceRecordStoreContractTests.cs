@@ -159,8 +159,11 @@ public abstract class InvoiceRecordStoreContractTests
     }
 
     [Fact]
-    public async Task Settling_a_cancelled_invoice_is_refused_and_changes_nothing()
+    public async Task Settling_a_cancelled_invoice_credits_it_like_any_other()
     {
+        // A cancelled invoice is still payable on the service provider — Spark has no way to withdraw it —
+        // so a late payment must still settle and credit the invoice it was minted for. Refusing would
+        // leave real money unattributed in the wallet balance with the BTCPay invoice unpaid.
         var store = await CreateStoreAsync();
         await store.AddAsync(NewRecord(), Ct);
         Assert.True(await store.CancelAsync(StoreId, PaymentFixture.PaymentHash, Ct));
@@ -169,12 +172,13 @@ public abstract class InvoiceRecordStoreContractTests
             StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, PaymentFixture.Preimage,
             DateTimeOffset.UtcNow, Ct);
 
-        Assert.Equal(InvoiceSettlementOutcome.RefusedCancelled, result.Outcome);
+        Assert.Equal(InvoiceSettlementOutcome.Settled, result.Outcome);
         var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
-        Assert.Equal(InvoiceRecordStatus.Expired, reread!.Status);
-        Assert.Null(reread.AmountReceivedMsat);
-        Assert.Null(reread.SettledAt);
-        Assert.Null(reread.SdkPaymentId);
+        Assert.Equal(InvoiceRecordStatus.Paid, reread!.Status);
+        Assert.Equal(100_000, reread.AmountReceivedMsat);
+        Assert.Equal("sdk-1", reread.SdkPaymentId);
+        Assert.Equal(PaymentFixture.Preimage, reread.Preimage);
+        Assert.NotNull(reread.SettledAt);
     }
 
     [Fact]
@@ -216,7 +220,7 @@ public abstract class InvoiceRecordStoreContractTests
     }
 
     [Fact]
-    public async Task Recording_an_SDK_payment_id_only_succeeds_once_and_only_while_unpaid()
+    public async Task Recording_an_SDK_payment_id_succeeds_once_and_only_until_settled()
     {
         var store = await CreateStoreAsync();
         await store.AddAsync(NewRecord(), Ct);
@@ -228,6 +232,21 @@ public abstract class InvoiceRecordStoreContractTests
         // Never overwritten: for a self-payment the second id would be the wrong leg's.
         Assert.False(await store.TryRecordSdkPaymentIdAsync(StoreId, PaymentFixture.PaymentHash, "sdk-2", Ct));
         reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Equal("sdk-1", reread!.SdkPaymentId);
+    }
+
+    [Fact]
+    public async Task Recording_an_SDK_payment_id_still_works_after_the_invoice_is_cancelled()
+    {
+        // A pending event can arrive after BTCPay cancelled a superseded invoice. Recording the id keeps the
+        // settlement's point lookup working for exactly the late payment a cancelled invoice can still
+        // receive — without it, that payment is found only by a history scan.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        Assert.True(await store.CancelAsync(StoreId, PaymentFixture.PaymentHash, Ct));
+
+        Assert.True(await store.TryRecordSdkPaymentIdAsync(StoreId, PaymentFixture.PaymentHash, "sdk-1", Ct));
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
         Assert.Equal("sdk-1", reread!.SdkPaymentId);
     }
 
@@ -380,8 +399,11 @@ public abstract class InvoiceRecordStoreContractTests
     }
 
     [Fact]
-    public async Task Reconciliation_excludes_paid_and_cancelled_invoices()
+    public async Task Reconciliation_excludes_paid_but_still_rechecks_cancelled_invoices()
     {
+        // Paid is terminal. A cancelled invoice, by contrast, is still payable on the service provider, so
+        // it must stay in the reconciliation set — a late payment of a cancelled invoice is exactly what the
+        // reconciliation pass exists to catch when the SDK's completion event is dropped.
         var store = await CreateStoreAsync();
         var paidHash = "d".PadLeft(64, '0');
         var cancelledHash = "e".PadLeft(64, '0');
@@ -393,7 +415,7 @@ public abstract class InvoiceRecordStoreContractTests
         var listed = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), after: null, limit: 10, Ct);
 
-        Assert.Empty(listed);
+        Assert.Equal(cancelledHash, Assert.Single(listed).PaymentHash);
     }
 
     [Fact]

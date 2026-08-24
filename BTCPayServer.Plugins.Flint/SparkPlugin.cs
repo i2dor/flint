@@ -9,6 +9,7 @@ using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
 using BTCPayServer.Services.Stores;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -89,6 +90,19 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // itself is the thin part that talks to BTCPay.
         services.AddSingleton<IStoreLightningConfigStore, BTCPayStoreLightningConfigStore>();
         services.AddSingleton<SparkLightningWiring>();
+
+        // Cross-store enforcement. The save-time refusal lives in SparkLightningClient.Validate (which reads
+        // the configured store off the request via IHttpContextAccessor below); this sweep is the backstop
+        // for configurations that predate it. Registered as itself and through a deferred Func, because it
+        // depends on SparkService (its settings store) and SparkService reaches it back through that Func.
+        services.AddSingleton<ISparkStoreIdSource, BTCPayStoreIdSource>();
+        services.AddSingleton<SparkLightningConfigSweeper>();
+        services.TryAddSingleton<Func<SparkLightningConfigSweeper>>(provider =>
+            provider.GetRequiredService<SparkLightningConfigSweeper>);
+
+        // The request context Validate reads to learn which store a connection string is being saved on.
+        // ASP.NET does not register this by default (BTCPay does not either), so the plugin does, idempotently.
+        services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
 
         // Per-store SDK lifecycle owner. Registered once and exposed as itself (views and the setup
         // controller resolve it directly), as the connection-string resolver, as the settings store the

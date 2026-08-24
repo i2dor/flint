@@ -42,18 +42,21 @@ public class InvoiceRecordTests
         Assert.Equal(InvoiceRecordStatus.Expired, record.Status);
     }
 
-    [Fact]
-    public void Natural_expiry_is_reported_but_not_persisted()
+    public void A_cancelled_invoice_reports_unpaid_until_it_settles()
     {
+        // Cancellation marks the invoice locally but cannot withdraw it from the service provider, so it
+        // stays payable. Reporting it expired would make BTCPay's listener drop it — the listener that
+        // would deliver the late payment's credit — so it must read unpaid until a payment settles it.
         var record = Unpaid();
+        Assert.True(record.TryCancel());
 
-        Assert.Equal(InvoiceRecordStatus.Unpaid, record.EffectiveStatus(record.ExpiresAt));
-        Assert.Equal(InvoiceRecordStatus.Expired, record.EffectiveStatus(record.ExpiresAt.AddSeconds(1)));
-        // Crucially, the stored status is untouched, so a late payment can still settle.
-        Assert.Equal(InvoiceRecordStatus.Unpaid, record.Status);
+        Assert.Equal(InvoiceRecordStatus.Expired, record.Status);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, record.EffectiveStatus(record.ExpiresAt.AddDays(1)));
+
+        Assert.Equal(InvoiceSettlementOutcome.Settled, record.TrySettle("sdk-1", 100_000, null, Created));
+        Assert.Equal(InvoiceRecordStatus.Paid, record.Status);
+        Assert.Equal(InvoiceRecordStatus.Paid, record.EffectiveStatus(record.ExpiresAt.AddYears(1)));
     }
-
-    [Fact]
     public void A_naturally_expired_invoice_still_settles()
     {
         // The SSP will accept a payment after expiry and Spark has no way to stop it. Dropping that payment

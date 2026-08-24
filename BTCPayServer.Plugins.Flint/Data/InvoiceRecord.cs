@@ -90,36 +90,49 @@ public class InvoiceRecord
     /// <remarks>
     /// <para>
     /// Natural expiry is computed rather than persisted, and that distinction is load-bearing.
-    /// <see cref="InvoiceRecordStatus.Expired"/> in the database means "cancelled locally, refuse to
-    /// settle" (see <see cref="TryCancel"/>). If natural expiry were persisted the same way, a
-    /// payment arriving a second after expiry — which the SSP will happily accept, because the Spark
-    /// SDK has no way to stop it — would be silently dropped instead of recorded.
+    /// <see cref="InvoiceRecordStatus.Expired"/> in the database means "cancelled locally" (see
+    /// <see cref="TryCancel"/>), not "no longer payable". If natural expiry were persisted the same way, a
+    /// payment arriving a second after expiry — which the SSP will happily accept, because the Spark SDK
+    /// has no way to stop it — would be silently dropped instead of recorded.
+    /// </para>
+    /// <para>
+    /// A <em>cancelled</em> invoice is reported <b>unpaid</b>, not expired. Cancellation cannot withdraw
+    /// the invoice from the service provider, so it remains payable, and BTCPay's Lightning listener drops
+    /// an invoice whose status reads expired (<c>LightningInstanceListener.AddPaymentCore</c>) — the one
+    /// listener that could still deliver a late payment's credit. Reporting it unpaid keeps that listener
+    /// attached until a payment settles it or BTCPay's own invoice expiry lets it go.
     /// </para>
     /// <para>
     /// <b>How far that capability actually reaches.</b> A late payment settles through any path that gets
-    /// to <see cref="IInvoiceRecordStore.SettleAsync"/>, whose only refusal is a cancelled invoice. The
-    /// recurring reconciliation pass therefore keeps looking for an hour past expiry rather than stopping
-    /// at it. Beyond that hour an invoice is no longer re-checked and a late payment stays unattributed
-    /// in the wallet balance — a deliberate bound, since the alternative is rescanning every invoice ever
-    /// created on every pass. Note also that BTCPay stops listening for an invoice once it expires
-    /// (<c>LightningInstanceListener.RemoveExpiredInvoices</c>), so a settlement recorded after expiry
-    /// keeps this plugin's own ledger truthful but will usually not revive the BTCPay invoice.
+    /// to <see cref="IInvoiceRecordStore.SettleAsync"/>. The recurring reconciliation pass keeps looking
+    /// for an hour past expiry rather than stopping at it; beyond that hour an invoice is no longer
+    /// re-checked and a late payment stays unattributed in the wallet balance — a deliberate bound, since
+    /// the alternative is rescanning every invoice ever created on every pass. Note also that a settlement
+    /// recorded after BTCPay has stopped listening for the invoice (its own expiry —
+    /// <c>LightningInstanceListener.RemoveExpiredInvoices</c>) keeps this plugin's own ledger truthful but
+    /// will usually not revive the BTCPay invoice.
     /// </para>
     /// </remarks>
     public InvoiceRecordStatus EffectiveStatus(DateTimeOffset now) =>
-        Status is InvoiceRecordStatus.Unpaid && now > ExpiresAt
-            ? InvoiceRecordStatus.Expired
-            : Status;
+        Status switch
+        {
+            // Cancelled locally but still payable on Spark: report unpaid, so BTCPay's listener stays
+            // attached and a late payment can still be credited (see the remarks above).
+            InvoiceRecordStatus.Expired => InvoiceRecordStatus.Unpaid,
+            InvoiceRecordStatus.Unpaid when now > ExpiresAt => InvoiceRecordStatus.Expired,
+            _ => Status
+        };
 
     /// <summary>
-    /// Applies a settlement to this record, refusing to do so if the invoice was cancelled.
+    /// Applies a settlement to this record, crediting a late payment of a cancelled invoice too.
     /// </summary>
     /// <remarks>
-    /// The refusal is the substance of the plugin's <c>CancelInvoice</c>: the Spark SDK has no
-    /// invoice-cancellation primitive, so a cancelled invoice can still be paid on the SSP's side.
-    /// Those funds do land in the store's Spark balance (and will be swept), but the BTCPay invoice
-    /// must not be marked paid — BTCPay was told the invoice was cancelled and may have issued a
-    /// replacement. Callers log a warning when this happens.
+    /// The Spark SDK has no invoice-cancellation primitive, so a cancelled invoice can still be paid on
+    /// the SSP's side. That payment is real money into the store's wallet, and refusing to credit it would
+    /// leave it unattributed: the funds in the Spark balance, swept later, with no BTCPay invoice ever
+    /// marked paid and no record of what the money was for. Cancellation therefore marks the invoice
+    /// locally (<see cref="TryCancel"/>) but never bars the settlement — the invoice is credited exactly
+    /// as if it had not been cancelled, and the payment's hash identifies which invoice that is.
     /// </remarks>
     public InvoiceSettlementOutcome TrySettle(
         string sdkPaymentId,
@@ -129,9 +142,6 @@ public class InvoiceRecord
     {
         ArgumentException.ThrowIfNullOrEmpty(sdkPaymentId);
         ArgumentOutOfRangeException.ThrowIfNegative(amountReceivedMsat);
-
-        if (Status is InvoiceRecordStatus.Expired)
-            return InvoiceSettlementOutcome.RefusedCancelled;
 
         if (Status is InvoiceRecordStatus.Paid)
         {
@@ -175,8 +185,8 @@ public enum InvoiceRecordStatus
     Paid,
 
     /// <summary>
-    /// Cancelled locally. Also what <see cref="InvoiceRecord.EffectiveStatus"/> reports for an unpaid
-    /// invoice past its expiry.
+    /// Cancelled locally: no longer offered to payers, but still payable on the service provider, so a
+    /// late payment still settles and credits the invoice (see <see cref="InvoiceRecord.EffectiveStatus"/>).
     /// </summary>
     Expired
 }
@@ -189,9 +199,6 @@ public enum InvoiceSettlementOutcome
 
     /// <summary>The record was already paid. Do not notify BTCPay again.</summary>
     AlreadySettled,
-
-    /// <summary>The invoice was cancelled; the settlement must not be reported. Log a warning.</summary>
-    RefusedCancelled,
 
     /// <summary>No record exists for this payment hash — a receive this plugin did not create.</summary>
     NotFound

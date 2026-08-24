@@ -97,11 +97,13 @@ public class PostgresConcurrencyTests
     }
 
     [Fact]
-    public async Task A_settle_racing_a_cancel_never_produces_a_paid_invoice_that_reads_as_cancelled()
+    public async Task A_cancel_racing_a_settlement_can_never_suppress_the_credit()
     {
-        // Run repeatedly because the interleaving is what is under test. Either order is a valid outcome; what
-        // must never happen is a row that was settled and then silently reverted to cancelled, which is what a
-        // read-modify-write cancel would produce.
+        // Run repeatedly because the interleaving is what is under test. Depending on who commits first
+        // either the cancel is a no-op (the invoice already settled) or it merely marks the invoice locally
+        // before the settlement goes through — cancellation cannot withdraw an invoice from the service
+        // provider, so a payment that arrives must be credited either way. The row must always end Paid
+        // with the received amount, never cancelled.
         var store = await CreateStoreAsync();
 
         for (var attempt = 0; attempt < 25; attempt++)
@@ -114,24 +116,13 @@ public class PostgresConcurrencyTests
             var cancel = Task.Run(() => store.CancelAsync(StoreId, hash, Ct), Ct);
 
             var settleResult = await settle;
-            var cancelled = await cancel;
+            await cancel;
             var final = await store.GetAsync(StoreId, hash, Ct);
 
             Assert.NotNull(final);
-            // Exactly one of the two won, and the stored row agrees with whichever it was.
-            if (settleResult.Outcome is InvoiceSettlementOutcome.Settled)
-            {
-                Assert.False(cancelled, "a cancel must not succeed against an invoice that settled");
-                Assert.Equal(InvoiceRecordStatus.Paid, final.Status);
-                Assert.Equal(100_000, final.AmountReceivedMsat);
-            }
-            else
-            {
-                Assert.Equal(InvoiceSettlementOutcome.RefusedCancelled, settleResult.Outcome);
-                Assert.True(cancelled);
-                Assert.Equal(InvoiceRecordStatus.Expired, final.Status);
-                Assert.Null(final.AmountReceivedMsat);
-            }
+            Assert.Equal(InvoiceSettlementOutcome.Settled, settleResult.Outcome);
+            Assert.Equal(InvoiceRecordStatus.Paid, final.Status);
+            Assert.Equal(100_000, final.AmountReceivedMsat);
         }
     }
 

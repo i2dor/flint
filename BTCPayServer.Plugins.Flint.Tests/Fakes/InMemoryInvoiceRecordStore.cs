@@ -68,7 +68,7 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     {
         IEnumerable<InvoiceRecord> query = _records.Values
             .Where(r => r.StoreId == storeId
-                        && r.Status is InvoiceRecordStatus.Unpaid
+                        && r.Status is not InvoiceRecordStatus.Paid
                         && r.ExpiresAt > settleableFrom);
 
         if (after is not null)
@@ -94,7 +94,7 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     {
         var record = _records.GetValueOrDefault(paymentHash);
         if (record is null || record.StoreId != storeId ||
-            record.Status is not InvoiceRecordStatus.Unpaid || record.SdkPaymentId is not null)
+            record.Status is InvoiceRecordStatus.Paid || record.SdkPaymentId is not null)
         {
             return Task.FromResult(false);
         }

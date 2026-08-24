@@ -32,9 +32,11 @@ public enum SparkLightningWiringState
     StaleSpark,
 
     /// <summary>
-    /// The store points at <em>another</em> store's Spark wallet. Also not ours to clear: the connection
-    /// string is store-bound and the handler will refuse it, but overwriting another store's intent is worse
-    /// than leaving a visibly broken configuration.
+    /// The store points at <em>another</em> store's Spark wallet — the one configuration that is broken by
+    /// definition, because there is no legitimate reason for one store's Lightning payment method to drive
+    /// another store's wallet. It is refused at save time (<c>SparkLightningClient.Validate</c>) and cleared
+    /// by <see cref="SparkLightningConfigSweeper"/> at startup; until then the status page reports it in red
+    /// as the configuration to repair.
     /// </summary>
     OtherStoreSpark
 }
@@ -163,6 +165,44 @@ public sealed class SparkLightningWiring
         }
 
         return cleared;
+    }
+
+    /// <summary>
+    /// Removes a store's Lightning payment method because it points at <em>another</em> store's Spark
+    /// wallet. Returns the embedded id of the victim wallet, or null when there is nothing cross-store to
+    /// clear.
+    /// </summary>
+    /// <remarks>
+    /// The sweep's remediation, deliberately narrower than <see cref="ClearIfOursAsync"/>: only a valid
+    /// Spark connection string embedding a <em>different</em> store id is cleared, so this can never touch
+    /// an <c>OtherNode</c> configuration (a merchant's own Lightning node), the internal node, or a
+    /// malformed string whose owner is unknown.
+    /// </remarks>
+    public async Task<string?> ClearCrossStoreAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+
+        var config = await _configStore.GetAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (config?.ConnectionString is not { } connectionString)
+            return null;
+
+        var parsed = SparkConnectionString.Parse(connectionString, out var configuredStoreId, out _, out _);
+        if (parsed is not SparkConnectionStringParseResult.Ok ||
+            configuredStoreId is null ||
+            string.Equals(configuredStoreId, storeId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var cleared = await _configStore.SetAsync(storeId, null, cancellationToken).ConfigureAwait(false);
+        if (cleared)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: removed its Lightning payment method, which pointed at store "
+                + "{VictimStoreId}'s Spark wallet", storeId, configuredStoreId);
+        }
+
+        return configuredStoreId;
     }
 
     /// <summary>

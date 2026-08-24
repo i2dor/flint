@@ -7,8 +7,11 @@
   plain description goes into the BOLT11 `d` tag and the `h` tag is left unset. Most wallets tolerate
   this; a strict one may reject the invoice. Pending an upstream Breez feature request.
 - **Cancelling an invoice is local only.** Spark has no way to withdraw an invoice from the service
-  provider, so a payment arriving for a cancelled invoice still credits the store's Spark balance. It
-  will not settle the BTCPay invoice, and the mismatch is logged as a warning.
+  provider, so a payment arriving for a cancelled — even a superseded — invoice still settles and
+  credits the BTCPay invoice it was minted for. What cancellation actually buys is bookkeeping: the
+  invoice is no longer offered to payers, and a late payment is attributed to it, not to its
+  replacement. The plugin keeps reporting a cancelled invoice as unpaid (never expired) until it
+  settles, so BTCPay's Lightning listener stays attached and can deliver that credit.
 - **Testnet and signet are unsupported**, because the SDK only offers mainnet and regtest.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
   logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into

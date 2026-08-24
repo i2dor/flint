@@ -4,9 +4,19 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The version in [`BTCPayServer.Plugins.Flint.csproj`](BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj)
-is the single source of truth, and `PluginVersionTests` asserts that it matches the newest heading
-below — so a release that forgets this file fails the test suite.
+## [Unreleased]
+
+### Security
+
+- **A late payment of a superseded or cancelled invoice now credits the BTCPay invoice it was minted
+  for.** The Spark SDK has no way to withdraw an invoice from the service provider, so a bolt11 that
+  BTCPay replaced (a sequential request to a public TopUp LNURL callback, for example) remains
+  payable. Previously the plugin marked the invoice cancelled locally and refused the later
+  server-confirmed settlement, leaving the funds unattributed in the merchant's Spark balance while
+  the BTCPay invoice stayed unpaid. Now the settlement is recorded and published like any other: the
+  payment's hash names the invoice it pays, and that invoice is the one BTCPay credits. A cancelled
+  invoice is also reported as unpaid rather than expired until it settles, so BTCPay's listener does
+  not drop it before a late payment can arrive.
 
 ## [0.1.5.2] — 2026-08-22
 

@@ -94,7 +94,9 @@ that could lead to:
   cross-chain destination resolution, idempotency of sends, and the classification of a send whose
   outcome is unknown.
 - **Cross-store isolation failures** — one store reading, configuring, sweeping or spending
-  another store's wallet, through the UI or the Greenfield API.
+  another store's wallet, through the UI or the Greenfield API. (The Lightning connection string is
+  store-bound at save time and cross-store configurations are swept at startup with the victim's key
+  rotated; the exact model and its residual are in [docs/trust-model.md](docs/trust-model.md).)
 - **Authorisation failures** — any plugin route reachable without the BTCPay permission it should
   require.
 - **Request amplification** against third-party providers through the plugin's own endpoints.

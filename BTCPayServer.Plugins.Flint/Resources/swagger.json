@@ -1077,7 +1077,7 @@
             },
             "SparkLightningWiringState": {
                 "type": "string",
-                "description": "What a store's Lightning payment method points at. `StaleSpark` is this store's Spark wallet under a superseded payment key — still ours, and dead. `OtherStoreSpark` is another store's Spark wallet, which the plugin refuses to overwrite or clear.",
+                "description": "What a store's Lightning payment method points at. `StaleSpark` is this store's Spark wallet under a superseded payment key — still ours, and dead. `OtherStoreSpark` is another store's Spark wallet — refused at save time, and cleared at startup with the victim's payment key rotated.",
                 "enum": [
                     "StoreNotFound",
                     "NotConfigured",

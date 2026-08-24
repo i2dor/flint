@@ -103,7 +103,9 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
         var query = context.InvoiceRecords
             .AsNoTracking()
             .Where(r => r.StoreId == storeId
-                        && r.Status == InvoiceRecordStatus.Unpaid
+                        // A cancelled invoice is still payable on Spark, so it is as settleable as an
+                        // unpaid one — only a paid invoice is terminal.
+                        && r.Status != InvoiceRecordStatus.Paid
                         && r.ExpiresAt > settleableFrom);
 
         if (after is not null)
@@ -134,11 +136,12 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
         await using var context = _contextFactory.CreateContext();
 
         // Guarded on Status and on the column still being empty, so this can never overwrite the id of an
-        // already-settled payment — which for a self-payment would be the wrong leg's id.
+        // already-settled payment — which for a self-payment would be the wrong leg's id. A cancelled
+        // invoice is still settleable, so its id is recordable too.
         var updated = await context.InvoiceRecords
             .Where(r => r.PaymentHash == paymentHash
                         && r.StoreId == storeId
-                        && r.Status == InvoiceRecordStatus.Unpaid
+                        && r.Status != InvoiceRecordStatus.Paid
                         && r.SdkPaymentId == null)
             .ExecuteUpdateAsync(
                 setters => setters.SetProperty(r => r.SdkPaymentId, sdkPaymentId),
@@ -168,15 +171,17 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
             var updated = await context.InvoiceRecords
                 .Where(r => r.PaymentHash == paymentHash
                             && r.StoreId == storeId
-                            && r.Status == InvoiceRecordStatus.Unpaid)
+                            // Paid is the only terminal status: an Unpaid or cancelled invoice may still
+                            // receive the payment being applied.
+                            && r.Status != InvoiceRecordStatus.Paid)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(r => r.Status, InvoiceRecordStatus.Paid)
                         .SetProperty(r => r.SdkPaymentId, sdkPaymentId)
                         .SetProperty(r => r.AmountReceivedMsat, amountReceivedMsat)
                         .SetProperty(r => r.SettledAt, settledAt)
-                        // A plain assignment, not a coalesce: the guard above means this row was Unpaid, and
-                        // an unpaid invoice never has a preimage.
+                        // A plain assignment, not a coalesce: the guard above means this row was unsettled,
+                        // and an unsettled invoice never has a preimage.
                         .SetProperty(r => r.Preimage, preimage),
                     cancellationToken);
 
@@ -218,13 +223,9 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
 
                     return new InvoiceSettlementResult(InvoiceSettlementOutcome.AlreadySettled, record);
 
-                case InvoiceRecordStatus.Expired:
-                    // Cancelled locally. The money is in the wallet; the BTCPay invoice must stay unpaid.
-                    return new InvoiceSettlementResult(InvoiceSettlementOutcome.RefusedCancelled, record);
-
                 default:
-                    // Unpaid, yet the update matched nothing: the row was inserted between the two
-                    // statements. Retry the compare-and-set against the row that now exists.
+                    // Unsettled, yet the update matched nothing: the row was inserted or reworked between
+                    // the two statements. Retry the compare-and-set against the row that now exists.
                     continue;
             }
         }
