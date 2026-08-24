@@ -4,7 +4,7 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.5.4] — 2026-08-24
 
 ### Security
 
@@ -17,6 +17,13 @@ All notable changes to this plugin are recorded here. The format follows
   payment's hash names the invoice it pays, and that invoice is the one BTCPay credits. A cancelled
   invoice is also reported as unpaid rather than expired until it settles, so BTCPay's listener does
   not drop it before a late payment can arrive.
+- **A store can no longer save another store's Lightning connection string, and existing
+  cross-store configurations are swept.** The connection string is a bearer credential for the
+  wallet it names, and the connection-string handler is never told which store is being configured,
+  so a store could previously be pointed at another store's wallet. Saving one now fails validation
+  on every HTTP path with a generic error, and a startup-plus-periodic sweep clears any cross-store
+  configuration (with the victim's payment key rotated, so previously leaked copies of the victim's
+  string stop resolving).
 
 ## [0.1.5.2] — 2026-08-22
 
