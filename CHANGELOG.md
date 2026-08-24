@@ -4,6 +4,15 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6.1] - 2026-08-24
+
+### Changed
+
+- **Sweep webhook delivery retries on transient failures.** Flint now retries a failed webhook POST up
+  to three times with exponential backoff (2 s, 4 s, 8 s) before giving up. 5xx responses and network
+  errors are retried; 4xx responses are not (they indicate a permanent client-side rejection and will not
+  resolve on their own).
+
 ## [0.1.6.0] - 2026-08-23
 
 ### Added
@@ -16,8 +25,8 @@ All notable changes to this plugin are recorded here. The format follows
 - **Sweep webhook.** Setting `sweepWebhookUrl` in the sweep configuration causes Flint to POST a JSON
   payload to that URL after each successful sweep. The payload includes `storeId`, `idempotencyKey`,
   `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`.
-  Delivery failures are logged as warnings and never retried; the sweep record is the authoritative
-  source. The field is included in `SweepSettings.Clone()` so it survives a seed change.
+  Delivery failures are logged as warnings; the sweep record is the authoritative source. The field is
+  included in `SweepSettings.Clone()` so it survives a seed change.
 - **Sweep configuration warnings.** `GET /api/v1/stores/{storeId}/spark/sweep` now includes a `warnings`
   array. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the
   recommended defaults (which were measured on regtest and may not hold on mainnet).
