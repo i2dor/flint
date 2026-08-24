@@ -4,6 +4,26 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7.0] - 2026-08-24
+
+### Added
+
+- **GET sweep record by idempotency key.** New endpoint
+  `GET /api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}` returns the full sweep record for a
+  given key. Requires `canViewStoreSettings`. Returns 404 with code `sweep-record-not-found` when no
+  record matches.
+
+- **Destination address override in POST sweep.** The `POST .../spark/sweep` request body now accepts
+  an optional `destinationAddress` field. When supplied, the sweep sends to that Bitcoin address
+  instead of the store's configured sweep destination. The address is validated against the server's
+  chain before the engine runs. Not supported for EVM cross-chain sweep mode (returns 422).
+
+- **Force flag in POST sweep.** The request body now accepts an optional `force` boolean (default
+  false). When true, the sweep proceeds even if the Spark balance is below the store's configured
+  minimum sweep amount. The absolute on-chain protocol minimum (`Constants.MinimumOnchainSendSats`)
+  still applies and cannot be bypassed.
+
+
 ## [0.1.6.2] - 2026-08-24
 
 ### Added

@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Logging;
+using NBitcoin;
 using Newtonsoft.Json.Serialization;
 
 namespace BTCPayServer.Plugins.Flint.Controllers;
@@ -378,6 +379,32 @@ public class GreenfieldSparkController : ControllerBase
     /// are not reported as an error status.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// One sweep record, by its idempotency key.
+    /// </summary>
+    [Authorize(Policy = Policies.CanViewStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}")]
+    public async Task<IActionResult> GetSweepRecord(
+        [FromRoute] string storeId,
+        [FromRoute] string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+            return NotConfigured();
+
+        var record = await _sweepSettings
+            .ReadRecordAsync(store.Id, idempotencyKey, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (record is null)
+            return NotFound(new { Code = "sweep-record-not-found", Message = "No sweep record with that idempotency key." });
+
+        return Ok(SparkSweepRecordData.From(record));
+    }
+
     [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
     [HttpPost("~/api/v1/stores/{storeId}/spark/sweep")]
     public async Task<IActionResult> Sweep(
@@ -400,8 +427,26 @@ public class GreenfieldSparkController : ControllerBase
             return Ok(ToModel(preview));
         }
 
+        if (request?.DestinationAddress is not null)
+        {
+            try
+            {
+                BitcoinAddress.Create(request.DestinationAddress, _sweepSettings.Network);
+            }
+            catch
+            {
+                return this.CreateAPIError(422, "invalid-destination",
+                    $"'{request.DestinationAddress}' is not a valid Bitcoin address on {_sweepSettings.Network.ChainName}.");
+            }
+        }
+
         var result = await _sweepEngine
-            .RunAsync(store.Id, SweepTrigger.Manual, cancellationToken)
+            .RunAsync(
+                store.Id,
+                SweepTrigger.Manual,
+                force: request?.Force ?? false,
+                destinationOverride: request?.DestinationAddress,
+                cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(SparkSweepResultData.From(result));

@@ -459,6 +459,20 @@ public class SparkSweepRequest
     /// re-checks the fee ceiling against the number it actually commits to.
     /// </remarks>
     public bool Preview { get; set; }
+
+    /// <summary>
+    /// When true, sweeps whatever is above the reserve even if it is below the configured minimum sweep amount.
+    /// The absolute protocol minimum (<c>Constants.MinimumOnchainSendSats</c>) is still enforced.
+    /// Ignored when <see cref="Preview"/> is true.
+    /// </summary>
+    public bool Force { get; set; }
+
+    /// <summary>
+    /// A Bitcoin address to sweep to instead of the store's configured destination.
+    /// Validated against the current network. Ignored when <see cref="Preview"/> is true.
+    /// Not compatible with stores configured for EVM cross-chain sweeps.
+    /// </summary>
+    public string? DestinationAddress { get; set; }
 }
 
 /// <summary>

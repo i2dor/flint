@@ -259,6 +259,8 @@ public sealed class SparkSweepEngine
     public async Task<SweepRunResult> RunAsync(
         string storeId,
         SweepTrigger trigger,
+        bool force = false,
+        string? destinationOverride = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
@@ -273,7 +275,7 @@ public sealed class SparkSweepEngine
 
         try
         {
-            var result = await RunGuardedAsync(storeId, trigger, cancellationToken).ConfigureAwait(false);
+            var result = await RunGuardedAsync(storeId, trigger, force, destinationOverride, cancellationToken).ConfigureAwait(false);
 
             if (_webhookNotifier is { } notifier)
             {
@@ -452,6 +454,8 @@ public sealed class SparkSweepEngine
     private async Task<SweepRunResult> RunGuardedAsync(
         string storeId,
         SweepTrigger trigger,
+        bool force,
+        string? destinationOverride,
         CancellationToken cancellationToken)
     {
         var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
@@ -526,11 +530,23 @@ public sealed class SparkSweepEngine
         // decides which rail the sweep runs on and therefore which unit everything below is in.
         var stableToken = ResolveStableToken(settings, info);
 
+        if (destinationOverride is not null && sweep.DestinationMode is SweepDestinationMode.EvmAddress)
+        {
+            return await RefuseAsync(
+                    storeId, trigger, sweep,
+                    new SweepRefusal(
+                        SweepRefusalCode.NoDestination,
+                        "A destination address override is not supported for EVM cross-chain sweeps. "
+                        + "Change the store's sweep destination mode to Bitcoin first."),
+                    null, balance, 0, 0, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (sweep.DestinationMode is SweepDestinationMode.EvmAddress)
         {
             // A different rail with different arithmetic and, when funded from a token, a different unit and no
             // idempotency key. Branched before the sats plan is made rather than after, because a sats plan is
-            // not merely unnecessary on that path — it is denominated in the wrong thing.
+            // not merely unnecessary on that path - it is denominated in the wrong thing.
             return await RunCrossChainAsync(
                     storeId, sdk, trigger, sweep, balance, stableToken, cancellationToken)
                 .ConfigureAwait(false);
@@ -551,6 +567,17 @@ public sealed class SparkSweepEngine
 
         // Step 4.
         var plan = PlanSweep(sweep, balance);
+
+        if (force
+            && plan.Refusal?.Code is SweepRefusalCode.BelowMinimumSweep
+            && plan.SweepableSats >= Constants.MinimumOnchainSendSats)
+        {
+            _logger.LogInformation(
+                "Store {StoreId}: force flag set; sweeping {AmountSats} sat below the configured minimum",
+                storeId, plan.SweepableSats);
+            plan = SweepPlan.Sweep(plan.SweepableSats);
+        }
+
         if (plan.Refusal is { } planRefusal)
         {
             // The one interaction between the two post-MVP features that would otherwise look like a bug. With
@@ -574,19 +601,32 @@ public sealed class SparkSweepEngine
                 .ConfigureAwait(false);
         }
 
-        // reserve: true — this is a real sweep, so the address is reserved and labelled, and therefore rotated.
-        var resolution = await _destinations
-            .ResolveAsync(storeId, sweep, reserve: true, cancellationToken)
-            .ConfigureAwait(false);
-        if (resolution.Destination is not { } destination)
+        SweepDestination destination;
+        if (destinationOverride is not null)
         {
-            return await RefuseAsync(
-                    storeId, trigger, sweep,
-                    new SweepRefusal(
-                        SweepRefusalCode.NoDestination,
-                        resolution.RefusalReason ?? "This store has no usable sweep destination."),
-                    null, balance, plan.AmountSats, 0, cancellationToken)
+            destination = new SweepDestination(
+                destinationOverride,
+                SweepDestinationMode.StaticAddress,
+                SweepDestinationKind.BitcoinAddress,
+                Rotates: false);
+        }
+        else
+        {
+            // reserve: true - this is a real sweep, so the address is reserved and labelled, and therefore rotated.
+            var resolution = await _destinations
+                .ResolveAsync(storeId, sweep, reserve: true, cancellationToken)
                 .ConfigureAwait(false);
+            if (resolution.Destination is not { } resolved)
+            {
+                return await RefuseAsync(
+                        storeId, trigger, sweep,
+                        new SweepRefusal(
+                            SweepRefusalCode.NoDestination,
+                            resolution.RefusalReason ?? "This store has no usable sweep destination."),
+                        null, balance, plan.AmountSats, 0, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            destination = resolved;
         }
 
         // Step 5. A pre-flight quote, so an economic or dust refusal is decided before a record exists — which is
