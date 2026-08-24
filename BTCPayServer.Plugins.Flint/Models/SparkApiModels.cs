@@ -922,3 +922,27 @@ public sealed record SparkCrossChainQuoteData(
         quote.ExpiresAt,
         quote.ProviderQuoteId);
 }
+
+#region Server settings
+
+/// <summary>Flint server-level settings, shared across all stores on this BTCPay instance.</summary>
+public class SparkServerSettingsData
+{
+    /// <summary>
+    /// When set, Flint POSTs a <c>plugin.update-available</c> event here whenever a newer version is
+    /// detected on the plugin registry. The check runs once per day.
+    /// </summary>
+    public string? UpdateWebhookUrl { get; set; }
+}
+
+/// <summary>Request body for <c>PUT /api/v1/server/spark</c>.</summary>
+public class SparkServerSettingsRequest
+{
+    /// <summary>
+    /// The URL to call when a plugin update is available, or null/empty to disable the notification.
+    /// Must be a valid http or https URL when non-empty.
+    /// </summary>
+    public string? UpdateWebhookUrl { get; set; }
+}
+
+#endregion

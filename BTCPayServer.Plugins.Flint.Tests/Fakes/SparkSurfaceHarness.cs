@@ -272,7 +272,9 @@ public sealed class SparkSurfaceHarness
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
             runtime, depositService, stableBalanceService,
-            NullLogger<GreenfieldSparkController>.Instance);
+            NullLogger<GreenfieldSparkController>.Instance,
+            // Server-level settings (GET/PUT /api/v1/server/spark) are not exercised by this harness.
+            null!);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };
 

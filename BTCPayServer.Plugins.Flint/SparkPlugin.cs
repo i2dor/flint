@@ -309,6 +309,15 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // its own. See SparkLightningConfigSweepTask.
         services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
 
+        // Daily registry check: fires a webhook when a new Flint version appears on the plugin registry.
+        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
+
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");
         services.AddUIExtension("ln-payment-method-setup-tab", "Spark/LNPaymentMethodSetupTab");

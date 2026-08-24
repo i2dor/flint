@@ -4,6 +4,18 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8.0] - 2026-08-24
+
+### Added
+
+- **Plugin update webhook.** A new server-level setting (`PUT /api/v1/server/spark`) accepts an
+  `updateWebhookUrl`. Once set, Flint checks the BTCPay plugin registry daily and POSTs a
+  `plugin.update-available` event payload when a newer version is found. The payload includes
+  `pluginIdentifier`, `installedVersion`, and `availableVersion`. Each available version is
+  notified at most once. Read the current setting with `GET /api/v1/server/spark`. Both endpoints
+  require `canModifyServerSettings`.
+
+
 ## [0.1.7.0] - 2026-08-24
 
 ### Added

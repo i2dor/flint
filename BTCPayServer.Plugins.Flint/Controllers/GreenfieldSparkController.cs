@@ -13,6 +13,7 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Http;
@@ -90,6 +91,7 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly ILogger<GreenfieldSparkController> _logger;
+    private readonly SettingsRepository _serverSettingsRepository;
 
     public GreenfieldSparkController(
         ISparkStoreSettingsStore settingsStore,
@@ -101,7 +103,8 @@ public class GreenfieldSparkController : ControllerBase
         ISparkStoreRuntime runtime,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
-        ILogger<GreenfieldSparkController> logger)
+        ILogger<GreenfieldSparkController> logger,
+        SettingsRepository serverSettingsRepository)
     {
         _settingsStore = settingsStore;
         _provisioner = provisioner;
@@ -113,6 +116,7 @@ public class GreenfieldSparkController : ControllerBase
         _deposits = deposits;
         _stableBalance = stableBalance;
         _logger = logger;
+        _serverSettingsRepository = serverSettingsRepository;
     }
 
     #region Status
@@ -697,6 +701,52 @@ public class GreenfieldSparkController : ControllerBase
             BalanceSats = info.BalanceSats,
             SyncedAt = DateTimeOffset.UtcNow
         });
+    }
+
+    #endregion
+
+    #region Server settings
+
+    /// <summary>Flint server-level settings (shared across all stores).</summary>
+    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/server/spark")]
+    public async Task<IActionResult> GetServerSettings(CancellationToken cancellationToken)
+    {
+        var settings = await _serverSettingsRepository
+            .GetSettingAsync<SparkServerSettings>()
+            .ConfigureAwait(false) ?? new SparkServerSettings();
+
+        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
+    }
+
+    /// <summary>Update Flint server-level settings.</summary>
+    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPut("~/api/v1/server/spark")]
+    public async Task<IActionResult> UpdateServerSettings(
+        [FromBody] SparkServerSettingsRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl))
+        {
+            if (!Uri.TryCreate(request.UpdateWebhookUrl, UriKind.Absolute, out var uri)
+                || uri.Scheme is not ("http" or "https"))
+            {
+                return this.CreateAPIError(422, "invalid-update-webhook-url",
+                    $"'{request.UpdateWebhookUrl}' is not a valid http/https URL.");
+            }
+        }
+
+        var settings = await _serverSettingsRepository
+            .GetSettingAsync<SparkServerSettings>()
+            .ConfigureAwait(false) ?? new SparkServerSettings();
+
+        settings.UpdateWebhookUrl = string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl)
+            ? null
+            : request.UpdateWebhookUrl;
+
+        await _serverSettingsRepository.UpdateSetting(settings).ConfigureAwait(false);
+
+        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
     }
 
     #endregion

@@ -1,4 +1,5 @@
 using System.Reflection;
+using Microsoft.AspNetCore.Mvc.Routing;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Plugins.Flint.Controllers;
 using BTCPayServer.Plugins.Flint.Data;
@@ -279,9 +280,13 @@ public class GreenfieldSparkStoreScopeTests
     [Fact]
     public void The_no_authorised_store_theory_covers_every_action_on_the_controller()
     {
+        // Server-level endpoints (no {storeId} in route) do not use ResolveStore and are not
+        // covered by this theory; they are gated by CanModifyServerSettings instead.
         var actions = typeof(GreenfieldSparkController)
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(m => typeof(Task<IActionResult>).IsAssignableFrom(m.ReturnType))
+            .Where(m => m.GetCustomAttributes<HttpMethodAttribute>()
+                .Any(a => a.Template?.Contains("{storeId}", StringComparison.Ordinal) == true))
             .Select(m => m.Name)
             .ToList();
 

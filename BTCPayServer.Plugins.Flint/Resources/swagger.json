@@ -599,6 +599,83 @@
           }
         ]
       }
+    },
+    "/api/v1/server/spark": {
+      "get": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Get Flint server-level settings",
+        "description": "Returns the server-level Flint configuration shared across all stores on this BTCPay instance. Currently contains the `updateWebhookUrl` for plugin update notifications.",
+        "operationId": "Spark_GetServerSettings",
+        "responses": {
+          "200": {
+            "description": "The server-level Flint settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkServerSettingsData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify server settings"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.server.canmodifyserversettings"
+            ],
+            "Basic": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "Spark"
+        ],
+        "summary": "Update Flint server-level settings",
+        "description": "Replaces the server-level Flint configuration. Set `updateWebhookUrl` to an http/https URL to receive a `plugin.update-available` notification when a new Flint version is detected on the plugin registry (checked once per day). Clear it by sending `null` or an empty string.",
+        "operationId": "Spark_UpdateServerSettings",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SparkServerSettingsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored server-level settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SparkServerSettingsData"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "If you are authenticated but forbidden to modify server settings"
+          },
+          "422": {
+            "description": "The update webhook URL is not a valid http/https URL"
+          }
+        },
+        "security": [
+          {
+            "API_Key": [
+              "btcpay.server.canmodifyserversettings"
+            ],
+            "Basic": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -1674,6 +1751,30 @@
             "type": "string",
             "format": "date-time",
             "description": "When the sync was performed, UTC."
+          }
+        }
+      },
+      "SparkServerSettingsData": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Flint server-level settings, shared across all stores on this BTCPay instance.",
+        "properties": {
+          "updateWebhookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "When set, Flint POSTs a plugin.update-available event here whenever a newer version is detected on the plugin registry. The check runs once per day."
+          }
+        }
+      },
+      "SparkServerSettingsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Request body for PUT /api/v1/server/spark.",
+        "properties": {
+          "updateWebhookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "The URL to call when a plugin update is available, or null/empty to disable the notification. Must be a valid http or https URL when non-empty."
           }
         }
       }
