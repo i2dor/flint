@@ -95,4 +95,65 @@ public class SparkSweepWebhookNotifierTests
 
         Assert.Equal(0, handler.Requests);
     }
+
+    // --- NotifyFailureAsync ---
+
+    [Fact]
+    public async Task Failure_delivers_on_first_attempt()
+    {
+        var handler = StubHttpMessageHandler.Returning("ok");
+        var notifier = Notifier(handler);
+
+        await notifier.NotifyFailureAsync(
+            "https://example.com/hook", "store-1", SweepTrigger.Automatic, "Spark rejected", null);
+
+        Assert.Equal(1, handler.Requests);
+    }
+
+    [Fact]
+    public async Task Failure_includes_record_fields_when_available()
+    {
+        string? captured = null;
+        var handler = StubHttpMessageHandler.Capture(async (req, _) =>
+        {
+            captured = await req.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        var notifier = Notifier(handler);
+        var record = MinimalRecord();
+
+        await notifier.NotifyFailureAsync(
+            "https://example.com/hook", "store-1", SweepTrigger.Manual, "Spark rejected", record);
+
+        Assert.NotNull(captured);
+        Assert.Contains("sweep.failed", captured);
+        Assert.Contains(record.IdempotencyKey, captured);
+        Assert.Contains(record.DestinationAddress, captured);
+    }
+
+    [Fact]
+    public async Task Failure_retries_on_server_error_and_succeeds()
+    {
+        var handler = StubHttpMessageHandler.Sequence(
+            HttpStatusCode.ServiceUnavailable,
+            HttpStatusCode.OK);
+        var notifier = Notifier(handler);
+
+        await notifier.NotifyFailureAsync(
+            "https://example.com/hook", "store-1", SweepTrigger.Automatic, "Spark rejected", null);
+
+        Assert.Equal(2, handler.Requests);
+    }
+
+    [Fact]
+    public async Task Failure_skips_invalid_url()
+    {
+        var handler = StubHttpMessageHandler.Returning("ok");
+        var notifier = Notifier(handler);
+
+        await notifier.NotifyFailureAsync(
+            "ftp://example.com/hook", "store-1", SweepTrigger.Automatic, "Spark rejected", null);
+
+        Assert.Equal(0, handler.Requests);
+    }
 }

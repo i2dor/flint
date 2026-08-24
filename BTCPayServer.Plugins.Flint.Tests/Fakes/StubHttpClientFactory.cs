@@ -55,6 +55,14 @@ public sealed class StubHttpMessageHandler : HttpMessageHandler
     /// <summary>Completes when the first request arrives, so a test need not poll for it.</summary>
     public Task Started => _started.Task;
 
+    /// <summary>
+    /// Routes every request through <paramref name="respond"/>, letting a test inspect the request and
+    /// decide the response. Use when the default factory methods do not expose enough control.
+    /// </summary>
+    public static StubHttpMessageHandler Capture(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond) =>
+        new(respond);
+
     /// <summary>Answers every request with <paramref name="body"/> as <c>200 application/json</c>.</summary>
     public static StubHttpMessageHandler Returning(string body) =>
         new((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

@@ -4,6 +4,22 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6.2] - 2026-08-24
+
+### Added
+
+- **Sweep webhook fires on failed sweeps.** When a sweep is attempted and fails (Spark rejects it or
+  reports it as failed), Flint now POSTs an `event: "sweep.failed"` notification to the configured
+  webhook URL. The payload includes `storeId`, `trigger`, `reason`, and — when a sweep record was
+  created before the failure — `idempotencyKey`, `amountSats`, `destination`, and `destinationMode`.
+  Same retry logic as the success notification (3 retries with exponential backoff).
+
+### Changed
+
+- **Success webhook payload includes `event: "sweep.swept"`.** Added to let receivers distinguish
+  success from failure notifications on the same endpoint without inspecting other fields.
+
+
 ## [0.1.6.1] - 2026-08-24
 
 ### Changed

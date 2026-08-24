@@ -275,15 +275,20 @@ public sealed class SparkSweepEngine
         {
             var result = await RunGuardedAsync(storeId, trigger, cancellationToken).ConfigureAwait(false);
 
-            if (result.Kind is SweepOutcomeKind.Swept
-                && result.Record is { } record
-                && _webhookNotifier is { } notifier)
+            if (_webhookNotifier is { } notifier)
             {
                 var stored = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
                 var webhookUrl = stored?.Sweep?.SweepWebhookUrl;
                 if (!string.IsNullOrWhiteSpace(webhookUrl))
-                    await notifier.NotifyAsync(webhookUrl, storeId, record, cancellationToken)
-                        .ConfigureAwait(false);
+                {
+                    if (result.Kind is SweepOutcomeKind.Swept && result.Record is { } record)
+                        await notifier.NotifyAsync(webhookUrl, storeId, record, cancellationToken)
+                            .ConfigureAwait(false);
+                    else if (result.Kind is SweepOutcomeKind.Failed)
+                        await notifier.NotifyFailureAsync(
+                                webhookUrl, storeId, trigger, result.Reason, result.Record, cancellationToken)
+                            .ConfigureAwait(false);
+                }
             }
 
             return result;

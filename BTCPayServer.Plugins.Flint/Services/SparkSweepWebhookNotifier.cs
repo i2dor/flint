@@ -57,17 +57,12 @@ public class SparkSweepWebhookNotifier
         SweepRecord record,
         CancellationToken cancellationToken = default)
     {
-        if (!Uri.TryCreate(webhookUrl, UriKind.Absolute, out var uri)
-            || uri.Scheme is not ("http" or "https"))
-        {
-            _logger.LogWarning(
-                "Store {StoreId}: sweep webhook URL '{Url}' is not a valid http/https URL; notification skipped",
-                storeId, webhookUrl);
+        if (!TryParseUrl(webhookUrl, storeId, out var uri))
             return;
-        }
 
         var json = JsonSerializer.Serialize(new
         {
+            @event = "sweep.swept",
             storeId,
             idempotencyKey = record.IdempotencyKey,
             txId = record.TxId,
@@ -79,6 +74,55 @@ public class SparkSweepWebhookNotifier
             completedAt = record.CompletedAt
         }, SerializerOptions);
 
+        await PostWithRetryAsync(uri!, webhookUrl, storeId, json, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task NotifyFailureAsync(
+        string webhookUrl,
+        string storeId,
+        SweepTrigger trigger,
+        string reason,
+        SweepRecord? record,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryParseUrl(webhookUrl, storeId, out var uri))
+            return;
+
+        var json = JsonSerializer.Serialize(new
+        {
+            @event = "sweep.failed",
+            storeId,
+            trigger = trigger.ToString(),
+            reason,
+            idempotencyKey = record?.IdempotencyKey,
+            amountSats = record?.AmountSats,
+            destination = record?.DestinationAddress,
+            destinationMode = record?.DestinationMode.ToString()
+        }, SerializerOptions);
+
+        await PostWithRetryAsync(uri!, webhookUrl, storeId, json, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool TryParseUrl(string webhookUrl, string storeId, out Uri? uri)
+    {
+        if (Uri.TryCreate(webhookUrl, UriKind.Absolute, out uri)
+            && uri.Scheme is "http" or "https")
+            return true;
+
+        _logger.LogWarning(
+            "Store {StoreId}: sweep webhook URL '{Url}' is not a valid http/https URL; notification skipped",
+            storeId, webhookUrl);
+        uri = null;
+        return false;
+    }
+
+    private async Task PostWithRetryAsync(
+        Uri uri,
+        string webhookUrl,
+        string storeId,
+        string json,
+        CancellationToken cancellationToken)
+    {
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             try
