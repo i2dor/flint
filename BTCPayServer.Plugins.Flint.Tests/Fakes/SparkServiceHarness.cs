@@ -1,3 +1,4 @@
+using System.Linq;
 using BTCPayServer.Configuration;
 using BTCPayServer.Logging;
 using BTCPayServer.Plugins.Flint.Sdk;
@@ -111,6 +112,12 @@ public sealed class SparkServiceHarness : IDisposable
         var invoices = new InMemoryInvoiceRecordStore();
         var reconciler = new SparkSettlementReconciler(
             invoices, broadcaster, NullLogger<SparkSettlementReconciler>.Instance);
+        var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
+
+        // The startup sweep is real here — it runs against the stores this harness knows about — so the
+        // deferred factory is wired to a sweeper built over the same fakes. The sweeper is constructed after
+        // the service because its settings store is the service itself; the closure makes that ordering safe.
+        SparkLightningConfigSweeper? sweeper = null;
 
         var service = new TestableSparkService(
             connectDeadline ?? TimeSpan.FromMilliseconds(250),
@@ -128,11 +135,18 @@ public sealed class SparkServiceHarness : IDisposable
             reconciler,
             broadcaster,
             protector,
-            new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance),
+            wiring,
             new StubBolt11Parser(),
             TimeProvider.System,
+            () => sweeper ?? throw new InvalidOperationException("harness sweep not wired"),
             NullLoggerFactory.Instance,
             log);
+
+        sweeper = new SparkLightningConfigSweeper(
+            new FakeStoreIdSource(lightning.Stores.Keys.ToArray()),
+            wiring,
+            service,
+            NullLogger<SparkLightningConfigSweeper>.Instance);
 
         return new SparkServiceHarness(
             service, stores, sdk, lightning, protector, invoices, broadcaster, log, dataDir);
@@ -206,11 +220,12 @@ public sealed class SparkServiceHarness : IDisposable
             SparkLightningWiring lightningWiring,
             IBolt11Parser bolt11Parser,
             TimeProvider timeProvider,
+            Func<SparkLightningConfigSweeper> configSweeperFactory,
             ILoggerFactory loggerFactory,
             ILogger<SparkService> logger)
             : base(eventAggregator, storeRepository, dataDirectories, networkProvider, sdkClientFactory,
                 invoiceStore, outgoingStore, reconciler, broadcaster, mnemonicProtector, lightningWiring,
-                bolt11Parser, timeProvider, loggerFactory, logger)
+                bolt11Parser, timeProvider, configSweeperFactory, loggerFactory, logger)
         {
             _connectDeadline = connectDeadline;
             _confirmStatusDeadline = confirmStatusDeadline;

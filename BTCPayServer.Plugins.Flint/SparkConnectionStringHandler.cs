@@ -44,17 +44,27 @@ namespace BTCPayServer.Plugins.Flint;
 /// store. That closes the <em>key-without-a-store-id</em> hole in the prior-art plugin, where a bare key
 /// could be pointed at any wallet.</para>
 /// <para>
-/// <b>It does not make the string safe to leak.</b> <see cref="Create"/> receives only the string and the
-/// network — <see cref="ILightningConnectionStringHandler"/> passes no owning store — so the store is
-/// resolved from <em>inside</em> the string and nothing compares it to the store whose payment-method
-/// config is being saved. Copy a store's whole string onto another store on the same server and that
-/// store drives the original's wallet: confirmed live in the 2026-08-07 audit, which read the victim's
-/// balance and minted an invoice into the victim's wallet through the attacker's store. The string is
-/// therefore a <b>bearer spend credential</b>, exactly like an LND macaroon.
+/// <b>Store binding is enforced now, in two plugin layers, neither of which lives in
+/// <see cref="Create"/>.</b> This handler still receives only the string and the network —
+/// <see cref="ILightningConnectionStringHandler"/> passes no owning store — so the store is resolved from
+/// <em>inside</em> the string and nothing in here can compare it to the store being configured. What
+/// closes the cross-store copy is the plugin around this handler. Saving a string on a store it does not
+/// belong to is refused by <see cref="SparkLightningClient.Validate"/>, which runs inside the save request
+/// where core has placed the configured store on the <c>HttpContext</c>; a configuration that predates
+/// that check is cleared by <see cref="Services.SparkLightningConfigSweeper"/> at startup, which also
+/// rotates the victim's payment key so previously leaked copies of the string stop resolving. The
+/// 2026-08-07 audit's "copy store B's whole string onto store A" reproduction now fails validation on
+/// every HTTP save path, and a copy that already exists is swept on the next startup.
+/// </para>
+/// <para>
+/// The string remains a <b>bearer spend credential</b> within that bound — exactly like an LND macaroon,
+/// anyone who holds it may still save it on the store it names — so it still must be treated as a secret,
+/// and the residual exposure is this handler's own limitation, unchanged: <see cref="Create"/> resolves
+/// from the string alone, so enforcement depends on the two plugin layers, not on the string itself.
 /// <see cref="Services.SparkStoreProvisioner"/> rotates the payment key on every provision, so re-running
-/// setup revokes every previously issued string; between provisions the string never expires. Treat it as
-/// a secret, and do not restate the older, stronger claim that store binding closes cross-store hijack
-/// outright.
+/// setup revokes every previously issued string; between provisions the string never expires. Do not
+/// restate the older claim that store binding closes cross-store hijack outright — it now closes the
+/// <em>save</em> paths and sweeps what predates them.
 /// </para>
 /// <para>There is deliberately no <c>server=</c> key, so
 /// BTCPay's <c>IsSafe</c> check passes and non-admin store owners can save the configuration.</para>

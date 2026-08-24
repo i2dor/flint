@@ -158,15 +158,6 @@ public class SparkSettlementReconciler
                     storeId, paymentHash);
                 break;
 
-            case InvoiceSettlementOutcome.RefusedCancelled:
-                // Spark has no way to withdraw an invoice from the service provider, so a cancelled invoice
-                // can still be paid. The funds are in the wallet; the BTCPay invoice must stay unpaid.
-                _logger.LogWarning(
-                    "Store {StoreId}: received {AmountSats} sat for cancelled invoice {PaymentHash}. The funds "
-                    + "are in the Spark balance but the BTCPay invoice will not be marked paid",
-                    storeId, payment.AmountSats, paymentHash);
-                break;
-
             default:
                 _logger.LogWarning(
                     "Store {StoreId}: received {AmountSats} sat for payment hash {PaymentHash}, which this "
@@ -288,7 +279,9 @@ public class SparkSettlementReconciler
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(record);
-        if (record.Status is not InvoiceRecordStatus.Unpaid)
+        // Paid is terminal. A cancelled invoice is still scanned: on Spark it remains payable, so a late
+        // payment must be found and credited here (see InvoiceRecord.EffectiveStatus).
+        if (record.Status is InvoiceRecordStatus.Paid)
             return record;
 
         var payment = await FindReceiveAsync(sdk, record, cancellationToken).ConfigureAwait(false);

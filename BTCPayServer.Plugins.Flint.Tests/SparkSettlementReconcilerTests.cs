@@ -137,7 +137,7 @@ public class SparkSettlementReconcilerTests
     }
 
     [Fact]
-    public async Task Applying_a_settlement_to_a_cancelled_invoice_notifies_nobody()
+    public async Task Applying_a_settlement_to_a_cancelled_invoice_credits_it_and_notifies_once()
     {
         var (reconciler, store, broadcaster) = Create();
         Seed(store);
@@ -146,9 +146,55 @@ public class SparkSettlementReconcilerTests
 
         var result = await reconciler.ApplyAsync(StoreId, Receive(), Ct);
 
-        Assert.Equal(InvoiceSettlementOutcome.RefusedCancelled, result.Outcome);
+        Assert.Equal(InvoiceSettlementOutcome.Settled, result.Outcome);
+        Assert.NotNull(result.Record);
+        Assert.Equal(InvoiceRecordStatus.Paid, result.Record.Status);
+        Assert.Equal(100_000, result.Record.AmountReceivedMsat);
+
+        // The notification is what lets BTCPay reach the invoice this bolt11 was minted for; it must fire
+        // exactly once, exactly for this payment.
+        var notification = await listener.ReadAsync(Ct);
+        Assert.Equal(Hash, notification.PaymentHash);
+        Assert.Equal(100_000, notification.AmountReceivedMsat);
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await listener.ReadAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task A_late_payment_of_a_superseded_invoice_credits_the_invoice_it_was_minted_for()
+    {
+        // The production shape of the finding: an X -> Y invoice replacement (sequential requests to a
+        // public TopUp LNURL callback cancel the older bolt11), then a late completed payment of X. Spark
+        // cannot withdraw X, so the payment settles anyway. It must credit X — the invoice whose payment
+        // hash it carries — not the replacement, and Y must stay untouched.
+        var (reconciler, store, broadcaster) = Create();
+        var xHash = new string('a', 64);
+        var yHash = new string('b', 64);
+        Seed(store, hash: xHash);
+        Seed(store, hash: yHash);
+
+        // BTCPay replaces X with Y: the old bolt11 is cancelled locally, the new one offered.
+        Assert.True(await store.CancelAsync(StoreId, xHash, Ct));
+        Assert.Equal(InvoiceRecordStatus.Expired, store.Records[xHash].Status);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, store.Records[yHash].Status);
+
+        using var listener = broadcaster.Subscribe(StoreId);
+        var result = await reconciler.ApplyAsync(
+            StoreId, Receive(hash: xHash, sdkPaymentId: "sdk-late", amountSats: 100), Ct);
+
+        // X is credited with the received amount and the settlement is published for BTCPay.
+        Assert.Equal(InvoiceSettlementOutcome.Settled, result.Outcome);
+        Assert.Equal(xHash, result.Record!.PaymentHash);
+        Assert.Equal(InvoiceRecordStatus.Paid, result.Record.Status);
+        Assert.Equal(100_000, result.Record.AmountReceivedMsat);
+
+        var notification = await listener.ReadAsync(Ct);
+        Assert.Equal(xHash, notification.PaymentHash);
+        Assert.Equal(100_000, notification.AmountReceivedMsat);
+
+        // The replacement is untouched: nothing about X's late payment credits Y.
+        Assert.Equal(InvoiceRecordStatus.Unpaid, store.Records[yHash].Status);
+        Assert.Null(store.Records[yHash].AmountReceivedMsat);
     }
 
     [Fact]
@@ -302,8 +348,12 @@ public class SparkSettlementReconcilerTests
     }
 
     [Fact]
-    public async Task Reconciling_a_store_skips_paid_cancelled_and_expired_invoices()
+    public async Task Reconciling_a_store_skips_paid_and_long_expired_but_rechecks_cancelled_invoices()
     {
+        // Paid is terminal and a long-expired invoice is past the grace window (a deliberate bound). A
+        // cancelled invoice, by contrast, is still payable on the service provider, so the walk re-examines
+        // it within the same window as anything else — a late payment of a cancelled invoice is exactly what
+        // the walk exists to catch when the SDK's completion event is dropped.
         var (reconciler, store, _) = Create();
         var expiredHash = new string('b', 64);
         var cancelledHash = new string('c', 64);
@@ -319,8 +369,9 @@ public class SparkSettlementReconcilerTests
         var settled = await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct);
 
         Assert.Equal(0, settled);
-        // Nothing was even asked about: the pending query excluded all three.
-        Assert.Empty(sdk.ListQueries);
+        // Only the cancelled invoice was asked about; paid and long-expired did not even produce a query.
+        var query = Assert.Single(sdk.ListQueries);
+        Assert.True(query.From < DateTimeOffset.UtcNow, "the single query should be the cancelled invoice's scan");
         Assert.Empty(sdk.GetPaymentCalls);
     }
 

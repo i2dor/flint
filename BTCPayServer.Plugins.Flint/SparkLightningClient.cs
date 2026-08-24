@@ -11,6 +11,7 @@ using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
 
@@ -109,6 +110,7 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     private readonly SparkSettlementReconciler _reconciler;
     private readonly ISparkSettlementSubscriber _settlements;
     private readonly IBolt11Parser _bolt11Parser;
+    private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger _logger;
 
     public SparkLightningClient(
@@ -120,7 +122,8 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
         SparkSettlementReconciler reconciler,
         ISparkSettlementSubscriber settlements,
         IBolt11Parser bolt11Parser,
-        ILogger logger)
+        ILogger logger,
+        IHttpContextAccessor? httpContextAccessor = null)
     {
         _storeId = storeId ?? throw new ArgumentNullException(nameof(storeId));
         _paymentKey = paymentKey ?? throw new ArgumentNullException(nameof(paymentKey));
@@ -130,6 +133,10 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
         _reconciler = reconciler ?? throw new ArgumentNullException(nameof(reconciler));
         _settlements = settlements ?? throw new ArgumentNullException(nameof(settlements));
         _bolt11Parser = bolt11Parser ?? throw new ArgumentNullException(nameof(bolt11Parser));
+        // A bare HttpContextAccessor reads the process-wide AsyncLocal, so a fresh instance per client is
+        // every bit as correct as a shared one; the optional parameter is what keeps the test fixtures that
+        // build clients outside a request from having to supply one.
+        _httpContextAccessor = httpContextAccessor ?? new HttpContextAccessor();
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -147,16 +154,43 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
 
     /// <summary>
     /// Called by BTCPay when the merchant saves the Lightning payment method, to tell them what is wrong
-    /// before the configuration is accepted.
+    /// before the configuration is accepted. Refuses to accept another store's connection string, then
+    /// proves the wallet this string names is alive.
     /// </summary>
     /// <remarks>
-    /// Uses the cached, non-syncing <c>GetInfo</c>: it returns in ~0 ms and proves the native handle is
-    /// alive and this store's instance has not been torn down. It deliberately does not force a sync — a
-    /// ~2.2 s SSP round trip on a settings save is not worth the extra certainty, and a wallet that cannot
-    /// reach the SSP is reported by the startup warm-up instead.
+    /// <para>
+    /// <b>The store-binding check is the plugin's cross-store defence.</b> A connection string embeds the
+    /// store it belongs to (<c>store-id=…</c>) and the resolver returns that store's wallet, so saving store
+    /// B's complete string on store A would make A receive into and spend from B's wallet. The handler
+    /// cannot detect this — BTCPay's <c>ILightningConnectionStringHandler.Create</c> is never told which
+    /// store is being configured — but <c>Validate</c> runs inside the save request itself, where core's
+    /// authorisation has placed the store being configured on the <see cref="HttpContext"/>
+    /// (<c>GetStoreDataOrNull</c>). If that store differs from the one this client is bound to, the string
+    /// is being saved on the wrong store: refuse with a generic error that names neither store. A missing
+    /// context (a background call, a route core has not authorised) means there is nothing to compare, and
+    /// the check passes — the startup sweep (<c>SparkLightningConfigSweeper</c>) is the backstop for
+    /// configurations that predate this check or that were written without one.
+    /// </para>
+    /// <para>
+    /// The live check uses the cached, non-syncing <c>GetInfo</c>: it returns in ~0 ms and proves the native
+    /// handle is alive and this store's instance has not been torn down. It deliberately does not force a
+    /// sync — a ~2.2 s SSP round trip on a settings save is not worth the extra certainty, and a wallet that
+    /// cannot reach the SSP is reported by the startup warm-up instead. The store check runs first, so a
+    /// mismatched string is refused without contacting the wallet it names.
+    /// </para>
     /// </remarks>
     public async Task<ValidationResult?> Validate()
     {
+        var configuredStoreId = _httpContextAccessor.HttpContext?.GetStoreDataOrNull()?.Id;
+        if (configuredStoreId is not null &&
+            !string.Equals(configuredStoreId, _storeId, StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "Refusing to save a connection string for store {EmbeddedStoreId} on store {TargetStoreId}",
+                _storeId, configuredStoreId);
+            return new ValidationResult("This connection string belongs to another store on this server.");
+        }
+
         try
         {
             await _sdk.GetInfoAsync(ensureSynced: false).ConfigureAwait(false);
@@ -347,9 +381,10 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// </summary>
     /// <remarks>
     /// The Spark SDK has no invoice-cancellation primitive, so this is implemented locally: the record is
-    /// marked cancelled and the settlement path then refuses to report it paid. A payment that arrives for a
-    /// cancelled invoice still credits the store's Spark balance — it cannot be turned away — but it will not
-    /// settle the BTCPay invoice, and the refusal is logged as a warning both here and in the event consumer.
+    /// marked cancelled and no longer offered to payers, but the invoice stays payable on the service
+    /// provider and a late payment still settles it and credits the BTCPay invoice it was minted for. The
+    /// money is real and the alternative is unattributed sats in the wallet; cancellation buys bookkeeping,
+    /// not withdrawal.
     /// <para>
     /// Deliberately does not throw when there is nothing to cancel: BTCPay calls this speculatively, and a
     /// throw would be logged as an error for every invoice that had already been paid.
@@ -365,7 +400,7 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
         {
             _logger.LogInformation(
                 "Store {StoreId}: invoice {PaymentHash} cancelled locally. Spark cannot withdraw it from the " +
-                "service provider, so a late payment would credit the wallet balance without settling it",
+                "service provider, so a late payment still settles and credits the BTCPay invoice it belongs to",
                 _storeId, paymentHash);
             return;
         }

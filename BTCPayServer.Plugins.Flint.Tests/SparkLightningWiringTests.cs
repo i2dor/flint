@@ -105,13 +105,55 @@ public class SparkLightningWiringTests
     [Fact]
     public async Task Clear_leaves_another_stores_spark_configuration_alone()
     {
-        // The connection string is store-bound so this configuration is already broken, but overwriting
-        // another store's stated intent is worse than leaving a visibly broken configuration behind.
+        // ClearIfOursAsync runs while a store's own Spark settings are being removed, so it only ever clears
+        // this store's own configuration. A cross-store configuration is not ours to clear at that moment —
+        // that is the configuration sweep's job.
         var configStore = FakeStoreLightningConfigStore.WithStore(
             StoreId, SparkConnectionString.Format(OtherStoreId, PaymentKey));
 
         Assert.False(await Create(configStore).ClearIfOursAsync(StoreId));
         Assert.Empty(configStore.Writes);
+    }
+
+    [Fact]
+    public async Task Clear_cross_store_removes_a_configuration_pointing_at_another_store()
+    {
+        // The sweep's remediation: a valid string embedding a different store id is the one configuration
+        // that is broken by definition, so it is cleared and the victim's id is reported.
+        var configStore = FakeStoreLightningConfigStore.WithStore(
+            StoreId, SparkConnectionString.Format(OtherStoreId, PaymentKey));
+
+        var victim = await Create(configStore).ClearCrossStoreAsync(StoreId);
+
+        Assert.Equal(OtherStoreId, victim);
+        Assert.Null(Assert.Single(configStore.Writes).ConnectionString);
+    }
+
+    [Theory]
+    // Our own store: not cross-store.
+    [InlineData("type=flint;store-id=" + StoreId + ";key=0f1e2d3c4b5a69788796a5b4c3d2e1f0")]
+    // Somebody else's node: never cleared by this method.
+    [InlineData("type=lnd-rest;server=https://127.0.0.1:8080/;macaroon=abcdef")]
+    // Our type but malformed: the owner is unknown, so left alone.
+    [InlineData("type=flint;store-id=" + StoreId)]
+    public async Task Clear_cross_store_leaves_everything_else_alone(string connectionString)
+    {
+        var configStore = FakeStoreLightningConfigStore.WithStore(StoreId, connectionString);
+
+        Assert.Null(await Create(configStore).ClearCrossStoreAsync(StoreId));
+        Assert.Empty(configStore.Writes);
+    }
+
+    [Fact]
+    public async Task Clear_cross_store_leaves_a_missing_or_internal_node_configuration_alone()
+    {
+        // A store with no Lightning payment method, and BTCPay's internal node, have nothing cross-store.
+        var none = new FakeStoreLightningConfigStore();
+        Assert.Null(await Create(none).ClearCrossStoreAsync(StoreId));
+
+        var internalNode = FakeStoreLightningConfigStore.WithStore(StoreId, isInternalNode: true);
+        Assert.Null(await Create(internalNode).ClearCrossStoreAsync(StoreId));
+        Assert.Empty(internalNode.Writes);
     }
 
     [Fact]
@@ -196,7 +238,7 @@ public class SparkLightningWiringTests
     // Ours, but a key the settings no longer hold.
     [InlineData("", false, "type=flint;store-id=store-1;key=aaaabbbbccccdddd",
         SparkLightningWiringState.StaleSpark)]
-    // Another store's Spark wallet. Broken, but not ours to overwrite.
+    // Another store's Spark wallet: refused at save time, cleared by the startup sweep.
     [InlineData("", false, "type=flint;store-id=store-2;key=" + PaymentKey,
         SparkLightningWiringState.OtherStoreSpark)]
     public void Classify_maps_every_configuration_to_its_own_state(

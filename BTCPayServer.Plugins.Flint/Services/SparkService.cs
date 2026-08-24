@@ -128,6 +128,11 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SparkService> _logger;
 
+    // Deferred, not injected: SparkLightningConfigSweeper depends on this service (its settings store), so
+    // resolving it eagerly would close a singleton cycle the container cannot always report cleanly. This is
+    // the same deferral the connection-string handler and the value oracle use, for the same reason.
+    private readonly Func<SparkLightningConfigSweeper> _configSweeperFactory;
+
     /// <summary>
     /// Cached per-store settings, keyed by store id. Populated once in <see cref="StartAsync"/> and kept in
     /// sync by <see cref="Set"/>.
@@ -184,6 +189,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         SparkLightningWiring lightningWiring,
         IBolt11Parser bolt11Parser,
         TimeProvider timeProvider,
+        Func<SparkLightningConfigSweeper> configSweeperFactory,
         ILoggerFactory loggerFactory,
         ILogger<SparkService> logger) : base(eventAggregator, logger)
     {
@@ -206,6 +212,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         _mnemonicProtector = mnemonicProtector;
         _lightningWiring = lightningWiring;
         _bolt11Parser = bolt11Parser;
+        _configSweeperFactory = configSweeperFactory;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -301,10 +308,20 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             _startupGate.TrySetResult();
         }
 
-        // Catch up on anything that settled while the process was down. Not awaited: it is a database and SSP
-        // walk over every store, and the host must not wait on it. The scheduled task then repeats it.
+        // Catch up on anything that settled while the process was down, and clear any cross-store Lightning
+        // configuration saved before the save-time guard existed. Not awaited: both are walks over every
+        // store, and the host must not wait on them.
         _ = Task.Run(async () =>
         {
+            try
+            {
+                await SweepLightningConfigsAsync(CancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!CancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "The Spark startup Lightning configuration sweep failed");
+            }
+
             try
             {
                 await ReconcileAllStoresAsync(CancellationToken).ConfigureAwait(false);
@@ -954,6 +971,16 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         await _startupGate.Task.ConfigureAwait(false);
         return _instances.Keys.ToList();
     }
+
+    /// <summary>
+    /// One pass of the cross-store Lightning configuration sweep: clears any store whose Lightning payment
+    /// method embeds another store's Spark wallet, and rotates that victim's payment key. See
+    /// <see cref="SparkLightningConfigSweeper"/> for why this exists and why clearing cannot damage a
+    /// deliberate configuration.
+    /// </summary>
+    public async Task<SparkLightningConfigSweepResult> SweepLightningConfigsAsync(
+        CancellationToken cancellationToken = default) =>
+        await _configSweeperFactory().SweepAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The live client for a store, or null when the store has not configured Spark or its instance failed to
