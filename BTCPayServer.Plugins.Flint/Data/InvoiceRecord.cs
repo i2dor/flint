@@ -85,6 +85,64 @@ public class InvoiceRecord
     public string? Preimage { get; set; }
 
     /// <summary>
+    /// When this settlement was recorded on the BTCPay invoice the BOLT11 was minted for. Null means it has
+    /// not been, and the credit is still owed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a settled invoice is not necessarily a credited one.</b> Settling this row records that the money
+    /// arrived; it does not put a payment on the merchant's BTCPay invoice. Normally BTCPay's own Lightning
+    /// listener does that, having been woken by <c>SparkSettlementBroadcaster</c>. But that listener watches
+    /// only the <em>current</em> prompt of each invoice: when BTCPay supersedes BOLT11 X with BOLT11 Y — which
+    /// it does on every LNURL re-quote — and the process then restarts, only Y is watched again. X is still
+    /// payable on the service provider, and a payment to X after that restart would settle this row while the
+    /// BTCPay invoice stayed unpaid. The same hole opens when a listening session is saturated, or when the
+    /// process dies between the settle and the notification.
+    /// </para>
+    /// <para>
+    /// So the credit is tracked here as its own durable step, retried by the reconciliation pass until it
+    /// lands. "Landed" covers two outcomes and deliberately does not distinguish them: our own insert won, or
+    /// we confirmed BTCPay already holds a payment row for this hash. Both mean the merchant's invoice has the
+    /// money on it exactly once, which is the only thing a retry needs to know.
+    /// </para>
+    /// <para>
+    /// Never cleared, and only ever set on a <see cref="InvoiceRecordStatus.Paid"/> row — see
+    /// <see cref="IInvoiceRecordStore.MarkCreditedAsync"/>, which is a compare-and-set for the same reason
+    /// settling is.
+    /// </para>
+    /// </remarks>
+    public DateTimeOffset? CreditedAt { get; set; }
+
+    /// <summary>
+    /// When this settlement was given up on as never creditable. Null means it has not been.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is not just <see cref="CreditedAt"/>.</b> Some settlements can never reach a BTCPay invoice:
+    /// a BOLT11 minted through this plugin's own Greenfield endpoints was never attached to one, and no amount
+    /// of retrying will attach it. Such a row has to leave the retry set, or every pass re-attempts it and
+    /// re-warns about it for the life of the server. But stamping <see cref="CreditedAt"/> to achieve that would
+    /// record that the merchant <em>was</em> credited, which is exactly the opposite of what happened — and this
+    /// table is the record an operator reconciles a wallet balance against. So the two terminal states are
+    /// separate columns, and <c>Status = Paid AND "CreditedAt" IS NULL AND "CreditAbandonedAt" IS NOT NULL</c>
+    /// is a precise SQL question: money in the wallet that no BTCPay invoice accounts for.
+    /// </para>
+    /// <para>
+    /// Stamping this is also what makes the operator warning fire <em>once</em>. The warning is emitted by
+    /// <see cref="Services.SparkInvoiceCreditor"/> at the moment the row is stamped, and the stamp removes the
+    /// row from <see cref="IInvoiceRecordStore.ListUncreditedAsync"/> permanently — so the amount and the
+    /// payment hash are reported to the operator exactly once rather than on every pass forever.
+    /// </para>
+    /// <para>
+    /// A credited row is never labelled abandoned — the stamp is guarded on <see cref="CreditedAt"/> still being
+    /// null. The reverse ordering has no path to it: an abandoned row leaves the retry set, and the creditor
+    /// refuses an in-hand record that carries this stamp before it attempts anything. Were it ever to happen
+    /// anyway, <see cref="CreditedAt"/> is the authoritative half of the pair — the money did reach the invoice.
+    /// </para>
+    /// </remarks>
+    public DateTimeOffset? CreditAbandonedAt { get; set; }
+
+    /// <summary>
     /// Status as reported to BTCPay, which treats a past-expiry unpaid invoice as expired.
     /// </summary>
     /// <remarks>
@@ -107,10 +165,13 @@ public class InvoiceRecord
     /// to <see cref="IInvoiceRecordStore.SettleAsync"/>. The recurring reconciliation pass keeps looking
     /// for an hour past expiry rather than stopping at it; beyond that hour an invoice is no longer
     /// re-checked and a late payment stays unattributed in the wallet balance — a deliberate bound, since
-    /// the alternative is rescanning every invoice ever created on every pass. Note also that a settlement
-    /// recorded after BTCPay has stopped listening for the invoice (its own expiry —
-    /// <c>LightningInstanceListener.RemoveExpiredInvoices</c>) keeps this plugin's own ledger truthful but
-    /// will usually not revive the BTCPay invoice.
+    /// the alternative is rescanning every invoice ever created on every pass.
+    /// </para>
+    /// <para>
+    /// A settlement recorded after BTCPay has stopped listening for the invoice (its own expiry —
+    /// <c>LightningInstanceListener.RemoveExpiredInvoices</c>, or a restart that only re-watched the
+    /// superseding BOLT11) no longer depends on that listener at all: the credit is routed to the invoice the
+    /// BOLT11 was minted for directly, tracked by <see cref="CreditedAt"/> and retried until it lands.
     /// </para>
     /// </remarks>
     public InvoiceRecordStatus EffectiveStatus(DateTimeOffset now) =>
@@ -159,6 +220,47 @@ public class InvoiceRecord
         Preimage = preimage ?? Preimage;
         SettledAt = settledAt;
         return InvoiceSettlementOutcome.Settled;
+    }
+
+    /// <summary>
+    /// Records that this settlement has reached its BTCPay invoice. Returns true only when this call is what
+    /// set the timestamp.
+    /// </summary>
+    /// <remarks>
+    /// Guarded on <see cref="InvoiceRecordStatus.Paid"/> as well as on the column still being empty, and both
+    /// guards matter. A row that is not paid has no settlement to credit, so marking one would permanently
+    /// suppress the credit of the payment that later arrives; and re-stamping an already-credited row would
+    /// move a timestamp that records when the merchant's invoice was actually paid. Same predicate as the
+    /// store's conditional UPDATE (<c>WHERE Status = Paid AND CreditedAt IS NULL</c>), which is what keeps the
+    /// two implementations of <see cref="IInvoiceRecordStore"/> observably identical.
+    /// </remarks>
+    public bool TryMarkCredited(DateTimeOffset creditedAt)
+    {
+        if (Status is not InvoiceRecordStatus.Paid || CreditedAt is not null)
+            return false;
+        CreditedAt = creditedAt;
+        return true;
+    }
+
+    /// <summary>
+    /// Records that this settlement will never reach a BTCPay invoice. Returns true only when this call is what
+    /// set the timestamp.
+    /// </summary>
+    /// <remarks>
+    /// Guarded on <see cref="InvoiceRecordStatus.Paid"/> and on <em>both</em> credit columns still being empty.
+    /// The <see cref="CreditedAt"/> guard is the one that matters: a row the previous pass credited must not
+    /// then be labelled abandoned, which would make the wallet look short by an amount that was in fact
+    /// accounted for. The self-guard is what makes the operator warning fire exactly once — the caller emits it
+    /// only when this returns true. Same predicate as the store's conditional UPDATE
+    /// (<c>WHERE Status = Paid AND CreditedAt IS NULL AND CreditAbandonedAt IS NULL</c>), which is what keeps
+    /// the two implementations of <see cref="IInvoiceRecordStore"/> observably identical.
+    /// </remarks>
+    public bool TryMarkCreditAbandoned(DateTimeOffset abandonedAt)
+    {
+        if (Status is not InvoiceRecordStatus.Paid || CreditedAt is not null || CreditAbandonedAt is not null)
+            return false;
+        CreditAbandonedAt = abandonedAt;
+        return true;
     }
 
     /// <summary>

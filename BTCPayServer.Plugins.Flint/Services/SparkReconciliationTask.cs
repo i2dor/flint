@@ -29,6 +29,14 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// merchant's wallet — which is exactly the class of silent loss this plugin exists to avoid.
 /// </para>
 /// <para>
+/// <b>Each pass does two things, and the second is not a subset of the first.</b> It re-checks unpaid
+/// invoices against the service provider, and it retries the routing of already-settled payments onto their
+/// BTCPay invoices (<see cref="SparkSettlementReconciler.CreditStoreAsync"/>). The second is what covers a
+/// notification nobody received: BTCPay's listener watches only each invoice's current payment prompt, so a
+/// superseded BOLT11 paid after a restart settles with nothing listening for it, and no amount of re-checking
+/// unpaid invoices would find it — the row is already paid.
+/// </para>
+/// <para>
 /// Registered through BTCPay's <c>AddScheduledTask</c>, which runs <see cref="Do"/> on a fixed interval and
 /// logs rather than rethrows. <see cref="SparkService"/> additionally runs one pass at startup, to cover
 /// events missed while the process was down.

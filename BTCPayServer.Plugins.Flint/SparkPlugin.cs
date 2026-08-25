@@ -69,6 +69,15 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // session (subscribers).
         services.AddSingleton<SparkSettlementBroadcaster>();
 
+        // Routing a settlement to the BTCPay invoice its BOLT11 was minted for, which the settlement
+        // notification above cannot be relied on to achieve: BTCPay's Lightning listener watches only each
+        // invoice's current payment prompt, so a superseded BOLT11 that is paid after a restart settles here
+        // and reaches no invoice. The gateway is the thin part that talks to BTCPay; the creditor holds every
+        // decision, including the refusal to credit another store's invoice, and is unit-tested against a fake
+        // of the gateway.
+        services.AddSingleton<IInvoiceCreditGateway, BTCPayInvoiceCreditGateway>();
+        services.AddSingleton<SparkInvoiceCreditor>();
+
         // The single path from "a Spark receive happened" to "a BTCPay invoice is paid", shared by the event
         // consumer, BTCPay's GetInvoice lookup and the reconciliation task.
         services.AddSingleton<SparkSettlementReconciler>();
@@ -84,6 +93,12 @@ public class SparkPlugin : BaseBTCPayServerPlugin
             provider.GetRequiredService<ISparkClientResolver>);
         services.TryAddSingleton<Func<PaymentMethodHandlerDictionary>>(provider =>
             provider.GetRequiredService<PaymentMethodHandlerDictionary>);
+        // PaymentService touches the same graph — its own constructor takes PaymentMethodHandlerDictionary — and
+        // is deferred to keep that rule uniform rather than because eager injection is known to hang today: the
+        // cycle above is broken at SparkConnectionStringHandler's Func<ISparkClientResolver>.
+        // BTCPayInvoiceCreditGateway documents the path.
+        services.TryAddSingleton<Func<PaymentService>>(provider =>
+            provider.GetRequiredService<PaymentService>);
 
         // Ownership of the store's BTC-LN payment method config. The wiring class holds every decision about
         // when the plugin may write or clear it and is unit-tested against a fake of the store seam; the store

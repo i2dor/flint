@@ -88,7 +88,13 @@ public class SparkFundedRegtestTests
         var store = new InMemoryInvoiceRecordStore();
         var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
         var reconciler = new SparkSettlementReconciler(
-            store, broadcaster, NullLogger<SparkSettlementReconciler>.Instance);
+            store,
+            broadcaster,
+            // There is no BTCPay here, so no invoice to credit; an empty gateway keeps the settlement path
+            // whole while leaving crediting to the tests that own it.
+            new SparkInvoiceCreditor(
+                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+            NullLogger<SparkSettlementReconciler>.Instance);
         var client = new SparkLightningClient(
             _wallet.StoreId,
             "funded-regtest-key",

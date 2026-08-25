@@ -34,10 +34,50 @@ public class SparkSettlementReconcilerTests
     private static (SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store,
         SparkSettlementBroadcaster Broadcaster, CapturingLogger<SparkSettlementReconciler> Log) CreateWithLog()
     {
+        var (reconciler, store, broadcaster, log, _) = CreateWithCredits();
+        return (reconciler, store, broadcaster, log);
+    }
+
+    /// <summary>
+    /// The same reconciler with BTCPay's side of the settlement visible, for the tests about crediting.
+    /// </summary>
+    private static (SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store,
+        SparkSettlementBroadcaster Broadcaster, CapturingLogger<SparkSettlementReconciler> Log,
+        FakeInvoiceCreditGateway Credits) CreateWithCredits()
+    {
         var store = new InMemoryInvoiceRecordStore();
         var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
         var log = new CapturingLogger<SparkSettlementReconciler>();
-        return (new SparkSettlementReconciler(store, broadcaster, log), store, broadcaster, log);
+        var credits = new FakeInvoiceCreditGateway();
+        var reconciler = new SparkSettlementReconciler(
+            store,
+            broadcaster,
+            new SparkInvoiceCreditor(credits, store, NullLogger<SparkInvoiceCreditor>.Instance),
+            log);
+        return (reconciler, store, broadcaster, log, credits);
+    }
+
+    /// <summary>
+    /// The same reconciler again, with the <em>creditor's</em> log visible rather than the reconciler's.
+    /// </summary>
+    /// <remarks>
+    /// A separate factory because the operator report about a settlement that can never be credited is emitted
+    /// by <see cref="SparkInvoiceCreditor"/>, and the property worth pinning — that it fires once per record and
+    /// not once per pass — is only observable by counting lines on that logger while driving the walk this class
+    /// owns.
+    /// </remarks>
+    private static (SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store,
+        FakeInvoiceCreditGateway Credits, CapturingLogger<SparkInvoiceCreditor> CreditLog) CreateWithCreditLog()
+    {
+        var store = new InMemoryInvoiceRecordStore();
+        var credits = new FakeInvoiceCreditGateway();
+        var creditLog = new CapturingLogger<SparkInvoiceCreditor>();
+        var reconciler = new SparkSettlementReconciler(
+            store,
+            new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
+            new SparkInvoiceCreditor(credits, store, creditLog),
+            NullLogger<SparkSettlementReconciler>.Instance);
+        return (reconciler, store, credits, creditLog);
     }
 
     [Fact]
@@ -508,6 +548,201 @@ public class SparkSettlementReconcilerTests
         Assert.Empty(sdk.GetPaymentCalls);
     }
 
+    // -------------------------------------------------------------------------------------------------------
+    // Crediting: settling records that money arrived, which is not the same as BTCPay knowing about it
+    // -------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_settlement_is_routed_to_its_BTCPay_invoice_as_well_as_announced()
+    {
+        // Both, not either. The announcement only reaches a listener that is still watching this BOLT11, and
+        // for a superseded one after a restart there is none — so the credit is not an alternative path, it is
+        // the one that does not depend on who is listening.
+        var (reconciler, store, broadcaster, _, credits) = CreateWithCredits();
+        Seed(store);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+        using var subscription = broadcaster.Subscribe(StoreId);
+
+        await reconciler.ApplyAsync(StoreId, Receive(), Ct);
+
+        var announced = await subscription.ReadAsync(Ct);
+        Assert.Equal(Hash, announced.PaymentHash);
+        var credit = Assert.Single(credits.Credits);
+        Assert.Equal("btcpay-invoice-1", credit.InvoiceId);
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_credit_that_fails_leaves_the_settlement_intact_and_is_retried_by_the_next_pass()
+    {
+        // The ordering guarantee. By the time the credit is attempted the settlement is committed and the
+        // notification published, so a BTCPay database that is briefly unreachable must cost a pass and not a
+        // settlement — and the pass afterwards has to pick it up.
+        var (reconciler, store, _, _, credits) = CreateWithCredits();
+        Seed(store);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+        credits.FailWith = new InvalidOperationException("BTCPay's database is unreachable");
+
+        var result = await reconciler.ApplyAsync(StoreId, Receive(), Ct);
+
+        Assert.Equal(InvoiceSettlementOutcome.Settled, result.Outcome);
+        Assert.Equal(InvoiceRecordStatus.Paid, store.Records[Hash].Status);
+        Assert.Null(store.Records[Hash].CreditedAt);
+
+        credits.FailWith = null;
+        Assert.Equal(1, await reconciler.CreditStoreAsync(StoreId, Ct));
+
+        Assert.Equal(Hash, Assert.Single(credits.Credits).PaymentHash);
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_duplicate_settlement_event_retries_a_credit_that_had_not_landed()
+    {
+        // The SDK does duplicate its events, and a duplicate is the cheapest retry available — no waiting for
+        // the next pass. It must not, however, credit an already-credited settlement a second time.
+        var (reconciler, store, _, _, credits) = CreateWithCredits();
+        Seed(store);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+        credits.FailWith = new InvalidOperationException("BTCPay's database is unreachable");
+        await reconciler.ApplyAsync(StoreId, Receive(), Ct);
+        credits.FailWith = null;
+
+        var second = await reconciler.ApplyAsync(StoreId, Receive(), Ct);
+        Assert.Equal(InvoiceSettlementOutcome.AlreadySettled, second.Outcome);
+        Assert.Single(credits.Credits);
+
+        // A third event finds the credit done and does not even ask.
+        var lookups = credits.Lookups;
+        await reconciler.ApplyAsync(StoreId, Receive(), Ct);
+        Assert.Equal(lookups, credits.Lookups);
+        Assert.Single(credits.Credits);
+    }
+
+    [Fact]
+    public async Task A_reconciliation_pass_credits_a_settlement_BTCPay_never_heard_about()
+    {
+        // The restart case, at the reconciler's own altitude: a paid row whose credit never landed, and whose
+        // invoice has since expired — so the settlement walk skips it and only the credit walk reaches it.
+        var (reconciler, store, _, _, credits) = CreateWithCredits();
+        Seed(store, createdAt: DateTimeOffset.UtcNow.AddHours(-5),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(-4));
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+
+        Assert.Equal(0, await reconciler.ReconcileStoreAsync(StoreId, new FakeSparkSdkClient(), Ct));
+
+        Assert.Equal(Hash, Assert.Single(credits.Credits).PaymentHash);
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_reconciliation_pass_credits_each_settlement_at_most_once()
+    {
+        // Idempotence across passes, which is what a timer makes unavoidable: the pass runs every minute for
+        // the life of the server.
+        var (reconciler, store, _, _, credits) = CreateWithCredits();
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+
+        Assert.Equal(1, await reconciler.CreditStoreAsync(StoreId, Ct));
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+
+        Assert.Single(credits.Credits);
+    }
+
+    [Fact]
+    public async Task A_credit_pass_does_not_touch_another_stores_settlements()
+    {
+        var (reconciler, store, _, _, credits) = CreateWithCredits();
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+
+        Assert.Equal(0, await reconciler.CreditStoreAsync("some-other-store", Ct));
+        Assert.Empty(credits.Credits);
+        Assert.Null(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_settlement_that_can_never_be_credited_is_reported_by_the_walk_exactly_once()
+    {
+        // The defect this pins is a silence, which is the hardest kind to notice. The walk's listing bound and
+        // the creditor's retry horizon were the same value, so a settlement crossed out of the listing at the
+        // exact instant it became eligible to be reported: the operator warning was unreachable from the pass,
+        // the money stayed unaccounted for, and the row was indistinguishable from one still in flight.
+        //
+        // Driven through the walk and not by calling the creditor directly — deliberately. The creditor's own
+        // test proves the classification; only the walk can prove the record is *reachable* to be classified.
+        var (reconciler, store, credits, creditLog) = CreateWithCreditLog();
+        var settledAt = DateTimeOffset.UtcNow - SparkInvoiceCreditor.CreditRetryHorizon - TimeSpan.FromDays(1);
+        Seed(store, createdAt: settledAt.AddMinutes(-5), expiresAt: settledAt.AddHours(1));
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, PaymentFixture.Preimage, settledAt, Ct);
+        // No Mint: BTCPay has no invoice for this hash and never will, which is what a BOLT11 minted through
+        // this plugin's own Greenfield endpoints looks like from here.
+
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+
+        // Reported, at operator level, with the amount and the hash a human needs to trace the money.
+        var reports = creditLog.Lines.Where(l => l.Contains("no longer be retried")).ToList();
+        Assert.Single(reports);
+        Assert.StartsWith("Warning:", reports[0]);
+        Assert.Contains(Hash, reports[0]);
+        Assert.Contains("100 sat", reports[0]);
+
+        // Recorded as abandoned rather than credited: the row must not claim the merchant was paid.
+        Assert.Null(store.Records[Hash].CreditedAt);
+        Assert.NotNull(store.Records[Hash].CreditAbandonedAt);
+
+        // And that is the end of it — no further attempt, and above all no second report, however many passes
+        // run afterwards.
+        var lookups = credits.Lookups;
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+
+        Assert.Equal(lookups, credits.Lookups);
+        Assert.Single(creditLog.Lines.Where(l => l.Contains("no longer be retried")));
+    }
+
+    [Fact]
+    public async Task A_settlement_still_inside_the_retry_horizon_is_retried_rather_than_reported()
+    {
+        // The other side of the boundary, and the reason the report cannot simply be moved earlier: BTCPay
+        // writes its payment-hash row just after CreateInvoice returns, so a payment landing in that window
+        // finds nothing. An operator-level line there would fire on ordinary checkouts.
+        var (reconciler, store, _, creditLog) = CreateWithCreditLog();
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        Assert.Equal(0, await reconciler.CreditStoreAsync(StoreId, Ct));
+
+        Assert.DoesNotContain("no longer be retried", creditLog.AllText);
+        Assert.Null(store.Records[Hash].CreditAbandonedAt);
+        // Still in the queue, so the pass after BTCPay catches up credits it.
+        Assert.Null(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_failed_settlement_listing_does_not_skip_the_credit_walk()
+    {
+        // The two walks read different queries of the same table and neither is a precondition of the other.
+        // The credit walk used to run last and inside the settlement walk's control flow, so a failure loading
+        // the settlement page returned before reaching it — on exactly the store whose invoices are in trouble
+        // and therefore most likely to be holding uncredited money.
+        var (reconciler, store, credits, _) = CreateWithCreditLog();
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        credits.Mint(Hash, "btcpay-invoice-1", StoreId);
+        store.FailReconciliationListWith = new InvalidOperationException("the invoice listing is unavailable");
+
+        Assert.Equal(0, await reconciler.ReconcileStoreAsync(StoreId, new FakeSparkSdkClient(), Ct));
+
+        Assert.Equal(Hash, Assert.Single(credits.Credits).PaymentHash);
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+    }
+
     /// <summary>
     /// Decorator that fails one specific point lookup and delegates everything else.
     /// </summary>
@@ -659,13 +894,23 @@ public class SparkReconcileStoresTests
 
     private static (SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store) Create()
     {
+        var (reconciler, store, _) = CreateWithCredits();
+        return (reconciler, store);
+    }
+
+    private static (SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store,
+        FakeInvoiceCreditGateway Credits) CreateWithCredits()
+    {
         var store = new InMemoryInvoiceRecordStore();
+        var credits = new FakeInvoiceCreditGateway();
         return (
             new SparkSettlementReconciler(
                 store,
                 new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
+                new SparkInvoiceCreditor(credits, store, NullLogger<SparkInvoiceCreditor>.Instance),
                 NullLogger<SparkSettlementReconciler>.Instance),
-            store);
+            store,
+            credits);
     }
 
     private static FakeSparkSdkClient SeedStore(
@@ -768,5 +1013,76 @@ public class SparkReconcileStoresTests
         var (reconciler, _) = Create();
 
         Assert.Equal(0, await reconciler.ReconcileStoresAsync([], TestPasses.Reconciliation(), Ct));
+    }
+
+    [Fact]
+    public async Task A_store_with_no_running_wallet_still_gets_its_settlements_credited()
+    {
+        // The gap this closes. The pass's stores used to come only from the live SDK instances, so a store whose
+        // Spark connection was broken — a rotated key, a service-provider outage, a wallet reconfigured away —
+        // got no credit pass either. Its money had already arrived and been recorded; only the routing onto
+        // BTCPay's invoice was outstanding, and that needs no wallet at all. So the pass takes its stores from
+        // the record store as well, and this store is in no target list whatsoever.
+        var (reconciler, store, credits) = CreateWithCredits();
+        var offline = "store-with-no-wallet";
+        store.Seed(new InvoiceRecord
+        {
+            PaymentHash = PaymentFixture.PaymentHash,
+            StoreId = offline,
+            Bolt11 = "lnbcrt-one",
+            AmountMsat = 100_000,
+            AmountReceivedMsat = 100_000,
+            SdkPaymentId = "sdk-1",
+            Preimage = PaymentFixture.Preimage,
+            CreatedAt = DateTimeOffset.UtcNow.AddHours(-5),
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(-4),
+            SettledAt = DateTimeOffset.UtcNow.AddHours(-4),
+            Status = InvoiceRecordStatus.Paid
+        });
+        credits.Mint(PaymentFixture.PaymentHash, "btcpay-invoice-1", offline);
+
+        // No targets: as far as the live wallets are concerned this store does not exist.
+        Assert.Equal(0, await reconciler.ReconcileStoresAsync([], TestPasses.Reconciliation(), Ct));
+
+        Assert.Equal(PaymentFixture.PaymentHash, Assert.Single(credits.Credits).PaymentHash);
+        Assert.NotNull(store.Records[PaymentFixture.PaymentHash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_running_store_that_also_awaits_a_credit_does_both_and_is_counted_once()
+    {
+        // A store reached by both sources at once. The union is a set, so it is visited a single time, and that
+        // one visit has to do both jobs: settle the invoice the SDK has been paid for, and route the settlement
+        // from an earlier pass that never reached BTCPay. A settled count of two would mean the store had been
+        // walked twice.
+        var (reconciler, store, credits) = CreateWithCredits();
+        var sdk = SeedStore(store, "store-1", PaymentFixture.PaymentHash);
+        credits.Mint(PaymentFixture.PaymentHash, "btcpay-invoice-1", "store-1");
+
+        // Already settled on an earlier pass, and never credited — which is what puts this store in the record
+        // store's awaiting-credit list as well as in the target list.
+        store.Seed(new InvoiceRecord
+        {
+            PaymentHash = PaymentFixture.OtherPaymentHash,
+            StoreId = "store-1",
+            Bolt11 = "lnbcrt-two",
+            AmountMsat = 100_000,
+            AmountReceivedMsat = 100_000,
+            SdkPaymentId = "sdk-earlier",
+            CreatedAt = DateTimeOffset.UtcNow.AddHours(-5),
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(-4),
+            SettledAt = DateTimeOffset.UtcNow.AddHours(-4),
+            Status = InvoiceRecordStatus.Paid
+        });
+        credits.Mint(PaymentFixture.OtherPaymentHash, "btcpay-invoice-2", "store-1");
+
+        var settled = await reconciler.ReconcileStoresAsync(
+            [new SparkReconciliationTarget("store-1", sdk)], TestPasses.Reconciliation(), Ct);
+
+        Assert.Equal(1, settled);
+        var credited = credits.Credits.Select(c => c.PaymentHash).ToList();
+        Assert.Equal(2, credited.Count);
+        Assert.Contains(PaymentFixture.PaymentHash, credited);
+        Assert.Contains(PaymentFixture.OtherPaymentHash, credited);
     }
 }

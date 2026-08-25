@@ -33,8 +33,15 @@ public class SparkLightningClientTests
         var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
         var parser = new StubBolt11Parser();
         parser.Register(Bolt11, bolt11Info ?? new Bolt11Info(Hash, DateTimeOffset.UtcNow.AddHours(1), 100_000));
+        // An empty credit gateway: BTCPay knows of none of these payment hashes, which is the honest shape for
+        // a test of the client. Crediting is covered where it belongs, in SparkInvoiceCreditorTests and
+        // SparkSupersededInvoiceCreditTests.
         var reconciler = new SparkSettlementReconciler(
-            store, broadcaster, NullLogger<SparkSettlementReconciler>.Instance);
+            store,
+            broadcaster,
+            new SparkInvoiceCreditor(
+                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+            NullLogger<SparkSettlementReconciler>.Instance);
 
         var client = new SparkLightningClient(
             StoreId, PaymentKey, sdk, store, outgoing, reconciler, broadcaster, parser, NullLogger.Instance,

@@ -68,6 +68,29 @@ exactly one credit and one notification.
 The task keeps looking for **one hour past an invoice's expiry**, because the service provider accepts a
 late payment and Spark has no way to withdraw an invoice from it — so a just-expired invoice can still
 take real money that has to be recorded. Past that hour it stops, which is a deliberate bound: a payment
-arriving later than that stays in the wallet balance without being attributed to an invoice. Note that
-BTCPay stops listening for an invoice as soon as it expires, so a settlement recorded after expiry keeps
-this plugin's own ledger truthful but will usually not revive the BTCPay invoice.
+arriving later than that stays in the wallet balance without being attributed to an invoice.
+
+### And the notification is not what credits the merchant
+
+Notifying BTCPay's listener only works while that listener is watching the BOLT11 in question — and it
+watches only each invoice's *current* payment prompt. Replace BOLT11 X with BOLT11 Y (BTCPay does this
+whenever an LNURL invoice is re-quoted) and X leaves the watched set; after a restart it is never re-added,
+because the set is rebuilt from the prompts that exist now. X is still payable on the service provider.
+
+So every settlement is **also written directly onto the BTCPay invoice its BOLT11 was minted for**, found
+through BTCPay's own payment-hash index, which keeps the mint-time association permanently. The plugin
+records whether that credit landed and the reconciliation pass retries it until it does — covering a
+payment that arrived while the server was down, a listening session that fell too far behind, and a crash
+between recording the settlement and telling BTCPay. It cannot happen twice: the credit is keyed on the
+payment hash, the same id BTCPay's own listener uses, so the two collide on BTCPay's payments primary key
+and exactly one records the money.
+
+That retry needs no Spark connection — it touches only BTCPay's own tables — so a store whose wallet is
+disconnected, its key rotated, or its configuration removed still has money it already received routed
+onto the right invoice.
+
+A settlement whose payment hash BTCPay has no invoice for is retried for **seven days**. After that, the
+next pass reports it once — with its amount and its payment hash, at warning level — and marks it as
+abandoned, which is a different mark from credited: the plugin's records keep saying that this money never
+reached a BTCPay invoice, so a wallet balance can be reconciled against them. Nothing is reported twice,
+and nothing is retried forever.

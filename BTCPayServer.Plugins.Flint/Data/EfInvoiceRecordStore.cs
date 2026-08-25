@@ -233,6 +233,118 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
         return new InvoiceSettlementResult(InvoiceSettlementOutcome.NotFound, null);
     }
 
+    public async Task<bool> MarkCreditedAsync(
+        string storeId,
+        string paymentHash,
+        DateTimeOffset creditedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await using var context = _contextFactory.CreateContext();
+
+        // A conditional UPDATE, so the database decides which of the two racing callers — the settlement path
+        // and the reconciliation pass — actually stamps the row. Guarded on Paid because marking an unpaid row
+        // credited would permanently suppress the credit of the payment that later arrives, and on the column
+        // still being null so the timestamp keeps meaning "when the credit landed".
+        var updated = await context.InvoiceRecords
+            .Where(r => r.PaymentHash == paymentHash
+                        && r.StoreId == storeId
+                        && r.Status == InvoiceRecordStatus.Paid
+                        && r.CreditedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(r => r.CreditedAt, creditedAt),
+                cancellationToken);
+        return updated == 1;
+    }
+
+    public async Task<bool> MarkCreditAbandonedAsync(
+        string storeId,
+        string paymentHash,
+        DateTimeOffset abandonedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await using var context = _contextFactory.CreateContext();
+
+        // A conditional UPDATE for the same reason MarkCreditedAsync uses one, plus a third clause. Guarded on
+        // CreditedAt so a credit that landed on a concurrent pass is never overwritten by this claim that it
+        // never will, and on this column still being null so the caller's operator warning — which it emits only
+        // when this returns true — fires exactly once for the row rather than on every pass.
+        var updated = await context.InvoiceRecords
+            .Where(r => r.PaymentHash == paymentHash
+                        && r.StoreId == storeId
+                        && r.Status == InvoiceRecordStatus.Paid
+                        && r.CreditedAt == null
+                        && r.CreditAbandonedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(r => r.CreditAbandonedAt, abandonedAt),
+                cancellationToken);
+        return updated == 1;
+    }
+
+    public async Task<IReadOnlyList<InvoiceRecord>> ListUncreditedAsync(
+        string storeId,
+        DateTimeOffset settledFrom,
+        InvoiceReconciliationCursor? after,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        await using var context = _contextFactory.CreateContext();
+        var query = context.InvoiceRecords
+            .AsNoTracking()
+            // The mirror image of ListForReconciliationAsync's predicate: that walk wants what might still be
+            // paid, this one wants what has been paid but whose money has neither reached a BTCPay invoice nor
+            // been given up on. The (StoreId, Status) index narrows it to this store's paid rows; the rest is a
+            // filter over a set that is normally empty.
+            .Where(r => r.StoreId == storeId
+                        && r.Status == InvoiceRecordStatus.Paid
+                        && r.CreditedAt == null
+                        && r.CreditAbandonedAt == null
+                        && r.SettledAt != null
+                        && r.SettledAt > settledFrom);
+
+        if (after is not null)
+        {
+            var cursorCreatedAt = after.CreatedAt;
+            var cursorHash = after.PaymentHash;
+            query = query.Where(r => r.CreatedAt > cursorCreatedAt
+                                     || (r.CreatedAt == cursorCreatedAt
+                                         && string.Compare(r.PaymentHash, cursorHash) > 0));
+        }
+
+        return await query
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.PaymentHash)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<string>> ListStoreIdsAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        await using var context = _contextFactory.CreateContext();
+
+        // The same predicate as ListUncreditedAsync minus the store scope, projected to distinct store ids. A
+        // GROUP BY over a set that is normally empty, and it is what lets the credit walk reach a store whose
+        // Spark wallet is not running — see the interface's remarks for why that matters.
+        return await context.InvoiceRecords
+            .AsNoTracking()
+            .Where(r => r.Status == InvoiceRecordStatus.Paid
+                        && r.CreditedAt == null
+                        && r.CreditAbandonedAt == null
+                        && r.SettledAt != null
+                        && r.SettledAt > settledFrom)
+            .Select(r => r.StoreId)
+            .Distinct()
+            .OrderBy(storeId => storeId)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+    }
+
     public async Task<bool> CancelAsync(
         string storeId,
         string paymentHash,

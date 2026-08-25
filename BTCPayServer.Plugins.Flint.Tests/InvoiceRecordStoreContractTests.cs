@@ -1,4 +1,5 @@
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using BTCPayServer.Plugins.Flint.Tests.Postgres;
 using Xunit;
@@ -478,6 +479,357 @@ public abstract class InvoiceRecordStoreContractTests
 
         var listed = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), after: null, limit: 10, Ct);
+
+        Assert.Equal(PaymentFixture.PaymentHash, Assert.Single(listed).PaymentHash);
+    }
+
+    // -------------------------------------------------------------------------------------------------------
+    // Crediting: whether a settlement has reached the BTCPay invoice its BOLT11 was minted for
+    // -------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Marking_credited_succeeds_once_and_keeps_the_first_timestamp()
+    {
+        // Two callers genuinely race here — the settlement path and the reconciliation pass both attempt the
+        // credit for the same row — and only one of them may be told it stamped it. The timestamp is when the
+        // merchant's invoice was credited, not when a pass last looked.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        var first = DateTimeOffset.UtcNow;
+
+        Assert.True(await store.MarkCreditedAsync(StoreId, PaymentFixture.PaymentHash, first, Ct));
+        Assert.False(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow.AddHours(1), Ct));
+
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.NotNull(reread!.CreditedAt);
+        Assert.Equal(first.ToUnixTimeMilliseconds(), reread.CreditedAt!.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public async Task Marking_an_unsettled_invoice_credited_is_refused()
+    {
+        // The interlock. Stamping an unpaid row would tell every later pass the credit is done, and the payment
+        // that eventually arrives would settle here and never reach the merchant's BTCPay invoice. A cancelled
+        // invoice is refused for the same reason: on Spark it is still payable.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        Assert.False(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        Assert.True(await store.CancelAsync(StoreId, PaymentFixture.PaymentHash, Ct));
+        Assert.False(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Null(reread!.CreditedAt);
+    }
+
+    [Fact]
+    public async Task Marking_credited_is_scoped_to_the_owning_store()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        Assert.False(await store.MarkCreditedAsync(
+            OtherStoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+        Assert.False(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.OtherPaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Null(reread!.CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_settlement_stays_uncredited_until_it_is_marked()
+    {
+        // This is the retry queue, so what it contains decides what can still be recovered. A settled row is in
+        // it from the moment it settles until the credit lands — including one settled long after expiry, which
+        // is exactly the case BTCPay's listener is no longer watching for.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(
+            createdAt: DateTimeOffset.UtcNow.AddHours(-5),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(-4)), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        var pending = await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 10, Ct);
+        Assert.Equal(PaymentFixture.PaymentHash, Assert.Single(pending).PaymentHash);
+
+        Assert.True(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        Assert.Empty(await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 10, Ct));
+    }
+
+    [Fact]
+    public async Task Uncredited_excludes_invoices_that_never_settled()
+    {
+        // An unpaid or cancelled invoice has no settlement to credit. Including one would have every pass
+        // attempt a credit for money that has not arrived.
+        var store = await CreateStoreAsync();
+        var cancelledHash = "e".PadLeft(64, '0');
+        await store.AddAsync(NewRecord(), Ct);
+        await store.AddAsync(NewRecord(cancelledHash), Ct);
+        await store.CancelAsync(StoreId, cancelledHash, Ct);
+
+        Assert.Empty(await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 10, Ct));
+    }
+
+    [Fact]
+    public async Task Uncredited_stops_at_the_listing_bound()
+    {
+        // The bound on the size of the set, not on the retry: a settlement old enough that even the abandoned
+        // report has had its chance is no longer worth a query on every pass for the life of the server. The
+        // caller passes SparkInvoiceCreditor.ListableFrom here, which is deliberately older than the retry
+        // horizon — see the interface's remarks for why those two must not be the same value.
+        var store = await CreateStoreAsync();
+        var recentHash = PaymentFixture.PaymentHash;
+        var ancientHash = PaymentFixture.OtherPaymentHash;
+        await store.AddAsync(NewRecord(recentHash), Ct);
+        await store.AddAsync(NewRecord(ancientHash, createdAt: DateTimeOffset.UtcNow.AddDays(-30)), Ct);
+        await store.SettleAsync(StoreId, recentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        await store.SettleAsync(
+            StoreId, ancientHash, "sdk-2", 100_000, null, DateTimeOffset.UtcNow.AddDays(-30), Ct);
+
+        var listed = await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 10, Ct);
+
+        Assert.Equal(recentHash, Assert.Single(listed).PaymentHash);
+    }
+
+    [Fact]
+    public async Task Uncredited_still_lists_a_settlement_past_the_retry_horizon()
+    {
+        // The regression this exists for. A record has to stay listed *after* the credit retry horizon passes,
+        // or no pass can ever classify it as abandoned: it would leave the walk at the instant it became
+        // eligible to be reported, so the operator warning would never fire and the row would sit with both
+        // credit columns null forever — indistinguishable from one still in flight.
+        var store = await CreateStoreAsync();
+        var settledAt = DateTimeOffset.UtcNow - SparkInvoiceCreditor.CreditRetryHorizon - TimeSpan.FromDays(1);
+        await store.AddAsync(NewRecord(createdAt: settledAt.AddMinutes(-5)), Ct);
+        await store.SettleAsync(StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, settledAt, Ct);
+
+        var listed = await store.ListUncreditedAsync(
+            StoreId,
+            SparkInvoiceCreditor.ListableFrom(DateTimeOffset.UtcNow),
+            after: null,
+            limit: 10,
+            Ct);
+
+        Assert.Equal(PaymentFixture.PaymentHash, Assert.Single(listed).PaymentHash);
+    }
+
+    [Fact]
+    public async Task An_abandoned_settlement_leaves_the_uncredited_set_without_claiming_a_credit()
+    {
+        // The terminal marker, and the reason it is a column of its own. Stamping CreditedAt would have removed
+        // the record from the walk too — and told every later reader that the merchant had been paid on an
+        // invoice that in fact records nothing.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        Assert.True(await store.MarkCreditAbandonedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        Assert.Empty(await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-14), after: null, limit: 10, Ct));
+
+        var record = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.NotNull(record);
+        Assert.Null(record.CreditedAt);
+        Assert.NotNull(record.CreditAbandonedAt);
+    }
+
+    [Fact]
+    public async Task Abandoning_a_settlement_twice_stamps_it_once()
+    {
+        // What makes the operator report exactly-once: the caller logs only when this compare-and-set says it
+        // was the one that stamped the row.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        var first = DateTimeOffset.UtcNow.AddMinutes(-5);
+
+        Assert.True(await store.MarkCreditAbandonedAsync(StoreId, PaymentFixture.PaymentHash, first, Ct));
+        Assert.False(await store.MarkCreditAbandonedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var record = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.NotNull(record?.CreditAbandonedAt);
+        Assert.Equal(first.ToUnixTimeMilliseconds(), record.CreditAbandonedAt.Value.ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public async Task An_already_credited_settlement_is_never_labelled_abandoned()
+    {
+        // The race that matters. Two passes can be examining the same row; if one credits it while the other is
+        // about to give up on it, the row must keep saying the money arrived. Otherwise the operator is told to
+        // go looking for funds that were in fact accounted for.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        Assert.True(await store.MarkCreditedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        Assert.False(await store.MarkCreditAbandonedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var record = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.NotNull(record?.CreditedAt);
+        Assert.Null(record.CreditAbandonedAt);
+    }
+
+    [Fact]
+    public async Task An_unsettled_invoice_is_never_labelled_abandoned()
+    {
+        // Same interlock as the credit stamp, and for the same reason: an unpaid row has no settlement to give
+        // up on, and stamping one would permanently suppress the credit of the payment that later arrives.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+
+        Assert.False(await store.MarkCreditAbandonedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+    }
+
+    [Fact]
+    public async Task Abandoning_is_scoped_to_the_store_that_owns_the_settlement()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        Assert.False(await store.MarkCreditAbandonedAsync(
+            OtherStoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var record = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Null(record?.CreditAbandonedAt);
+    }
+
+    [Fact]
+    public async Task The_stores_awaiting_a_credit_are_listed_without_needing_a_running_wallet()
+    {
+        // What lets the credit walk reach a store whose Spark connection is broken. Crediting touches only
+        // BTCPay's tables and these rows, so the store id is the only thing the walk needs — and this is where
+        // it comes from, rather than from the set of live SDK instances the settlement walk is limited to.
+        var store = await CreateStoreAsync();
+        var credited = "0".PadLeft(64, 'a');
+        await store.AddAsync(NewRecord(PaymentFixture.PaymentHash), Ct);
+        await store.AddAsync(NewRecord(PaymentFixture.OtherPaymentHash, storeId: OtherStoreId), Ct);
+        await store.AddAsync(NewRecord(credited, storeId: "store-3"), Ct);
+        foreach (var (hash, owner) in new[]
+                 {
+                     (PaymentFixture.PaymentHash, StoreId),
+                     (PaymentFixture.OtherPaymentHash, OtherStoreId),
+                     (credited, "store-3")
+                 })
+        {
+            await store.SettleAsync(owner, hash, $"sdk-{hash[..4]}", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        }
+
+        // One of the three has been resolved, so its store is no longer awaiting anything.
+        Assert.True(await store.MarkCreditedAsync("store-3", credited, DateTimeOffset.UtcNow, Ct));
+
+        var storeIds = await store.ListStoreIdsAwaitingCreditAsync(
+            DateTimeOffset.UtcNow.AddDays(-14), limit: 10, Ct);
+
+        Assert.Equal(2, storeIds.Count);
+        Assert.Contains(StoreId, storeIds);
+        Assert.Contains(OtherStoreId, storeIds);
+    }
+
+    [Fact]
+    public async Task A_store_is_listed_once_however_many_settlements_it_is_owed()
+    {
+        // Distinct, because the caller feeds this to a store-pass scheduler that walks ids: a repeated id would
+        // be a repeated visit, and the visit's own paging already covers every one of the store's rows.
+        var store = await CreateStoreAsync();
+        var hashes = Enumerable.Range(0, 3).Select(i => i.ToString("x64")).ToArray();
+        foreach (var hash in hashes)
+        {
+            await store.AddAsync(NewRecord(hash), Ct);
+            await store.SettleAsync(StoreId, hash, $"sdk-{hash[..4]}", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        }
+
+        var storeIds = await store.ListStoreIdsAwaitingCreditAsync(
+            DateTimeOffset.UtcNow.AddDays(-14), limit: 10, Ct);
+
+        Assert.Equal(StoreId, Assert.Single(storeIds));
+    }
+
+    [Fact]
+    public async Task The_stores_awaiting_a_credit_exclude_resolved_and_aged_out_settlements()
+    {
+        // The same predicate as the per-store listing, asserted separately because the two are different
+        // queries: an abandoned or aged-out row must not keep pulling its store into every pass.
+        var store = await CreateStoreAsync();
+        var abandoned = PaymentFixture.PaymentHash;
+        var ancient = PaymentFixture.OtherPaymentHash;
+        await store.AddAsync(NewRecord(abandoned), Ct);
+        await store.AddAsync(NewRecord(ancient, storeId: OtherStoreId,
+            createdAt: DateTimeOffset.UtcNow.AddDays(-30)), Ct);
+        await store.SettleAsync(StoreId, abandoned, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        await store.SettleAsync(
+            OtherStoreId, ancient, "sdk-2", 100_000, null, DateTimeOffset.UtcNow.AddDays(-30), Ct);
+        Assert.True(await store.MarkCreditAbandonedAsync(StoreId, abandoned, DateTimeOffset.UtcNow, Ct));
+
+        Assert.Empty(await store.ListStoreIdsAwaitingCreditAsync(
+            DateTimeOffset.UtcNow.AddDays(-14), limit: 10, Ct));
+    }
+
+    [Fact]
+    public async Task Uncredited_pages_by_keyset_oldest_first_and_is_stable_when_a_record_is_credited()
+    {
+        // Keyset for the same reason the reconciliation walk uses one: crediting a record removes it from this
+        // result set, so an offset-based second page would skip whatever shifted into the vacated slot. Oldest
+        // first because the oldest settlement is the closest to its retry horizon.
+        var store = await CreateStoreAsync();
+        var hashes = Enumerable.Range(0, 4).Select(i => i.ToString("x64")).ToArray();
+        for (var i = 0; i < hashes.Length; i++)
+        {
+            await store.AddAsync(NewRecord(hashes[i], createdAt: DateTimeOffset.UtcNow.AddMinutes(-30 + i)), Ct);
+            await store.SettleAsync(StoreId, hashes[i], $"sdk-{i}", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        }
+
+        var firstPage = await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 2, Ct);
+        Assert.Equal([hashes[0], hashes[1]], firstPage.Select(r => r.PaymentHash).ToArray());
+
+        foreach (var record in firstPage)
+            await store.MarkCreditedAsync(StoreId, record.PaymentHash, DateTimeOffset.UtcNow, Ct);
+
+        var cursor = new InvoiceReconciliationCursor(firstPage[^1].CreatedAt, firstPage[^1].PaymentHash);
+        var secondPage = await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), cursor, limit: 2, Ct);
+
+        Assert.Equal([hashes[2], hashes[3]], secondPage.Select(r => r.PaymentHash).ToArray());
+    }
+
+    [Fact]
+    public async Task Uncredited_does_not_leak_another_stores_settlements()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(PaymentFixture.PaymentHash), Ct);
+        await store.AddAsync(NewRecord(PaymentFixture.OtherPaymentHash, storeId: OtherStoreId), Ct);
+        await store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
+        await store.SettleAsync(
+            OtherStoreId, PaymentFixture.OtherPaymentHash, "sdk-2", 100_000, null, DateTimeOffset.UtcNow, Ct);
+
+        var listed = await store.ListUncreditedAsync(
+            StoreId, DateTimeOffset.UtcNow.AddDays(-7), after: null, limit: 10, Ct);
 
         Assert.Equal(PaymentFixture.PaymentHash, Assert.Single(listed).PaymentHash);
     }

@@ -34,6 +34,14 @@ public sealed record SparkReconciliationTarget(string StoreId, ISparkSdkClient S
 /// faults, the session never dies and never re-polls. Without this task, a dropped completion event means an
 /// invoice that expires unpaid while the sats sit in the merchant's wallet.
 /// </para>
+/// <para>
+/// <b>Settling is not the same as crediting, and both happen here.</b> Notifying BTCPay's listener only works
+/// while that listener is watching the BOLT11 in question, and it watches only each invoice's <em>current</em>
+/// payment prompt — so a superseded BOLT11 paid after a restart settles here and reaches no BTCPay invoice.
+/// Every settlement is therefore also routed to the invoice its BOLT11 was minted for, through
+/// <see cref="SparkInvoiceCreditor"/>, and retried by <see cref="CreditStoreAsync"/> until it lands. The two
+/// paths cannot double-credit: they collide on BTCPay's own payments primary key.
+/// </para>
 /// </remarks>
 public class SparkSettlementReconciler
 {
@@ -73,8 +81,31 @@ public class SparkSettlementReconciler
     /// </remarks>
     private static readonly TimeSpan ExpiredReconciliationGrace = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// Settled-but-uncredited invoices whose credit is retried per store per pass.
+    /// </summary>
+    /// <remarks>
+    /// Far smaller than <see cref="MaxInvoicesPerPass"/> because the set is normally empty: the credit is
+    /// attempted the moment a settlement is recorded, and only lands here when BTCPay's own row was not
+    /// written yet, when the process died in between, or when the settlement predates the column. A backlog
+    /// larger than this on one store is drained over consecutive passes, oldest first, which is the right
+    /// order — the oldest is the closest to its retry horizon.
+    /// </remarks>
+    private const int MaxCreditsPerPass = 200;
+
+    /// <summary>
+    /// Stores the credit walk will pick up per pass from the record store rather than from a live wallet.
+    /// </summary>
+    /// <remarks>
+    /// Reaching this cap is pathological: it would mean hundreds of stores each holding money that has not
+    /// reached a BTCPay invoice. It exists so the query cannot become unbounded, and the pass says so in the log
+    /// rather than pretending it walked them all.
+    /// </remarks>
+    private const int MaxCreditStoresPerPass = 500;
+
     private readonly IInvoiceRecordStore _invoiceStore;
     private readonly SparkSettlementBroadcaster _broadcaster;
+    private readonly SparkInvoiceCreditor _creditor;
     private readonly ILogger<SparkSettlementReconciler> _logger;
 
     /// <summary>
@@ -86,10 +117,12 @@ public class SparkSettlementReconciler
     public SparkSettlementReconciler(
         IInvoiceRecordStore invoiceStore,
         SparkSettlementBroadcaster broadcaster,
+        SparkInvoiceCreditor creditor,
         ILogger<SparkSettlementReconciler> logger)
     {
         _invoiceStore = invoiceStore;
         _broadcaster = broadcaster;
+        _creditor = creditor;
         _logger = logger;
     }
 
@@ -150,12 +183,25 @@ public class SparkSettlementReconciler
                 // Published only on the transition, so a duplicate event or a poll racing the event does not
                 // wake every listening session twice.
                 _broadcaster.Publish(ToSettlement(result.Record));
+
+                // And routed to the BTCPay invoice the BOLT11 was minted for, which the publish above cannot
+                // be relied on to achieve: BTCPay's listener only watches each invoice's current prompt, so a
+                // superseded BOLT11 paid after a restart has nothing listening for it. Independent of the
+                // publish rather than an alternative to it — the two collide on BTCPay's payments primary key
+                // and exactly one of them records the money. Ordered after, and unable to throw, so a BTCPay
+                // database that is briefly unreachable cannot unwind a settlement that is already committed.
+                await CreditAsync(result.Record, cancellationToken).ConfigureAwait(false);
                 break;
 
             case InvoiceSettlementOutcome.AlreadySettled:
                 _logger.LogDebug(
                     "Store {StoreId}: Lightning invoice {PaymentHash} was already settled",
                     storeId, paymentHash);
+
+                // A duplicate event is the cheapest retry there is: if the credit for this settlement has not
+                // landed yet, attempt it again here rather than waiting for the next pass.
+                if (result.Record is { CreditedAt: null, CreditAbandonedAt: null })
+                    await CreditAsync(result.Record, cancellationToken).ConfigureAwait(false);
                 break;
 
             default:
@@ -308,6 +354,16 @@ public class SparkSettlementReconciler
     /// position has to outlive a pass, and because the reconciliation task and the startup catch-up are the same
     /// walk over the same stores and should share one position rather than each starting from the top.
     /// </para>
+    /// <para>
+    /// <b>The set of stores is wider than the set of live wallets, and has to be.</b> Settling needs an SDK
+    /// handle; crediting does not — it touches only BTCPay's tables and this plugin's rows. A store whose Spark
+    /// connection is broken (a rotated key, a service-provider outage, a wallet reconfigured away) has no live
+    /// handle and so appears in no target, and while the credit walk was reachable only through a target's visit
+    /// such a store never retried the settlements it had already received: real money, already in the merchant's
+    /// wallet, that no BTCPay invoice recorded. So the pass walks the union of the supplied targets and the
+    /// stores the record store says are still awaiting a credit, and a store in the second set but not the first
+    /// gets the credit walk alone.
+    /// </para>
     /// </remarks>
     public async Task<int> ReconcileStoresAsync(
         IEnumerable<SparkReconciliationTarget> targets,
@@ -325,16 +381,26 @@ public class SparkSettlementReconciler
         foreach (var target in targets)
             byStore[target.StoreId] = target.Sdk;
 
+        var allStores = new HashSet<string>(byStore.Keys, StringComparer.Ordinal);
+        allStores.UnionWith(await ListStoresAwaitingCreditAsync(cancellationToken).ConfigureAwait(false));
+
         // Interlocked rather than a plain increment: a store whose visit outlived its deadline is still running
         // when this method returns, and it must not race the read below or corrupt a later pass's count. Its
         // settlements are simply not counted here, which is honest — nothing waited to find out.
         var settled = 0;
 
         await pass.RunAsync(
-                byStore.Keys,
+                allStores,
                 async (storeId, token) =>
                 {
-                    var count = await ReconcileStoreAsync(storeId, byStore[storeId], token).ConfigureAwait(false);
+                    if (!byStore.TryGetValue(storeId, out var sdk))
+                    {
+                        // No live wallet, so nothing to settle against — but the credit walk needs none.
+                        await CreditStoreSafelyAsync(storeId, token).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var count = await ReconcileStoreAsync(storeId, sdk, token).ConfigureAwait(false);
                     Interlocked.Add(ref settled, count);
                 },
                 (storeId, ex) =>
@@ -360,9 +426,21 @@ public class SparkSettlementReconciler
     /// number settled by this pass.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Pages by keyset to the end of the set rather than taking one page, so no invoice starves behind a
     /// sustained backlog. Bounded overall by <see cref="MaxInvoicesPerPass"/>, and the log says so honestly when
     /// the bound is what stopped the walk.
+    /// </para>
+    /// <para>
+    /// <b>The credit walk runs first, and independently.</b> It used to run last and inside the settlement
+    /// walk's control flow, which gave it two ways to be skipped entirely: a failure loading the settlement page
+    /// returned before reaching it, and a store with a sustained settlement backlog could burn the whole
+    /// per-store deadline before reaching it — every pass, forever, on exactly the store most likely to have
+    /// uncredited money. It is now ordered first (it is bounded, cheap, and makes no SDK call, so it cannot
+    /// starve the settlement walk in return) and wrapped in its own error boundary, so neither walk's failure
+    /// can cost the other its turn. Ordering it first loses nothing: a settlement recorded later in this same
+    /// pass has its credit attempted inline on the settlement path.
+    /// </para>
     /// </remarks>
     public async Task<int> ReconcileStoreAsync(
         string storeId,
@@ -371,6 +449,11 @@ public class SparkSettlementReconciler
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
         ArgumentNullException.ThrowIfNull(sdk);
+
+        // Settling is only half of it: a settlement whose credit never reached the merchant's BTCPay invoice has
+        // to be retried, and this is the pass that does it. First, so a backlogged settlement walk cannot starve
+        // it out of the store's deadline slice.
+        await CreditStoreSafelyAsync(storeId, cancellationToken).ConfigureAwait(false);
 
         // Recently expired invoices are included on purpose. The service provider accepts a late payment and
         // Spark has no way to withdraw an invoice from it, so an invoice that expired moments ago can still
@@ -462,6 +545,198 @@ public class SparkSettlementReconciler
         }
 
         return settled;
+    }
+
+    /// <summary>
+    /// Runs a store's credit walk without letting its failure reach the settlement walk that follows.
+    /// </summary>
+    /// <remarks>
+    /// An error boundary of its own rather than a shared <c>try</c>, because the two walks answer different
+    /// questions and neither is a precondition of the other: a store whose invoice listing is failing must still
+    /// have the money it already received routed onto BTCPay's invoices, and a store whose BTCPay database is
+    /// briefly unreachable must still have its unpaid invoices re-checked against the service provider.
+    /// </remarks>
+    private async Task CreditStoreSafelyAsync(string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await CreditStoreAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: the Spark credit pass failed; the settlements it covers stay recorded and "
+                + "uncredited, and the next pass retries them",
+                storeId);
+        }
+    }
+
+    /// <summary>
+    /// The stores the record store says are still awaiting a credit, or none if it cannot be asked.
+    /// </summary>
+    /// <remarks>
+    /// A failure here must not abort the pass: the targets are still walkable, and losing the credit-only stores
+    /// for one pass costs a retry rather than a settlement.
+    /// </remarks>
+    private async Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var storeIds = await _invoiceStore
+                .ListStoreIdsAwaitingCreditAsync(
+                    SparkInvoiceCreditor.ListableFrom(DateTimeOffset.UtcNow),
+                    MaxCreditStoresPerPass,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (storeIds.Count >= MaxCreditStoresPerPass)
+            {
+                _logger.LogWarning(
+                    "{Count} store(s) hold settled Lightning payments awaiting a BTCPay credit, which is this "
+                    + "pass's limit; the rest are not walked until these are resolved. Something is wrong with "
+                    + "this server's invoices — this set is normally empty",
+                    storeIds.Count);
+            }
+
+            return storeIds;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Could not list the stores awaiting a BTCPay credit; this pass covers only the stores with a "
+                + "running Spark wallet");
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Retries the BTCPay credit for every settlement of a store that has not been credited yet. Returns the
+    /// number credited by this pass.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what makes the routing survive a restart. Four situations put a row here, and one walk covers
+    /// all of them: a payment that arrived while the process was down and was settled from the SDK's replay
+    /// at reconnect; a listening session that was saturated past its retry allowance; a crash between the
+    /// settlement's compare-and-set and BTCPay's own insert; and rows settled before this column existed,
+    /// which resolve on the first pass as already recorded and are then never looked at again.
+    /// </para>
+    /// <para>
+    /// Paged by keyset, oldest first, and bounded by <see cref="MaxCreditsPerPass"/>. No resume cursor, unlike
+    /// the settlement walk: a record leaves this set permanently once it is resolved — credited, or given up on
+    /// and reported — so restarting at the oldest each pass drains a backlog rather than starving behind it. The
+    /// exception is a record that keeps failing, which stays at the front, and that is the right thing to keep
+    /// retrying, because it is the one closest to its horizon.
+    /// </para>
+    /// <para>
+    /// Every record examined here either leaves the set or is left deliberately: nothing ages out of it
+    /// unresolved and unreported, which was the defect this walk shipped with. The bound the listing is given is
+    /// <see cref="SparkInvoiceCreditor.ListableFrom"/> and not the retry horizon precisely so that a record past
+    /// the horizon is still handed to the creditor once — to be reported and stamped — rather than vanishing.
+    /// </para>
+    /// </remarks>
+    public async Task<int> CreditStoreAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+
+        // The *listable* bound, not the creditable one. They used to be the same value, and that is precisely
+        // what made a settlement past its retry horizon invisible: it left this listing at the instant it became
+        // eligible to be reported as abandoned, so nothing ever reported it and its row stayed indistinguishable
+        // from one still in flight. See SparkInvoiceCreditor.AbandonedReportingGrace.
+        var settledFrom = SparkInvoiceCreditor.ListableFrom(DateTimeOffset.UtcNow);
+        var credited = 0;
+        var examined = 0;
+        InvoiceReconciliationCursor? cursor = null;
+
+        while (examined < MaxCreditsPerPass)
+        {
+            var pageSize = Math.Min(InvoicePageSize, MaxCreditsPerPass - examined);
+
+            IReadOnlyList<InvoiceRecord> page;
+            try
+            {
+                page = await _invoiceStore
+                    .ListUncreditedAsync(storeId, settledFrom, cursor, pageSize, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Store {StoreId}: could not load settled Spark invoices awaiting a BTCPay credit", storeId);
+                return credited;
+            }
+
+            if (page.Count == 0)
+                break;
+
+            foreach (var record in page)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                examined++;
+                // Advanced before the attempt, so a record that keeps failing cannot stall this page's walk on
+                // itself; the next pass starts from the top and reaches it again.
+                cursor = new InvoiceReconciliationCursor(record.CreatedAt, record.PaymentHash);
+
+                if (await CreditAsync(record, cancellationToken).ConfigureAwait(false)
+                    is SparkInvoiceCreditResult.Credited)
+                {
+                    credited++;
+                }
+            }
+
+            if (page.Count < pageSize)
+                break;
+        }
+
+        if (credited > 0)
+        {
+            _logger.LogInformation(
+                "Store {StoreId}: reconciliation credited {Credited} settled Lightning payment(s) to BTCPay "
+                + "invoices that were no longer being watched for them",
+                storeId, credited);
+        }
+
+        return credited;
+    }
+
+    /// <summary>
+    /// Attempts one credit, absorbing anything it throws.
+    /// </summary>
+    /// <remarks>
+    /// The creditor already promises not to throw; this is the belt to that braces, and it exists because of
+    /// where the call sits. On the settlement path the settlement is already committed and the notification
+    /// already published by the time it runs, so an exception escaping here would turn a completed settlement
+    /// into a logged failure — and, on the SDK's event loop, into a store-wide error line for a payment that
+    /// was in fact recorded correctly.
+    /// </remarks>
+    private async Task<SparkInvoiceCreditResult> CreditAsync(
+        InvoiceRecord record,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _creditor.CreditAsync(record, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: crediting the settled Lightning payment {PaymentHash} to its BTCPay invoice "
+                + "failed unexpectedly; the settlement is recorded and the credit will be retried",
+                record.StoreId, record.PaymentHash);
+            return SparkInvoiceCreditResult.Failed;
+        }
     }
 
     private static SparkSettlement ToSettlement(InvoiceRecord record) => new(

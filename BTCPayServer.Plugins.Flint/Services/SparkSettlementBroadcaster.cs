@@ -53,9 +53,16 @@ public interface ISparkSettlementSubscriber
 /// <para>
 /// Queues are bounded and refuse when full; a refused push is held back and re-delivered on a short
 /// timer, so a transiently-stalled consumer catches up instead of losing the notification. The
-/// allowance is bounded per subscription and by a delivery deadline, after which the operator is told
-/// the truth — BTCPay does not re-poll listened invoices, and <c>SparkReconciliationTask</c> only scans
-/// unpaid rows, so an already-paid row's push reaches BTCPay only when it next reads the invoice.
+/// allowance is bounded per subscription and by a delivery deadline, after which the push is given up on
+/// and logged.
+/// </para>
+/// <para>
+/// <b>Nothing here is the settlement guarantee, and it must not be mistaken for one.</b> A push that is
+/// never delivered — no listener attached, a listener wedged past its deadline, or a restart between the
+/// settlement and the notification — costs the merchant nothing, because the settlement is separately
+/// routed onto the BTCPay invoice its BOLT11 was minted for by
+/// <see cref="SparkInvoiceCreditor"/> and retried until it lands. This class is the fast path: it wakes a
+/// listening session in milliseconds instead of within a reconciliation pass.
 /// </para>
 /// </remarks>
 public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
@@ -142,11 +149,12 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
 
         if (!_subscriptions.TryGetValue(settlement.StoreId, out var forStore) || forStore.IsEmpty)
         {
-            // No listener attached (BTCPay only listens while it has invoices to watch). The settlement is
-            // already persisted, so the next GetInvoice lookup or reconciliation pass reports it.
+            // No listener attached (BTCPay only listens while it has invoices to watch, and after a restart it
+            // watches only each invoice's current prompt). The settlement is already persisted and is credited
+            // to its BTCPay invoice by the credit path, which does not need a listener.
             _logger.LogDebug(
-                "No Spark settlement listener for store {StoreId}; {PaymentHash} is already recorded and will be "
-                + "reported when BTCPay next asks",
+                "No Spark settlement listener for store {StoreId}; {PaymentHash} is already recorded and its "
+                + "BTCPay invoice is credited directly",
                 settlement.StoreId, settlement.PaymentHash);
             return;
         }
@@ -167,14 +175,14 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
                     continue;
 
                 default:
-                    // The listener's bounded queue is full. Nothing can bank on a quiet recovery: BTCPay
-                    // does not re-poll listened invoices (its one-minute timer only expires stale sessions),
-                    // and the reconciliation task only scans unpaid rows — this row is already paid, the
-                    // push was minted on that very transition. So hold the push back and re-deliver it on a
-                    // short timer; a transiently-stalled consumer catches up instead of losing the push. If
-                    // the consumer stays wedged past the delivery deadline, the retry gives up and logs
-                    // what actually remains: the paid row reaches BTCPay when it next reads the invoice,
-                    // typically after a restart of the plugin or the server.
+                    // The listener's bounded queue is full. BTCPay does not re-poll listened invoices (its
+                    // one-minute timer only expires stale sessions), and the reconciliation task's settlement
+                    // walk only scans unpaid rows — this row is already paid, the push was minted on that very
+                    // transition. So hold the push back and re-deliver it on a short timer; a transiently
+                    // stalled consumer catches up instead of losing the push. If it stays wedged past the
+                    // delivery deadline the retry gives up, and that is survivable rather than a lost payment:
+                    // the settlement is credited to its BTCPay invoice by the credit path, which needs no
+                    // listener at all.
                     if (subscription.EnqueueRetry(settlement))
                     {
                         EnsureRetryTimerRunning();
@@ -188,10 +196,10 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
                     {
                         _logger.LogError(
                             "A Spark settlement listener for store {StoreId} is not keeping up and has "
-                            + "exceeded the retry allowance; giving up on {PaymentHash}. The payment is "
-                            + "recorded and will reach BTCPay when it next reads this invoice — typically "
-                            + "after a restart of the plugin or the server; the BTCPay invoice may otherwise "
-                            + "show unpaid.",
+                            + "exceeded the retry allowance; giving up on the notification for "
+                            + "{PaymentHash}. The payment is recorded and is credited to its BTCPay invoice "
+                            + "by the reconciliation pass instead, so the invoice is paid without this "
+                            + "notification — but a listener this far behind is a fault worth investigating.",
                             settlement.StoreId, settlement.PaymentHash);
                     }
                     continue;
@@ -333,8 +341,8 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
                             + "listener caught up", settlement.PaymentHash);
                         break;
                     case SubscriptionWriteResult.Disposed:
-                        // The session is gone; there is nothing left to deliver to, and the paid row reaches
-                        // BTCPay when it next reads the invoice.
+                        // The session is gone; there is nothing left to deliver to, and the settlement's credit
+                        // to the BTCPay invoice does not depend on this notification.
                         lock (_pendingLock) { _pending.Remove(hash); }
                         break;
                     case SubscriptionWriteResult.Saturated:
@@ -349,9 +357,9 @@ public class SparkSettlementBroadcaster : ISparkSettlementSubscriber
                 logger.LogError(
                     "Gave up delivering the Spark settlement notification for {PaymentHash} to store "
                     + "{StoreId} after {RetryLifetime}: the listening session has not consumed. The payment "
-                    + "is recorded; BTCPay does not re-poll listened invoices, so the invoice will show paid "
-                    + "only when it next reads this one — typically after a restart of the plugin or the "
-                    + "server.",
+                    + "is recorded and its BTCPay invoice is credited by the reconciliation pass instead, so "
+                    + "no money is lost — but a listening session this far behind is a fault worth "
+                    + "investigating.",
                     settlement.PaymentHash, settlement.StoreId, _owner._pushRetryLifetime);
             }
         }
