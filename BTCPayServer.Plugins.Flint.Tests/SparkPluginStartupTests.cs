@@ -177,6 +177,16 @@ public class SparkPluginStartupTests
                      typeof(CrossChainCatalog),
                      typeof(SparkReconciliationTask),
                      typeof(SweepTask),
+                     // Reaches core's InvoiceRepository directly and its PaymentService through a Func, because
+                     // PaymentService's own constructor takes PaymentMethodHandlerDictionary — one leg of the
+                     // graph whose eager injection deadlocked BTCPay's startup once already. The deferral there
+                     // is belt-and-braces consistency with that established pattern rather than the only thing
+                     // holding the cycle open (it is broken at SparkConnectionStringHandler's
+                     // Func<ISparkClientResolver>), but this resolution is bounded either way so a regression
+                     // that did reintroduce a hang fails here instead of on a merchant's server.
+                     typeof(IInvoiceCreditGateway),
+                     typeof(SparkInvoiceCreditor),
+                     typeof(SparkSettlementReconciler),
                      typeof(SparkConnectionStringHandler),
                      typeof(ISparkSdkClientFactory),
                      typeof(ISparkNetworkStatusProbe),
@@ -190,6 +200,44 @@ public class SparkPluginStartupTests
             var resolved = host.Resolve(type.Name, provider => provider.GetRequiredService(type));
             Assert.NotNull(resolved);
         }
+    }
+
+    /// <summary>
+    /// The deferred core factories the credit path resolves on first use are registered <em>and</em> invocable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Resolving the <c>Func</c> proves nothing on its own — the container hands back a delegate whatever is
+    /// behind it, and <c>BTCPayInvoiceCreditGateway</c> only calls it when a real settlement needs crediting. So
+    /// a mis-registration, or a core refactor that made <c>PaymentService</c> unresolvable from the root
+    /// provider, would first surface as a failed credit on a merchant's server: money in the wallet, invoice
+    /// unpaid, and a warning about a payment that was in fact recorded nowhere. Invoking both factories here is
+    /// what turns that into a test failure.
+    /// </para>
+    /// <para>
+    /// Bounded and off-thread like every other resolution in this class, because these are precisely the two
+    /// core types whose construction enumerates plugin contributions.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_deferred_core_factories_the_credit_path_uses_can_be_invoked()
+    {
+        using var host = SparkTestHost.Create(_output);
+
+        var paymentService = host.Resolve(
+            "Func<PaymentService> (invoked, as BTCPayInvoiceCreditGateway invokes it)",
+            provider => provider.GetRequiredService<Func<PaymentService>>()());
+        Assert.NotNull(paymentService);
+
+        var handlers = host.Resolve(
+            "Func<PaymentMethodHandlerDictionary> (invoked)",
+            provider => provider.GetRequiredService<Func<PaymentMethodHandlerDictionary>>()());
+        Assert.NotNull(handlers);
+
+        // And the dictionary really holds the two payment methods the credit path probes, so a core rename that
+        // moved Lightning out from under BTC-LN would fail here rather than making every credit unrecordable.
+        foreach (var paymentMethodId in BTCPayInvoiceCreditGateway.CreditablePaymentMethods)
+            Assert.True(handlers.TryGetValue(paymentMethodId, out _), $"no handler for {paymentMethodId}");
     }
 
     /// <summary>

@@ -4,6 +4,37 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **A superseded bolt11 paid after a restart now reaches its BTCPay invoice.** Recording the settlement
+  was only half the job. BTCPay's Lightning listener matches a notification against a set built from each
+  invoice's *current* payment prompt, so once bolt11 X has been replaced by Y and the server has
+  restarted, only Y is watched — X stays payable on the service provider, and a payment to it settled in
+  this plugin's records while the merchant's BTCPay invoice stayed unpaid, with the funds already in their
+  Spark wallet. The plugin no longer relies on that listener: every settlement is also written directly
+  onto the BTCPay invoice its bolt11 was minted for, found through BTCPay's own payment-hash index (which
+  keeps the mint-time association permanently), and each settlement now records whether that credit
+  landed so the reconciliation pass can retry it until it does. That retry also closes three smaller
+  holes of the same shape — a payment that arrived while the server was down, a listening session
+  saturated past its retry allowance, and a crash between recording the settlement and notifying BTCPay.
+  The merchant cannot be credited twice: the credit is keyed on the payment hash, the same id BTCPay's own
+  listener uses, so the two collide on BTCPay's payments primary key and exactly one of them records the
+  money. Crediting an invoice that belongs to a different store than the wallet the money arrived in is
+  refused outright and logged. The retry needs no Spark connection — crediting touches only BTCPay's own
+  tables — so a store whose wallet is disconnected, its key rotated or its configuration removed still has
+  money it already received routed onto the right invoice. LNURL proof-of-payment keeps working too: the
+  preimage is written onto the invoice's payment prompt, which is where LUD-21 `verify` reads it from, and
+  is deliberately not written when the prompt has since moved on to a replacement bolt11.
+- **A settlement that can never be credited is now reported, once, instead of going quiet.** A payment
+  whose hash BTCPay has no invoice for — a bolt11 minted through the plugin's own API, say — is retried
+  for seven days. After that the next reconciliation pass logs it once at warning level with its amount
+  and payment hash and marks it abandoned, which is recorded separately from "credited": the plugin's
+  records keep saying that this money never reached a BTCPay invoice, so a merchant's wallet balance can
+  be reconciled against them. The same applies to a BTCPay invoice with no payment prompt able to hold the
+  payment. Nothing is reported twice and nothing is retried forever.
+
 ## [0.1.5.4] — 2026-08-24
 
 ### Security

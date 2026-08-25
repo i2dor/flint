@@ -11,7 +11,50 @@
   credits the BTCPay invoice it was minted for. What cancellation actually buys is bookkeeping: the
   invoice is no longer offered to payers, and a late payment is attributed to it, not to its
   replacement. The plugin keeps reporting a cancelled invoice as unpaid (never expired) until it
-  settles, so BTCPay's Lightning listener stays attached and can deliver that credit.
+  settles, so BTCPay's Lightning listener stays attached and can still deliver that credit — a listener
+  drops an invoice whose status reads expired.
+
+  **How that credit actually reaches BTCPay, since its listener cannot be relied on either.** BTCPay's
+  Lightning listener only watches each invoice's *current* payment prompt. Replace BOLT11 X with
+  BOLT11 Y — which BTCPay does whenever an LNURL invoice is re-quoted — and X leaves the watched set;
+  after a restart it is never re-added, because that set is rebuilt from the prompts that exist now.
+  So the plugin does not depend on notifying a listener. Every settlement is also written straight
+  onto the BTCPay invoice the BOLT11 was minted for, found through BTCPay's own payment-hash index
+  (`AddressInvoices`, which is insert-only and keeps the mint-time association forever). The plugin
+  records whether that credit landed and retries it on every reconciliation pass until it does, which
+  also covers a payment that arrived while the server was down, a listening session that fell too far
+  behind, and a crash between recording the settlement and telling BTCPay. The retry does not need the
+  store's Spark wallet to be connected — crediting touches only BTCPay's own tables — so a store whose
+  connection is broken still has its already-received money routed. The credit cannot happen
+  twice: it is keyed on the payment hash, the same id BTCPay's own listener uses, so the two collide on
+  BTCPay's payments primary key and exactly one of them records the money.
+
+  **When the plugin gives up, and what it leaves behind.** Three bounds are worth knowing, and all three
+  end the same way: one warning in BTCPay's log naming the amount and the payment hash, and a row marked
+  as abandoned rather than as credited — so `SELECT` on the plugin's `InvoiceRecords` can always tell
+  money that reached an invoice from money that did not.
+
+  - A settlement whose payment hash BTCPay has **no invoice for** — a BOLT11 minted through this
+    plugin's Greenfield endpoints, say — is retried for **seven days**, then reported once and given up
+    on, because it can never be attributed. It is reported and marked on the first reconciliation pass
+    after that seven days, not silently forgotten; the only settlements that escape the report are ones
+    already older than a fortnight when this version was first installed, which are outside the walk
+    entirely.
+  - A BTCPay invoice with **no payment prompt** that could hold the payment is given up on immediately,
+    since a prompt is never removed from an invoice once written and a retry would fail identically.
+    This is very close to unreachable in practice — nothing in BTCPay deletes a prompt — and is listed
+    because if it ever does happen the money is in the wallet, the invoice cannot be credited
+    automatically, and only a human can reconcile it.
+  - A store whose LNURL prompts have **LUD-21 disabled by hand** loses the LNURL half of the index:
+    BTCPay only records the payment hash of an LNURL prompt when LUD-21 is on, which is why this plugin
+    turns it on when it provisions a store. Such a payment is reported as unattributable rather than
+    guessed at.
+
+  One thing the plugin does *not* keep from BTCPay's own listener is worth naming as a non-limitation:
+  the preimage is written onto the payment prompt as well as onto the payment, so LNURL
+  proof-of-payment (LUD-21 `verify`) works for a Flint checkout exactly as it does for any other
+  Lightning backend. The one case it is deliberately not written is a superseded BOLT11 — the prompt is
+  offering the replacement by then, and its preimage is a different value.
 - **Testnet and signet are unsupported**, because the SDK only offers mainnet and regtest.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
   logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into

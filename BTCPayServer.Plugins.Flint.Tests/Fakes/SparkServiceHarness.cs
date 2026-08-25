@@ -31,37 +31,70 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 public sealed class SparkServiceHarness : IDisposable
 {
     private readonly string _dataDir;
+    private readonly Durable _durable;
+    private readonly Deadlines _deadlines;
+    private bool _ownsDataDir = true;
+
+    /// <summary>
+    /// Everything that outlives a restart of the process, and nothing that does not.
+    /// </summary>
+    /// <remarks>
+    /// The split is the point of the restart seam. The database, BTCPay's store settings, BTCPay's invoice
+    /// index and the data-protection keys survive a restart on a real server, so <see cref="Restart"/> carries
+    /// them across; the service instance, the SDK connections and the settlement broadcaster do not, and are
+    /// rebuilt. Carrying the wrong thing across would hide exactly the class of defect this exists to catch —
+    /// notably an in-memory broadcaster that appears to keep working because the test kept it alive.
+    /// </remarks>
+    private sealed record Durable(
+        FakeStoreRepository Stores,
+        FakeStoreLightningConfigStore Lightning,
+        SparkMnemonicProtector Protector,
+        InMemoryInvoiceRecordStore Invoices,
+        FakeInvoiceCreditGateway Credits,
+        StubBolt11Parser Bolt11);
+
+    private sealed record Deadlines(
+        TimeSpan Connect,
+        TimeSpan ConfirmStatus,
+        TimeSpan AbandonedConnectGrace);
 
     private SparkServiceHarness(
         TestableSparkService service,
-        FakeStoreRepository stores,
         FakeSparkSdkClientFactory sdk,
-        FakeStoreLightningConfigStore lightning,
-        SparkMnemonicProtector protector,
-        InMemoryInvoiceRecordStore invoices,
         SparkSettlementBroadcaster broadcaster,
         CapturingLogger<SparkService> log,
-        string dataDir)
+        string dataDir,
+        Durable durable,
+        Deadlines deadlines)
     {
         Service = service;
-        Stores = stores;
         Sdk = sdk;
-        Lightning = lightning;
-        Protector = protector;
-        Invoices = invoices;
         Broadcaster = broadcaster;
         Log = log;
         _dataDir = dataDir;
+        _durable = durable;
+        _deadlines = deadlines;
     }
 
     public SparkService Service { get; }
-    public FakeStoreRepository Stores { get; }
+    public FakeStoreRepository Stores => _durable.Stores;
     public FakeSparkSdkClientFactory Sdk { get; }
-    public FakeStoreLightningConfigStore Lightning { get; }
-    public SparkMnemonicProtector Protector { get; }
+    public FakeStoreLightningConfigStore Lightning => _durable.Lightning;
+    public SparkMnemonicProtector Protector => _durable.Protector;
 
     /// <summary>The invoice records the service settles against — the far end of the event wiring.</summary>
-    public InMemoryInvoiceRecordStore Invoices { get; }
+    public InMemoryInvoiceRecordStore Invoices => _durable.Invoices;
+
+    /// <summary>
+    /// BTCPay's side of the settlement: the payment-hash index it keeps and the payments it holds.
+    /// </summary>
+    public FakeInvoiceCreditGateway Credits => _durable.Credits;
+
+    /// <summary>
+    /// What a BOLT11 means. Carried across a restart because real BOLT11 parsing is deterministic — the
+    /// registrations stand in for the invoices themselves, which of course outlive the process.
+    /// </summary>
+    public StubBolt11Parser Bolt11 => _durable.Bolt11;
 
     /// <summary>What a settled invoice is announced on, which is what wakes BTCPay's listening session.</summary>
     public SparkSettlementBroadcaster Broadcaster { get; }
@@ -99,19 +132,65 @@ public sealed class SparkServiceHarness : IDisposable
             Path.GetTempPath(), "spark-service-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dataDir);
 
+        return Create(
+            dataDir,
+            new Durable(
+                new FakeStoreRepository(),
+                FakeStoreLightningConfigStore.WithStore("unused"),
+                new SparkMnemonicProtector(new EphemeralDataProtectionProvider()),
+                new InMemoryInvoiceRecordStore(),
+                new FakeInvoiceCreditGateway(),
+                new StubBolt11Parser()),
+            new Deadlines(
+                connectDeadline ?? TimeSpan.FromMilliseconds(250),
+                confirmStatusDeadline ?? Constants.SdkCallDeadline,
+                // Long by default so the existing abandon tests still observe a late connect being adopted and
+                // shut down; the release-the-lock test shortens it deliberately.
+                abandonedConnectGrace ?? TimeSpan.FromMinutes(5)));
+    }
+
+    /// <summary>
+    /// Stops this service and brings a fresh one up over the same durable state, as a server restart does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The returned harness is the live one and owns the data directory; this one must not be used again, and
+    /// disposing it no longer deletes the directory. Disposing the replacement tears everything down.
+    /// </para>
+    /// <para>
+    /// The data-protection provider is deliberately carried across rather than rebuilt: it is ephemeral, so a
+    /// new one could not unprotect the mnemonics the seeded store settings already hold, and every store would
+    /// fail to start for a reason that has nothing to do with what the test is asking.
+    /// </para>
+    /// </remarks>
+    public SparkServiceHarness Restart()
+    {
+        StopService();
+        _ownsDataDir = false;
+        return Create(_dataDir, _durable, _deadlines);
+    }
+
+    private static SparkServiceHarness Create(string dataDir, Durable durable, Deadlines deadlines)
+    {
         var log = new CapturingLogger<SparkService>();
         var logs = new Logs();
         logs.Configure(NullLoggerFactory.Instance);
 
-        var stores = new FakeStoreRepository();
+        var stores = durable.Stores;
         var sdk = new FakeSparkSdkClientFactory();
-        var lightning = FakeStoreLightningConfigStore.WithStore("unused");
-        var protector = new SparkMnemonicProtector(new EphemeralDataProtectionProvider());
+        var lightning = durable.Lightning;
+        var protector = durable.Protector;
 
+        // Rebuilt on every start, exactly as on a real restart: it is in-memory fan-out to whatever listening
+        // sessions exist now, and it is precisely the thing that cannot carry a pending notification across.
         var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
-        var invoices = new InMemoryInvoiceRecordStore();
+        var invoices = durable.Invoices;
         var reconciler = new SparkSettlementReconciler(
-            invoices, broadcaster, NullLogger<SparkSettlementReconciler>.Instance);
+            invoices,
+            broadcaster,
+            new SparkInvoiceCreditor(
+                durable.Credits, invoices, NullLogger<SparkInvoiceCreditor>.Instance),
+            NullLogger<SparkSettlementReconciler>.Instance);
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
 
         // The startup sweep is real here — it runs against the stores this harness knows about — so the
@@ -120,11 +199,9 @@ public sealed class SparkServiceHarness : IDisposable
         SparkLightningConfigSweeper? sweeper = null;
 
         var service = new TestableSparkService(
-            connectDeadline ?? TimeSpan.FromMilliseconds(250),
-            confirmStatusDeadline ?? Constants.SdkCallDeadline,
-            // Long by default so the existing abandon tests still observe a late connect being adopted and shut
-            // down; the release-the-lock test shortens it deliberately.
-            abandonedConnectGrace ?? TimeSpan.FromMinutes(5),
+            deadlines.Connect,
+            deadlines.ConfirmStatus,
+            deadlines.AbandonedConnectGrace,
             new BTCPayServer.EventAggregator(logs),
             stores,
             Options.Create(new DataDirectories { DataDir = dataDir }),
@@ -136,7 +213,7 @@ public sealed class SparkServiceHarness : IDisposable
             broadcaster,
             protector,
             wiring,
-            new StubBolt11Parser(),
+            durable.Bolt11,
             TimeProvider.System,
             () => sweeper ?? throw new InvalidOperationException("harness sweep not wired"),
             NullLoggerFactory.Instance,
@@ -148,8 +225,7 @@ public sealed class SparkServiceHarness : IDisposable
             service,
             NullLogger<SparkLightningConfigSweeper>.Instance);
 
-        return new SparkServiceHarness(
-            service, stores, sdk, lightning, protector, invoices, broadcaster, log, dataDir);
+        return new SparkServiceHarness(service, sdk, broadcaster, log, dataDir, durable, deadlines);
     }
 
     /// <summary>Stores a store's Spark settings the way a previous run would have left them.</summary>
@@ -166,18 +242,10 @@ public sealed class SparkServiceHarness : IDisposable
 
     public void Dispose()
     {
-        // Bounded, because StopAsync takes the same instance lock the startup loop holds. If a regression has
-        // put a never-returning await back on the startup path, that lock is held forever and an unbounded
-        // teardown here would turn a failed assertion into a hung test run — hiding the very failure the
-        // assertion just reported.
-        try
-        {
-            Service.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(10));
-        }
-        catch (Exception)
-        {
-            // Teardown of a service that never fully started is not worth failing a test over.
-        }
+        StopService();
+
+        if (!_ownsDataDir)
+            return;
 
         try
         {
@@ -185,6 +253,27 @@ public sealed class SparkServiceHarness : IDisposable
         }
         catch (IOException)
         {
+        }
+    }
+
+    /// <summary>
+    /// Shuts the service down without touching the durable state, bounded so a hang cannot hide a failure.
+    /// </summary>
+    /// <remarks>
+    /// Bounded because <c>StopAsync</c> takes the same instance lock the startup loop holds. If a regression
+    /// has put a never-returning await back on the startup path, that lock is held forever and an unbounded
+    /// teardown would turn a failed assertion into a hung test run — hiding the very failure the assertion
+    /// just reported.
+    /// </remarks>
+    private void StopService()
+    {
+        try
+        {
+            Service.StopAsync(CancellationToken.None).Wait(TimeSpan.FromSeconds(10));
+        }
+        catch (Exception)
+        {
+            // Teardown of a service that never fully started is not worth failing a test over.
         }
     }
 

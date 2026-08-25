@@ -923,8 +923,18 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// Re-checks every running store's unpaid invoices against the Spark service. Returns the number settled.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Driven by <see cref="SparkReconciliationTask"/> on a timer and once from <see cref="StartAsync"/>. See
     /// that class for why this is the plugin's settlement guarantee rather than a fallback.
+    /// </para>
+    /// <para>
+    /// The running instances are the stores that can be <em>settled</em>, and they are all this can supply. They
+    /// are not the whole set of stores the pass covers: crediting an already-recorded settlement onto its BTCPay
+    /// invoice needs no wallet connection, so the reconciler widens this list with the stores its own record
+    /// store says are awaiting a credit — otherwise a store whose Spark connection is broken would never retry
+    /// money it had already received. That widening lives in the reconciler because the record store is what
+    /// answers the question.
+    /// </para>
     /// </remarks>
     public async Task<int> ReconcileAllStoresAsync(CancellationToken cancellationToken = default)
     {

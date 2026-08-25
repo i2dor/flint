@@ -24,6 +24,17 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     /// </remarks>
     public HashSet<string> FailSettleFor { get; } = [];
 
+    /// <summary>
+    /// Thrown by <see cref="ListForReconciliationAsync"/> when set, to exercise the reconciler's isolation of
+    /// the two walks.
+    /// </summary>
+    /// <remarks>
+    /// The settlement walk and the credit walk read different queries of the same table, and the credit of money
+    /// already received must not depend on the other query succeeding — a property that only a test which breaks
+    /// one of them can pin.
+    /// </remarks>
+    public Exception? FailReconciliationListWith { get; set; }
+
     public IReadOnlyDictionary<string, InvoiceRecord> Records => _records;
 
     public Task AddAsync(InvoiceRecord record, CancellationToken cancellationToken = default)
@@ -66,6 +77,9 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         int limit,
         CancellationToken cancellationToken = default)
     {
+        if (FailReconciliationListWith is not null)
+            throw FailReconciliationListWith;
+
         IEnumerable<InvoiceRecord> query = _records.Values
             .Where(r => r.StoreId == storeId
                         && r.Status is not InvoiceRecordStatus.Paid
@@ -123,6 +137,67 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         return Task.FromResult(new InvoiceSettlementResult(outcome, record));
     }
 
+    public Task<bool> MarkCreditedAsync(
+        string storeId,
+        string paymentHash,
+        DateTimeOffset creditedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var record = _records.GetValueOrDefault(paymentHash);
+        if (record is null || record.StoreId != storeId)
+            return Task.FromResult(false);
+        return Task.FromResult(record.TryMarkCredited(creditedAt));
+    }
+
+    public Task<bool> MarkCreditAbandonedAsync(
+        string storeId,
+        string paymentHash,
+        DateTimeOffset abandonedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var record = _records.GetValueOrDefault(paymentHash);
+        if (record is null || record.StoreId != storeId)
+            return Task.FromResult(false);
+        return Task.FromResult(record.TryMarkCreditAbandoned(abandonedAt));
+    }
+
+    public Task<IReadOnlyList<string>> ListStoreIdsAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
+        int limit,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<string>>(_records.Values
+            .Where(r => AwaitingCredit(r, settledFrom))
+            .Select(r => r.StoreId)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(storeId => storeId, StringComparer.Ordinal)
+            .Take(limit)
+            .ToList());
+
+    public Task<IReadOnlyList<InvoiceRecord>> ListUncreditedAsync(
+        string storeId,
+        DateTimeOffset settledFrom,
+        InvoiceReconciliationCursor? after,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        IEnumerable<InvoiceRecord> query = _records.Values
+            .Where(r => r.StoreId == storeId && AwaitingCredit(r, settledFrom));
+
+        if (after is not null)
+        {
+            query = query.Where(r => r.CreatedAt > after.CreatedAt
+                                     || (r.CreatedAt == after.CreatedAt
+                                         && string.Compare(r.PaymentHash, after.PaymentHash,
+                                             StringComparison.Ordinal) > 0));
+        }
+
+        return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
+            .Take(limit)
+            .ToList());
+    }
+
     public Task<bool> CancelAsync(string storeId, string paymentHash, CancellationToken cancellationToken = default)
     {
         var record = _records.GetValueOrDefault(paymentHash);
@@ -130,6 +205,16 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
             return Task.FromResult(false);
         return Task.FromResult(record.TryCancel());
     }
+
+    /// <summary>
+    /// The uncredited predicate, shared by both listings so they cannot drift apart the way the EF store's two
+    /// <c>Where</c> clauses could not.
+    /// </summary>
+    private static bool AwaitingCredit(InvoiceRecord record, DateTimeOffset settledFrom) =>
+        record.Status is InvoiceRecordStatus.Paid
+        && record.CreditedAt is null
+        && record.CreditAbandonedAt is null
+        && record.SettledAt > settledFrom;
 
     public void Seed(InvoiceRecord record) => _records[record.PaymentHash] = record;
 }

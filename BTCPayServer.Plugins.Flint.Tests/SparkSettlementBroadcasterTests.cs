@@ -154,9 +154,11 @@ public class SparkSettlementBroadcasterTests
     public async Task A_saturated_settlement_is_retried_once_the_consumer_catches_up()
     {
         // The refusal is not the end of the story: BTCPay does not re-poll listened invoices and the
-        // reconciliation task only scans unpaid rows, so a refused push that is simply dropped would leave
-        // the BTCPay invoice unpaid until a restart. The broadcaster must hold it and re-deliver when the
-        // listener drains.
+        // reconciliation task's settlement walk only scans unpaid rows, so a refused push that is simply
+        // dropped is a notification nobody ever receives. The invoice is still credited — the credit path
+        // routes the settlement onto it without any listener (SparkInvoiceCreditor) — but that takes a
+        // reconciliation pass, where re-delivering here takes milliseconds. So the broadcaster must hold the
+        // push and re-deliver it when the listener drains.
         var broadcaster = Create();
         using var subscription = broadcaster.Subscribe("store-1");
 

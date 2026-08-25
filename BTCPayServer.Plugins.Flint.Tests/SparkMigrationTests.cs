@@ -1,5 +1,6 @@
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Xunit;
 
@@ -62,5 +63,77 @@ public class SparkMigrationTests
                 .Where(o => o.Name == nameof(SweepRecord.DestinationKind)));
 
         Assert.Equal((int)Services.SweepDestinationKind.BitcoinAddress, operation.DefaultValue);
+    }
+
+    /// <summary>
+    /// Settlements that predate the credit column are treated as <em>not yet credited</em>.
+    /// </summary>
+    /// <remarks>
+    /// <b>A default would be the wrong answer in the direction that loses money.</b> Backfilling a timestamp —
+    /// <c>now()</c>, or the settlement time — would tell the first reconciliation pass that every historical
+    /// settlement had already reached its BTCPay invoice. For the ones BTCPay's own listener credited that
+    /// happens to be true, and the pass would have confirmed it in a single indexed lookup; for the ones it
+    /// missed, which is the very defect the column exists to close, it is false and the credit would never be
+    /// attempted. Null costs one lookup per historical settlement inside the listing bound, once.
+    /// </remarks>
+    [Fact]
+    public void Settlements_that_predate_the_credit_column_are_left_uncredited()
+    {
+        var operation = Assert.Single(
+            new InvoiceRecordCreditedAt().UpOperations
+                .OfType<AddColumnOperation>()
+                .Where(o => o.Name == nameof(InvoiceRecord.CreditedAt)));
+
+        Assert.Equal("InvoiceRecords", operation.Table);
+        Assert.True(operation.IsNullable);
+        Assert.Null(operation.DefaultValue);
+        Assert.Null(operation.DefaultValueSql);
+    }
+
+    /// <summary>
+    /// Settlements that predate the abandoned column are treated as <em>not given up on</em>.
+    /// </summary>
+    /// <remarks>
+    /// The mirror of the column above, and the default matters in the same direction. A backfilled timestamp
+    /// here would mark every historical settlement as one this plugin had already given up on and reported —
+    /// removing it from the credit walk on the first pass, so the ones BTCPay's listener genuinely missed would
+    /// never be routed and never be mentioned to anyone. Null means the walk classifies each of them on its
+    /// merits, exactly once, which is what the column is for.
+    /// </remarks>
+    [Fact]
+    public void Settlements_that_predate_the_abandoned_column_are_not_treated_as_given_up_on()
+    {
+        var operation = Assert.Single(
+            new InvoiceRecordCreditAbandonedAt().UpOperations
+                .OfType<AddColumnOperation>()
+                .Where(o => o.Name == nameof(InvoiceRecord.CreditAbandonedAt)));
+
+        Assert.Equal("InvoiceRecords", operation.Table);
+        Assert.True(operation.IsNullable);
+        Assert.Null(operation.DefaultValue);
+        Assert.Null(operation.DefaultValueSql);
+    }
+
+    /// <summary>
+    /// The two credit columns are separate, because they record opposite facts about the same money.
+    /// </summary>
+    /// <remarks>
+    /// Pinned as a schema property rather than left to the classes that read it. The cheap way to retire a
+    /// settlement that can never be credited is to stamp <c>CreditedAt</c> and be done — it leaves the retry set
+    /// and stops warning — and it would silently turn this table, which is what an operator reconciles a wallet
+    /// balance against, into one that claims every abandoned payment was collected. A future "simplification"
+    /// that dropped one column in favour of the other fails here.
+    /// </remarks>
+    [Fact]
+    public void The_credited_and_abandoned_stamps_are_distinct_columns()
+    {
+        var added = new[] { nameof(InvoiceRecord.CreditedAt), nameof(InvoiceRecord.CreditAbandonedAt) };
+        var operations = new Migration[] { new InvoiceRecordCreditedAt(), new InvoiceRecordCreditAbandonedAt() }
+            .SelectMany(m => m.UpOperations.OfType<AddColumnOperation>())
+            .Where(o => added.Contains(o.Name))
+            .ToList();
+
+        Assert.Equal(added.Length, operations.Count);
+        Assert.Equal(added.Length, operations.Select(o => o.Name).Distinct().Count());
     }
 }
