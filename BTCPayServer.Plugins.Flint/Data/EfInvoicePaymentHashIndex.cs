@@ -47,13 +47,20 @@ public class EfInvoicePaymentHashIndex : IInvoicePaymentHashIndex
         var paymentHash = entry.PaymentHash.ToLowerInvariant();
         var firstSeenAt = entry.FirstSeenAt == default ? DateTimeOffset.UtcNow : entry.FirstSeenAt;
 
-        await context.Database.ExecuteSqlInterpolatedAsync(
-            $"""
-             INSERT INTO "{Constants.DatabaseSchema}"."InvoicePaymentHashes"
-                 ("PaymentHash", "InvoiceId", "PaymentMethodId", "FirstSeenAt")
-             VALUES ({paymentHash}, {entry.InvoiceId}, {entry.PaymentMethodId}, {firstSeenAt})
-             ON CONFLICT ("PaymentHash") DO NOTHING
-             """,
+        // ExecuteSqlRawAsync, deliberately, not the interpolated overload: a FormattableString turns every
+        // {hole} into a bind parameter, and an identifier cannot be bound — the generated INSERT would read
+        // relation "@p0"."InvoicePaymentHashes" where Postgres expects the schema name as a literal (the
+        // Postgres contract suite caught exactly that). The identifier is therefore concatenated as text and
+        // only the values ride as parameters.
+        var table = "\"" + Constants.DatabaseSchema + "\".\"InvoicePaymentHashes\"";
+        var sql =
+            "INSERT INTO " + table + " (\"PaymentHash\", \"InvoiceId\", \"PaymentMethodId\", \"FirstSeenAt\") "
+            + "VALUES ({0}, {1}, {2}, {3}) ON CONFLICT (\"PaymentHash\") DO NOTHING";
+        // The IEnumerable<object> overload, not the params one, so the trailing cancellation token is taken
+        // as the token rather than as a fifth parameter value.
+        await context.Database.ExecuteSqlRawAsync(
+            sql,
+            new object[] { paymentHash, entry.InvoiceId, entry.PaymentMethodId, firstSeenAt },
             cancellationToken);
     }
 

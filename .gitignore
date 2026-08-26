@@ -9,3 +9,6 @@ packages/
 
 # Agent worktrees: transient, and each is its own git repo.
 .claude/worktrees/
+
+# Local-only deploy/test notes (never commit).
+.local/
