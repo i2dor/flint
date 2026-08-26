@@ -44,3 +44,16 @@ a new one) mints a fresh key and rewrites the store's Lightning configuration wi
 copy of the old string — so a leaked string is revoked by re-running setup, without waiting for a removal.
 Between provisions it never expires. Treat it like a macaroon, and keep the sweep threshold low enough that
 the balance it could reach is a balance you can afford to lose.
+
+**The instance administrator is a counterparty on any server you do not operate.** Setup stores the
+store's Spark seed encrypted in the store's settings blob, and the data-protection keys that decrypt it
+live in the same data directory — so whoever operates the server holds both halves, can decrypt the
+seed and can spend the store's Lightning funds without any cooperation from the Spark operators. That is
+the product model rather than an accident: the Spark SDK must hold the seed in-process to receive, an
+always-on Lightning wallet has nowhere to re-prompt for it at boot, and even moving the keyring off-host
+would not stop a host admin reading the running process's memory. The merchant's own backup of the phrase
+is a recovery path, not protection from the operator. On a self-hosted instance this party *is* the
+merchant, which is what the rest of the docs assume; on a shared or public-registration instance it is
+someone the tenant may never have met. The setup page names this party before a seed is created or
+imported: the recovery phrase is stored on this server, whoever operates it can decrypt it and spend the
+funds, and a tenant who does not control the server should not put a seed there.

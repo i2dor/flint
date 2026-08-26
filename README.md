@@ -24,7 +24,11 @@ you own is: every Lightning receive rides Lightspark's service provider, and thi
 the only thing that reduces that exposure, which is why the sweep threshold is the most important setting
 on the plugin. Stable Balance and cross-chain sweeps each add a further counterparty of a different kind:
 a regulated stablecoin issuer whose token metadata says it can **freeze** the balance, and a bridge
-provider that holds the funds between the two chains. Both are off by default.
+provider that holds the funds between the two chains. Both are off by default. There is one more
+counterparty, and on a shared instance the most complete one: the **server operator**. The store's seed
+is stored encrypted on the server, whoever operates the server can decrypt it and spend the store's
+Lightning funds, and the setup page says so before a seed is created or imported. If you do not operate
+the server, do not set a store up with a seed here.
 
 Read the full **[Trust model](docs/trust-model.md)** — every party, what each can do, and what recourse
 exists — before you configure anything.
