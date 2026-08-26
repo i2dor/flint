@@ -3,19 +3,27 @@ using BTCPayServer.Plugins.Flint.Services;
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 
 /// <summary>
-/// An <see cref="IInvoiceCreditGateway"/> that models the two BTCPay tables the real one talks to.
+/// An <see cref="IInvoiceCreditGateway"/> that models the two indexes the real one talks to.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Not a stub that returns configured answers: the properties the credit path depends on are properties of
-/// BTCPay's schema, and a fake that did not have them would make every assertion here hollow. Two things are
-/// modelled, and both are load-bearing.
+/// BTCPay's schema, and a fake that did not have them would make every assertion here hollow. What is modelled
+/// is what the real gateway consults, in the order it consults it.
 /// </para>
 /// <para>
 /// <b><c>AddressInvoices</c> is insert-only.</b> BTCPay writes the payment hash of every prompt it issues
 /// into that table when the prompt is minted and never removes it, so superseding BOLT11 X with BOLT11 Y
 /// leaves <em>both</em> hashes pointing at the same invoice. That is the entire basis for crediting a payment
 /// to a replaced BOLT11, so <see cref="Mint"/> only ever adds.
+/// </para>
+/// <para>
+/// <b>The plugin's own payment-hash index is written regardless of LUD-21.</b> The real gateway falls back to
+/// <see cref="Services.IInvoicePaymentHashIndex"/> when core's table has no row, which happens for an LNURL
+/// prompt minted while the merchant had LUD-21 disabled by hand (core indexes LNURL prompts only when LUD-21
+/// is on). <see cref="Mint"/> therefore writes the plugin index <em>always</em> and core's
+/// <c>AddressInvoices</c> only when told to, so a test can reproduce the LUD-21-off shape by minting with
+/// <c>indexInCore: false</c>.
 /// </para>
 /// <para>
 /// <b><c>Payments</c> has primary key <c>(Id, PaymentMethodId)</c>.</b> That collision — not any ordering or
@@ -41,6 +49,7 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     public const string LnurlPaymentMethodId = "BTC-LNURL";
 
     private readonly Dictionary<string, Row> _addressInvoices = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Row> _pluginIndex = new(StringComparer.Ordinal);
     private readonly HashSet<(string Id, string PaymentMethodId)> _payments = [];
     private readonly Dictionary<string, Prompt> _prompts = new(StringComparer.Ordinal);
 
@@ -71,16 +80,24 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     public Exception? FailWith { get; set; }
 
     /// <summary>
-    /// Records that BTCPay issued this payment hash for an invoice, as it does when a prompt is minted.
+    /// Records that this BOLT11's payment hash was minted for an invoice, as happens when a prompt is minted.
     /// </summary>
+    /// <param name="indexInCore">
+    /// Whether core also recorded the hash in its <c>AddressInvoices</c> table. False models an LNURL prompt
+    /// minted while LUD-21 was disabled by hand: core does not index it, but the plugin's own index — written
+    /// from the mint event regardless of LUD-21 — does.
+    /// </param>
     public FakeInvoiceCreditGateway Mint(
         string paymentHash,
         string invoiceId,
         string storeId,
-        string paymentMethodId = LightningPaymentMethodId)
+        string paymentMethodId = LightningPaymentMethodId,
+        bool indexInCore = true)
     {
-        // Insert-only, like the real table: superseding a BOLT11 does not remove the old hash's row.
-        _addressInvoices.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
+        // Insert-only, like the real tables: superseding a BOLT11 does not remove the old hash's row.
+        if (indexInCore)
+            _addressInvoices.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
+        _pluginIndex.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
         // The prompt, by contrast, is replaced — this invoice now offers this BOLT11 and no longer the previous
         // one. Minting X then Y is exactly the supersession the credit path exists for.
         _prompts[invoiceId] = new Prompt { PaymentHash = paymentHash };
@@ -126,9 +143,15 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
             throw FailWith;
 
         Lookups++;
-        if (!_addressInvoices.TryGetValue(paymentHash, out var row))
+        // The real gateway consults core's table first and the plugin's own index only when that has no row —
+        // the LUD-21-off LNURL case modelled by Mint(..., indexInCore: false). Either index can resolve the
+        // hash; core's index just takes precedence, exactly as in the production gateway.
+        var row = _addressInvoices.GetValueOrDefault(paymentHash)
+                  ?? _pluginIndex.GetValueOrDefault(paymentHash);
+        if (row is null)
+        {
             return Task.FromResult<SparkInvoiceCreditMatch?>(null);
-
+        }
         return Task.FromResult<SparkInvoiceCreditMatch?>(new SparkInvoiceCreditMatch(
             row.InvoiceId,
             row.StoreId,
@@ -145,8 +168,13 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
 
         Attempts.Add(request);
 
-        if (!_addressInvoices.ContainsKey(request.PaymentHash))
+        // "Which invoice was this minted for" is the question, and either index can answer it — the same
+        // existence test as the real gateway's re-read of the invoice by id.
+        if (!_addressInvoices.ContainsKey(request.PaymentHash)
+            && !_pluginIndex.ContainsKey(request.PaymentHash))
+        {
             return Task.FromResult(SparkInvoiceCreditOutcome.InvoiceGone);
+        }
 
         if (PromptMissingFor.Contains(request.PaymentHash))
             return Task.FromResult(SparkInvoiceCreditOutcome.PromptMissing);

@@ -115,6 +115,12 @@ public sealed class SparkSdkClient : ISparkSdkClient
             expirySecs,
             // paymentHash: null lets the SSP pick, which means it owns the preimage and claims the
             // HTLC for us. Supplying our own would make this a hold invoice we must claim manually.
+            null,
+            // receiverIdentityPublicKey: null since the SDK 0.23.0 binding change. The new field routes a
+            // minted BOLT11 to another Spark identity; passing null (the documented "absent" encoding)
+            // preserves the pre-0.23.0 behaviour of crediting the connected wallet, which is what every
+            // LNURL prompt here needs. A connected-wallet invoice whose key we set would be a hold invoice
+            // nobody can claim.
             null);
 
         var response = await _sdk.ReceivePayment(new ReceivePaymentRequest(method)).ConfigureAwait(false);

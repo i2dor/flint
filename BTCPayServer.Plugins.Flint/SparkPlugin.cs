@@ -78,6 +78,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IInvoiceCreditGateway, BTCPayInvoiceCreditGateway>();
         services.AddSingleton<SparkInvoiceCreditor>();
 
+        // The plugin's own payment-hash → invoice association, kept from every prompt-mint event regardless
+        // of LUD-21. BTCPay indexes an LNURL prompt's hash into its AddressInvoices table only while LUD-21
+        // is enabled, so a store whose merchant disabled it by hand would otherwise leave a late payment to a
+        // superseded LNURL BOLT11 unattributable after a restart; this index is the fallback the gateway
+        // consults when core's own table has nothing (see SparkInvoicePaymentHashIndexer for the writer).
+        services.AddSingleton<IInvoicePaymentHashIndex, EfInvoicePaymentHashIndex>();
+        services.AddSingleton<SparkInvoicePaymentHashIndexer>();
+        services.AddSingleton<IHostedService>(provider =>
+            provider.GetRequiredService<SparkInvoicePaymentHashIndexer>());
+
         // The single path from "a Spark receive happened" to "a BTCPay invoice is paid", shared by the event
         // consumer, BTCPay's GetInvoice lookup and the reconciliation task.
         services.AddSingleton<SparkSettlementReconciler>();

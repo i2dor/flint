@@ -13,6 +13,7 @@ public class SparkPluginDbContext : DbContext
     public DbSet<InvoiceRecord> InvoiceRecords { get; set; } = null!;
     public DbSet<OutgoingPaymentRecord> OutgoingPayments { get; set; } = null!;
     public DbSet<SweepRecord> SweepRecords { get; set; } = null!;
+    public DbSet<InvoicePaymentHash> InvoicePaymentHashes { get; set; } = null!;
 
     public SparkPluginDbContext(DbContextOptions<SparkPluginDbContext> options) : base(options)
     {
@@ -56,6 +57,17 @@ public class SparkPluginDbContext : DbContext
             entity.HasIndex(record => new { record.StoreId, record.CreatedAt });
             // Every pass of the sweep engine opens by looking for this store's in-flight rows.
             entity.HasIndex(record => new { record.StoreId, record.Status });
+        });
+
+        modelBuilder.Entity<InvoicePaymentHash>(entity =>
+        {
+            // The payment hash is the primary key — the read path is a point read on it, exactly as in core's
+            // AddressInvoices. No store-scoped key: a hash is unique to one invoice, and the reader never
+            // filters by store.
+            entity.HasKey(record => record.PaymentHash);
+            // The table name is pinned so the raw SQL in EfInvoicePaymentHashIndex.RecordAsync names the same
+            // table EF creates, rather than relying on both ending up at EF's default pluralisation.
+            entity.ToTable("InvoicePaymentHashes");
         });
     }
 }

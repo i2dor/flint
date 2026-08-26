@@ -32,6 +32,13 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// <see cref="SparkLightningClient"/>, and restarts by actually discarding the service and its in-memory
 /// broadcaster while keeping the database and BTCPay's payment-hash index — the split a real restart makes.
 /// </para>
+/// <para>
+/// <b>The LUD-21-off variant.</b> The same scenario, with one extra twist in the middle: BTCPay writes an
+/// LNURL prompt's payment hash into its own <c>AddressInvoices</c> index only when LUD-21 is enabled, so a
+/// merchant who disables it by hand (the plugin forces it on at setup, but nothing stops them) removes the
+/// LNURL half of the association from core's tables entirely. The plugin's own payment-hash index — written
+/// from every prompt-mint event, LUD-21 or not — is what keeps the superseded BOLT11 attributable after that.
+/// </para>
 /// </remarks>
 public class SparkSupersededInvoiceCreditTests
 {
@@ -123,10 +130,18 @@ public class SparkSupersededInvoiceCreditTests
     }
 
     /// <summary>Mints one invoice through the real client and indexes it the way BTCPay does.</summary>
+    /// <param name="paymentMethodId">The payment method the prompt is minted under.</param>
+    /// <param name="indexInCore">
+    /// Whether core also writes the hash into its own <c>AddressInvoices</c> table — true for a plain
+    /// Lightning prompt, and for an LNURL prompt with LUD-21 on; false for an LNURL prompt minted while the
+    /// merchant disabled LUD-21, which core does not index and the plugin's own index still covers.
+    /// </param>
     private static async Task<LightningInvoice> MintAsync(
         SparkServiceHarness h,
         ILightningClient client,
-        string bolt11)
+        string bolt11,
+        string paymentMethodId = FakeInvoiceCreditGateway.LightningPaymentMethodId,
+        bool indexInCore = true)
     {
         h.Sdk.Clients[StoreId].NextPaymentRequest = bolt11;
         var invoice = await client.CreateInvoice(
@@ -134,8 +149,10 @@ public class SparkSupersededInvoiceCreditTests
 
         // What core's LightningLikePaymentHandler.ConfigurePrompt does immediately after this returns: it
         // writes the payment hash into AddressInvoices against the invoice it is prompting for. Insert-only,
-        // so superseding this BOLT11 later does not remove the row.
-        h.Credits.Mint(invoice.Id, InvoiceId, StoreId);
+        // so superseding this BOLT11 later does not remove the row — except that an LNURL prompt with LUD-21
+        // off is never indexed by core at all, which indexInCore: false models (the plugin's own index is
+        // written regardless, as the real mint event is).
+        h.Credits.Mint(invoice.Id, InvoiceId, StoreId, paymentMethodId, indexInCore);
         return invoice;
     }
 
@@ -212,6 +229,55 @@ public class SparkSupersededInvoiceCreditTests
             // Y *is* the current prompt, so crediting it does fill the prompt's preimage — the ordinary
             // proof-of-payment path, which the superseded case above must not disturb and does not.
             Assert.Equal(PaymentFixture.Preimage, h.Credits.PromptPreimageFor(InvoiceId));
+        }
+        finally
+        {
+            (h ?? first).Dispose();
+        }
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task A_superseded_bolt11_minted_while_LUD21_was_off_is_credited_after_a_restart()
+    {
+        // The review finding this pins. BTCPay indexes an LNURL prompt's payment hash into its own
+        // AddressInvoices table only when LUD-21 is enabled; a merchant who disables it by hand (the plugin
+        // forces it on at setup, but nothing stops them) leaves that half of the association unrecorded in
+        // core. The plugin's own payment-hash index, written from the mint event regardless of LUD-21, is what
+        // keeps a superseded BOLT11 attributable after a restart when core's table has no row for it.
+        var (first, paymentKey) = await StartedAsync();
+        SparkServiceHarness? h = null;
+        try
+        {
+            var client = ClientFor(first, paymentKey);
+
+            // X is minted as an LNURL prompt while LUD-21 is off — so core never indexes it — then superseded
+            // by Y under the same setting, and the server restarts with only Y being watched.
+            var x = await MintAsync(
+                first, client, Bolt11X, FakeInvoiceCreditGateway.LnurlPaymentMethodId, indexInCore: false);
+            await client.CancelInvoice(x.Id, Ct);
+            await MintAsync(
+                first, client, Bolt11Y, FakeInvoiceCreditGateway.LnurlPaymentMethodId, indexInCore: false);
+
+            h = first.Restart();
+            await h.Service.StartAsync(CancellationToken.None);
+
+            // And X is paid, after the restart, with nobody watching it.
+            Pay(h, HashX, "recv-x");
+
+            await WaitFor(
+                () => h.Invoices.Records[HashX] is { Status: InvoiceRecordStatus.Paid, CreditedAt: not null },
+                "the payment to the LUD-21-off superseded invoice never reached its BTCPay invoice");
+
+            // Exactly one payment, on the right invoice, with X's own hash and its preimage.
+            var credit = Assert.Single(h.Credits.CreditsFor(InvoiceId));
+            Assert.Equal(HashX, credit.PaymentHash);
+            Assert.Equal(100_000, credit.AmountReceivedMsat);
+            Assert.Equal(PaymentFixture.Preimage, credit.Preimage);
+
+            // The replacement's prompt is untouched, exactly as in the LUD-21-on case: no proof-of-payment for
+            // an invoice the payer never paid.
+            Assert.Equal(HashY, h.Credits.PromptPaymentHashFor(InvoiceId));
+            Assert.Null(h.Credits.PromptPreimageFor(InvoiceId));
         }
         finally
         {
