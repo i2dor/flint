@@ -20,8 +20,10 @@
   after a restart it is never re-added, because that set is rebuilt from the prompts that exist now.
   So the plugin does not depend on notifying a listener. Every settlement is also written straight
   onto the BTCPay invoice the BOLT11 was minted for, found through BTCPay's own payment-hash index
-  (`AddressInvoices`, which is insert-only and keeps the mint-time association forever). The plugin
-  records whether that credit landed and retries it on every reconciliation pass until it does, which
+  (`AddressInvoices`, which is insert-only and keeps the mint-time association forever) — and, for the
+  hashes that index misses, through the plugin's own copy of the mint-time association kept from every
+  prompt-mint event (LUD-21 off). The plugin records whether that credit landed and retries it on
+  every reconciliation pass until it does, which
   also covers a payment that arrived while the server was down, a listening session that fell too far
   behind, and a crash between recording the settlement and telling BTCPay. The retry does not need the
   store's Spark wallet to be connected — crediting touches only BTCPay's own tables — so a store whose
@@ -45,10 +47,14 @@
     This is very close to unreachable in practice — nothing in BTCPay deletes a prompt — and is listed
     because if it ever does happen the money is in the wallet, the invoice cannot be credited
     automatically, and only a human can reconcile it.
-  - A store whose LNURL prompts have **LUD-21 disabled by hand** loses the LNURL half of the index:
-    BTCPay only records the payment hash of an LNURL prompt when LUD-21 is on, which is why this plugin
-    turns it on when it provisions a store. Such a payment is reported as unattributable rather than
-    guessed at.
+  - An LNURL prompt whose mint happened while this plugin was **not running**. The plugin keeps its own
+    copy of the mint-time association (payment hash → BTCPay invoice) from every prompt-mint event, which
+    BTCPay publishes whether or not LUD-21 is enabled — so a merchant who disables LUD-21 by hand does not
+    lose the LNURL half of the index any more. The remaining gap is narrower and is about outages rather
+    than settings: a prompt minted while the plugin itself was not running has no observer, and a late
+    payment to it is reported as unattributable rather than guessed at. (The plugin forces LUD-21 on when
+    it provisions a store; while that setting is on, core's own index covers the hash even through an
+    outage.)
 
   One thing the plugin does *not* keep from BTCPay's own listener is worth naming as a non-limitation:
   the preimage is written onto the payment prompt as well as onto the payment, so LNURL

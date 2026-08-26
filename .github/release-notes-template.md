@@ -30,8 +30,13 @@ writes it with a single space between hash and filename. GNU `sha256sum -c` acce
 
 ## Installing
 
-**Server settings → Plugins → Upload plugin**, and select `BTCPayServer.Plugins.Flint.btcpay`.
-BTCPay restarts itself to finish. Requires BTCPay Server 2.4.1 or newer, on a non-Alpine host.
+**Server settings → Plugins**, find **Flint** in the plugin store
+([official listing](https://plugin-builder.btcpayserver.org/public/plugins/flint)), and install it.
+BTCPay restarts itself to finish.
+
+Alternatively, **Server settings → Plugins → Upload plugin**, and select
+`BTCPayServer.Plugins.Flint.btcpay`. BTCPay restarts itself to finish. Both routes require BTCPay Server
+2.4.1 or newer, on a non-Alpine host.
 
 Read [CHANGELOG.md](https://github.com/__REPO__/blob/__TAG__/CHANGELOG.md) for what is in this
 release and how far it has actually been proven, and the

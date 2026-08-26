@@ -100,6 +100,7 @@ public class SparkPluginStartupTests
             provider => provider.GetServices<IHostedService>().ToList());
 
         Assert.Contains(hostedServices, service => service is SparkService);
+        Assert.Contains(hostedServices, service => service is SparkInvoicePaymentHashIndexer);
     }
 
     /// <summary>
@@ -194,7 +195,9 @@ public class SparkPluginStartupTests
                      typeof(IInvoiceRecordStore),
                      typeof(IOutgoingPaymentStore),
                      typeof(ISweepRecordStore),
-                     typeof(SparkPluginDbContextFactory)
+                     typeof(SparkPluginDbContextFactory),
+                     typeof(IInvoicePaymentHashIndex),
+                     typeof(SparkInvoicePaymentHashIndexer)
                  })
         {
             var resolved = host.Resolve(type.Name, provider => provider.GetRequiredService(type));

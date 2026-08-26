@@ -50,12 +50,11 @@ What a server needs to *run* this plugin:
 
 Requires **BTCPay Server 2.4.1 or newer** on a host the Breez SDK has native libraries for — see
 [Requirements](#requirements) before you start, because Alpine-based images are not among them.
+**From the [official BTCPay plugin store](https://plugin-builder.btcpayserver.org/public/plugins/flint)**:
+in your BTCPay Server, go to **Server settings → Plugins**, find **Flint**, and install it. BTCPay
+restarts itself to complete the install.
 
-**From the BTCPay plugin registry** *(once this plugin is listed there — it is not yet)*: in your BTCPay
-Server, go to **Server settings → Plugins**, find **Flint**, and install it. BTCPay restarts itself to
-complete the install.
-
-**From a release artifact**, which is the route available today: download
+**From a release artifact**, for servers without access to the plugin store: download
 `BTCPayServer.Plugins.Flint.btcpay` from the [releases page](https://github.com/sethforprivacy/flint/releases),
 then **Server settings → Plugins → Upload plugin** and select the file. BTCPay restarts to complete the
 install. Every release artifact is signed; the releases page carries `SHA256SUMS` and the commands to

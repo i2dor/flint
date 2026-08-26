@@ -7,6 +7,7 @@ using BTCPayServer.Events;
 using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Lightning;
+using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Services.Invoices;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
@@ -81,8 +82,10 @@ public sealed class BTCPayInvoiceCreditGateway : IInvoiceCreditGateway
     /// <c>BTC-LN</c> first because a plain Lightning checkout always indexes the hash there. <c>BTC-LNURL</c>
     /// second because LNURL prompts index it only when LUD-21 is enabled — which this plugin forces on when it
     /// provisions a store (<see cref="BTCPayStoreLightningConfigStore.SetAsync"/>), so for a Flint store both
-    /// rails are covered. A merchant who turned LUD-21 off by hand loses the LNURL half of this, and the
-    /// credit for such a payment is reported as unresolvable rather than guessed at.
+    /// rails are covered. There is no third entry: an LNURL prompt minted while LUD-21 was off by hand is
+    /// indexed by neither core table at all — the plugin's own copy of the mint-time association
+    /// (<see cref="IInvoicePaymentHashIndex"/>) is what <see cref="FindByPaymentHashAsync"/> falls back to
+    /// for it.
     /// </remarks>
     internal static readonly PaymentMethodId[] CreditablePaymentMethods =
     [
@@ -95,23 +98,30 @@ public sealed class BTCPayInvoiceCreditGateway : IInvoiceCreditGateway
     private readonly Func<PaymentMethodHandlerDictionary> _handlers;
     private readonly EventAggregator _eventAggregator;
     private readonly ILogger<BTCPayInvoiceCreditGateway> _logger;
+    private readonly IInvoicePaymentHashIndex _index;
 
     /// <param name="paymentService">
     /// Resolved on first use rather than injected, and that is load-bearing: see the remarks on this class.
     /// </param>
     /// <param name="handlers">Deferred for the same reason, and shared with the rest of the plugin.</param>
+    /// <param name="index">
+    /// The plugin's own payment-hash → invoice association, consulted when core's <c>AddressInvoices</c> has
+    /// no row for the hash — the LUD-21-off LNURL case. See <see cref="FindByPaymentHashAsync"/>.
+    /// </param>
     public BTCPayInvoiceCreditGateway(
         InvoiceRepository invoiceRepository,
         Func<PaymentService> paymentService,
         Func<PaymentMethodHandlerDictionary> handlers,
         EventAggregator eventAggregator,
-        ILogger<BTCPayInvoiceCreditGateway> logger)
+        ILogger<BTCPayInvoiceCreditGateway> logger,
+        IInvoicePaymentHashIndex index)
     {
         _invoiceRepository = invoiceRepository;
         _paymentService = paymentService;
         _handlers = handlers;
         _eventAggregator = eventAggregator;
         _logger = logger;
+        _index = index;
     }
 
     /// <inheritdoc />
@@ -145,7 +155,35 @@ public sealed class BTCPayInvoiceCreditGateway : IInvoiceCreditGateway
                 invoice.Id, invoice.StoreId, paymentMethodId.ToString(), alreadyHasPayment);
         }
 
-        return null;
+        // Core's own table has no row for this hash. That is the ordinary answer for a BOLT11 that was never
+        // minted for a BTCPay invoice — but it is also exactly what an LNURL prompt minted while LUD-21 was
+        // disabled looks like, because core writes an LNURL prompt's payment hash into AddressInvoices only
+        // when LUD-21 is enabled. The plugin's own index (<see cref="IInvoicePaymentHashIndex"/>), kept from
+        // the mint-time event and independent of that setting, is the fallback that restores the
+        // association. It resolves the same way the primary path does — a point read on the invoice gets the
+        // authoritative store and the payment rows — so the two paths disagree only about the source of the
+        // invoice id. The store is re-read from core rather than trusted from the index, which is what the
+        // creditor's cross-store refusal compares.
+        var entry = await _index
+            .FindByPaymentHashAsync(paymentHash, cancellationToken)
+            .ConfigureAwait(false);
+        if (entry is null)
+            return null;
+
+        var indexedInvoice = await _invoiceRepository.GetInvoice(entry.InvoiceId).ConfigureAwait(false);
+        if (indexedInvoice is null)
+            return null;
+
+        // The hash has no AddressInvoices row, so a payment for it can only exist here if core's own listener
+        // recorded one against the invoice's prompt while it was watching — the ordinary (non-superseded)
+        // LUD-21-off case. Same "primary key already taken" question as the loop above.
+        var indexedPaymentMethodId = PaymentMethodId.Parse(entry.PaymentMethodId);
+        var alreadyRecorded = indexedInvoice
+            .GetPayments(false)
+            .Any(p => p.Id == paymentHash && p.PaymentMethodId == indexedPaymentMethodId);
+
+        return new SparkInvoiceCreditMatch(
+            indexedInvoice.Id, indexedInvoice.StoreId, entry.PaymentMethodId, alreadyRecorded);
     }
 
     /// <inheritdoc />
