@@ -4,6 +4,20 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-08-26
+
+### Changed
+
+- **The setup page now tells a tenant whose store is not on their own server who holds their seed.**
+  On a shared or public-registration instance, the store's Spark recovery phrase is stored encrypted
+  on the server, and whoever operates the server can decrypt it and spend the store's Lightning
+  funds. The setup page previously framed the stored copy as a recovery fact ("unreadable without
+  this server's data-protection keys") — the wrong side of the truth about an operator — and now says
+  plainly, before a seed is created or imported, that the server operator is a custodian, with a
+  stronger warning for a store manager who is not a server admin. The same disclosure is on the
+  Greenfield provisioning endpoint and in SECURITY.md, the README trust model and the trust-model
+  document.
+
 ## [1.0.0] — 2026-08-26
 
 ### Security
@@ -594,3 +608,4 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
 
 [0.1.0]: https://github.com/sethforprivacy/flint/releases/tag/v0.1.0
 [1.0.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.0
+[1.0.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.1
