@@ -1,3 +1,4 @@
+@using BTCPayServer
 @model SparkSetupViewModel
 @{
     var title = Model.AlreadyConfigured ? "Replace the Spark seed" : "Set up Flint";
@@ -23,9 +24,19 @@
 
             <p class="text-secondary">
                 Spark gives this store a Lightning wallet with no node to run. One recovery phrase controls
-                that wallet, and it is the only way to reach the funds if this server is lost — BTCPay keeps
-                an encrypted copy, but that copy is unreadable without this server's data-protection keys.
+                that wallet, and it is the only way to reach the funds if this server is lost. BTCPay keeps
+                an encrypted copy on this server, and whoever operates this server can decrypt it.
             </p>
+
+            @if (!User.IsInRole(Roles.ServerAdmin))
+            {
+                <div class="alert alert-warning" role="alert">
+                    <strong>You are not an administrator on this server.</strong> The recovery phrase you
+                    are about to generate or import is stored encrypted on this server, and whoever operates
+                    the server can decrypt it and spend this wallet's funds. If you do not control and trust
+                    this server, do not put a Spark seed here.
+                </div>
+            }
 
             @if (!Model.CanUseHotWallet)
             {

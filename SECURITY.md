@@ -115,7 +115,11 @@ belong upstream or with the operator:
 - **BTCPay Server core.** Report to https://github.com/btcpayserver/btcpayserver.
 - **The merchant's own server.** A compromised host, a stolen BTCPay admin session, or an exposed
   Postgres is outside what a plugin can defend against; anything that can run code on that server
-  can reach everything this plugin can.
+  can reach everything this plugin can. The operator of a *shared* instance is in the same position
+  **by design rather than by compromise**: a store set up by a non-admin tenant stores its seed on
+  that server, and the instance admin can decrypt it and spend the funds. That is the product model,
+  and the setup page warns of it before a seed is created or imported — it is not a vulnerability in
+  the integration.
 - **The embedded provider API key.** It is a per-application identifier, not a credential, and is
   obfuscated only to keep it out of trivial scrapes. Extracting it is expected and is not a finding.
 - Automated-scanner output with no demonstrated impact, missing security headers, and hardening or
