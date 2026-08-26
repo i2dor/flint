@@ -4,6 +4,30 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-08-26
+
+### Security
+
+- **The payment-hash → invoice association no longer depends on LUD-21.** BTCPay writes an LNURL
+  prompt's payment hash into its payment-hash index only while LUD-21 is enabled, so a merchant who
+  disables LUD-21 by hand removes the LNURL half of the association from core's tables, and a late
+  payment to a superseded LNURL bolt11 after a restart reaches the Spark wallet with no BTCPay
+  invoice credited. The plugin now keeps its own copy of the mint-time association from every
+  prompt-mint event — which BTCPay publishes whether or not LUD-21 is on — and the credit gateway
+  falls back to it whenever core's own index has no row. The one case left unattributable is a
+  prompt minted while the plugin itself was not running.
+
+### Changed
+
+- **Breez.Sdk.Spark bumped to 0.23.0** (~200 MB of native libraries rebuilt against the new SDK).
+  0.23.0's only breaking binding change is a new `receiverIdentityPublicKey` field on
+  `ReceivePaymentMethod.Bolt11Invoice` (bolt11 invoices for external Spark recipients); the plugin
+  passes a null receiver to preserve the pre-0.23.0 behaviour of crediting the connected wallet,
+  which is what every LNURL receive here needs. The rest is additive — instant deposit claims and
+  the new `DepositInfo` fields are default-off / ignored. Verified on mainnet against a live
+  Lightspark service provider on the test servers; the SDK's own storage schema migrates to
+  version 40 on startup.
+
 ## [0.1.5.5] — 2026-08-25
 
 ### Security
@@ -34,16 +58,6 @@ All notable changes to this plugin are recorded here. The format follows
   records keep saying that this money never reached a BTCPay invoice, so a merchant's wallet balance can
   be reconciled against them. The same applies to a BTCPay invoice with no payment prompt able to hold the
   payment. Nothing is reported twice and nothing is retried forever.
-
-- **The payment-hash → invoice association no longer depends on LUD-21.** The routing described above
-  found the invoice through BTCPay's own payment-hash index (`AddressInvoices`), and BTCPay writes an
-  LNURL prompt's hash into that index only while LUD-21 is enabled — so a merchant who disabled LUD-21
-  by hand (the plugin forces it on at store setup, but nothing stops them) was back to the original
-  gap: a late payment to a superseded LNURL bolt11 after a restart reached the Spark wallet with no
-  BTCPay invoice credited. The plugin now keeps its own copy of the mint-time association from every
-  prompt-mint event, which BTCPay publishes whether or not LUD-21 is on, and the credit gateway falls
-  back to it whenever core's own index has no row. The one case left unattributable is a prompt minted
-  while the plugin itself was not running.
 
 ## [0.1.5.4] — 2026-08-24
 
@@ -579,3 +593,4 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
   Spark keeps keys on the server.
 
 [0.1.0]: https://github.com/sethforprivacy/flint/releases/tag/v0.1.0
+[1.0.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.0
