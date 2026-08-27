@@ -49,7 +49,15 @@ TARGET_DIR="${1:?usage: $0 <plugin TargetDir containing runtimes/>}"
 RUNTIMES="$TARGET_DIR/runtimes"
 [ -d "$RUNTIMES" ] || { echo "error: $RUNTIMES does not exist; pass the plugin build output directory" >&2; exit 1; }
 
-DOCKER_IMAGE="ubuntu:24.04"
+# Pinned by manifest digest, not the mutable tag: the binary this container
+# produces rewrites libraries that ship inside the attested artifact, so a
+# repointed ubuntu:24.04 would put unverified bytes on the release path while
+# the Sigstore attestation still vouched for the result. The apt-installed
+# binutils are themselves GPG-verified against the Ubuntu archive key by apt.
+# This digest is what `ubuntu:24.04` resolved to when the first stripped,
+# server-verified artifacts were produced; refresh deliberately (and re-verify
+# the output) when the base image is next needed for anything new.
+DOCKER_IMAGE="ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
 
 sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$1" | cut -d' ' -f1; }
 fsize() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1"; }
