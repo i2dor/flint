@@ -2,6 +2,7 @@ using Breez.Sdk.Spark;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using NBitcoin;
+using Microsoft.Extensions.Logging;
 using Xunit;
 using BitcoinNetwork = NBitcoin.Network;
 
@@ -336,5 +337,56 @@ public class SparkLogBridgeTests
         var entry = Assert.Single(log.Lines);
         var marker = "spark: ";
         return entry[(entry.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
+    }
+
+    /// <summary>
+    /// The cost check, and its redaction corollary: a line the logger would discard must not be paid for
+    /// (five scrub regexes on an SDK callback thread), and the lines that ARE emitted must still scrub —
+    /// the gate must not become a way to skip redaction for anything that actually reaches the log.
+    /// </summary>
+    [Fact]
+    public void Lines_below_the_effective_level_are_dropped_before_the_scrub()
+    {
+        var log = new ThresholdLogger(LogLevel.Warning);
+        var bridge = new SparkLogBridge(log);
+
+        // SDK "info" → Information, "debug" → Debug, "trace" → Trace: all below the threshold.
+        bridge.Log(new LogEntry("sync completed", "info"));
+        bridge.Log(new LogEntry("dumping payment row with preimage abc", "debug"));
+        bridge.Log(new LogEntry("graphql session_token: deadbeef", "trace"));
+        Assert.Empty(log.Lines);
+
+        // "warn" stays Warning, and "error" maps DOWN to Warning — both at or above the threshold, so
+        // both are forwarded, and the secret among them is scrubbed on the way.
+        bridge.Log(new LogEntry("retrying connect", "warn"));
+        bridge.Log(new LogEntry("session_token: deadbeef", "error"));
+        Assert.Equal(2, log.Lines.Count);
+        Assert.Contains("retrying connect", log.AllText);
+        Assert.DoesNotContain("deadbeef", log.AllText);
+        Assert.Contains(SparkLogScrubber.Redacted, log.AllText);
+    }
+
+    private sealed class ThresholdLogger(LogLevel minimum) : ILogger
+    {
+        private readonly List<string> _lines = [];
+
+        public IReadOnlyList<string> Lines => _lines;
+        public string AllText => string.Join('\n', _lines);
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= minimum;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => _lines.Add(formatter(state, exception));
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
+        }
     }
 }

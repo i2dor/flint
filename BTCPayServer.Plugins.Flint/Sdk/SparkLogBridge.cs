@@ -45,10 +45,14 @@ public sealed class SparkLogBridge : Logger
             };
             // Downgraded by one step relative to the Rust level: the SDK is chatty at "info" and its
             // notion of severity is about the SDK, not about the merchant's BTCPay server.
-            _logger.Log(
-                level == LogLevel.Error ? LogLevel.Warning : level,
-                "spark: {Line}",
-                SparkLogScrubber.Scrub(l.line));
+            var effective = level == LogLevel.Error ? LogLevel.Warning : level;
+            // Checked before the scrub, not inside ILogger: SparkLogScrubber.Scrub runs five full-line
+            // regex passes, and at Warning-and-above that work would be thrown away per discarded line
+            // on an SDK-owned callback thread. A skipped line is never emitted, so redaction coverage
+            // is exactly the set of lines that reach the log.
+            if (!_logger.IsEnabled(effective))
+                return;
+            _logger.Log(effective, "spark: {Line}", SparkLogScrubber.Scrub(l.line));
         }
         catch
         {
