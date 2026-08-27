@@ -123,6 +123,22 @@ jobs:
           fi
           echo "path=$target_dir" >> "$GITHUB_OUTPUT"
 
+
+      # Strip the DWARF debug info and symbol tables Breez ships inside its linux .so files
+      # (and the fat symbol tables in the osx dylibs, though those ship as-is from a linux runner:
+      # GNU strip cannot rewrite Mach-O). ~100 MB of the 196 MB runtimes payload is never-mapped
+      # debug data; see the header of the script for the full trade, the measured numbers, and the
+      # toolchain fallbacks. Idempotent, and it fails the build loudly if an ELF cannot be stripped.
+      - name: Strip debug info from native payloads
+        run: |
+          set -euo pipefail
+          # The runner is x86-64, so host strip covers linux-x64; the aarch64 cross-tool covers
+          # linux-arm64. Without it the script's docker fallback works too, but pays an apt-get
+          # per file inside a container.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-aarch64-linux-gnu
+          ./scripts/strip-native-payloads.sh "${{ steps.build-dir.outputs.path }}"
+
       - name: Run PluginPacker
         env:
           PLUGIN_DIR: ${{ steps.build-dir.outputs.path }}
