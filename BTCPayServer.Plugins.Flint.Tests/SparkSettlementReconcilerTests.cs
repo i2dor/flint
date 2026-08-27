@@ -492,6 +492,116 @@ public class SparkSettlementReconcilerTests
     }
 
     [Fact]
+    public async Task Reconciling_a_store_scans_shared_history_once_for_many_unpaid_invoices()
+    {
+        // The cost the shared sweep exists to remove: five unpaid invoices with no recorded id used to mean
+        // five full history scans per pass, every minute, on a store with no incoming traffic whatsoever.
+        // One drained shared scan now answers all five with a single query.
+        var (reconciler, store, _) = Create();
+        for (var i = 0; i < 5; i++)
+            Seed(store, hash: i.ToString("x64"));
+
+        var sdk = new FakeSparkSdkClient();
+        var settled = await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct);
+
+        Assert.Equal(0, settled);
+        Assert.Single(sdk.ListQueries);
+    }
+
+    [Fact]
+    public async Task Reconciling_a_store_settles_from_the_shared_history_page_without_another_scan()
+    {
+        // The payment arrived inside the one page the shared sweep fetched. Neither the hit nor the two
+        // drained misses may spend a further query — the whole batching win, pinned.
+        var (reconciler, store, _) = Create();
+        var first = new string('a', 64);
+        var second = new string('b', 64);
+        var third = new string('c', 64);
+        Seed(store, first);
+        Seed(store, second);
+        Seed(store, third);
+        var sdk = new FakeSparkSdkClient().Seed(Receive(hash: second));
+
+        var settled = await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct);
+
+        Assert.Equal(1, settled);
+        Assert.Equal(InvoiceRecordStatus.Paid, store.Records[second].Status);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, store.Records[first].Status);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, store.Records[third].Status);
+        Assert.Single(sdk.ListQueries);
+        // The shared query must keep the exact filter shape the per-record scan used, or the sweep could
+        // quietly start settling on rows the old path would have ignored.
+        Assert.True(sdk.ListQueries.All(q =>
+            q.CompletedOnly && q.Direction == SparkPaymentDirection.Receive));
+    }
+
+    [Fact]
+    public async Task Reconciling_a_store_falls_back_to_a_per_invoice_scan_when_the_shared_scan_caps_out()
+    {
+        // A capped shared scan is not evidence of absence. The page holds an old invoice (which anchors the
+        // shared window) and a newer one whose payment the shared window buries: the fake orders history by
+        // insertion, so seeding the target FIRST under 500 receives that live inside the shared window but
+        // before the target invoice's own, plus 60 inside both windows, puts the target at position 560 of
+        // the newest-first shared scan — past the 500-payment cap, so the sweep returns undrained and the
+        // target must not be judged by its miss. The target's own scan, anchored to its own creation time,
+        // cuts those 500 out of its window entirely and finds the payment on its second page.
+        var (reconciler, store, _) = Create();
+        var olderHash = new string('a', 64);
+        var targetHash = new string('b', 64);
+        Seed(store, olderHash, createdAt: DateTimeOffset.UtcNow.AddHours(-3));
+        Seed(store, targetHash, createdAt: DateTimeOffset.UtcNow.AddMinutes(-30));
+
+        var sdk = new FakeSparkSdkClient();
+        sdk.Seed(Receive(hash: targetHash, sdkPaymentId: "target",
+            timestamp: DateTimeOffset.UtcNow.AddMinutes(-25)));
+        for (var i = 0; i < 500; i++)
+        {
+            sdk.Seed(Receive(
+                hash: i.ToString("x64"),
+                sdkPaymentId: $"filler-old-{i}",
+                timestamp: DateTimeOffset.UtcNow.AddMinutes(-180)));
+        }
+        for (var i = 0; i < 60; i++)
+        {
+            sdk.Seed(Receive(
+                hash: (1000 + i).ToString("x64"),
+                sdkPaymentId: $"filler-new-{i}",
+                timestamp: DateTimeOffset.UtcNow.AddMinutes(-35 - i / 10.0)));
+        }
+
+        var settled = await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct);
+
+        Assert.Equal(1, settled);
+        Assert.Equal(InvoiceRecordStatus.Paid, store.Records[targetHash].Status);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, store.Records[olderHash].Status);
+        // The sweep's ten capped pages alone already fill MaxPaymentPages; anything more is proof the
+        // undrained miss was not taken as absence and the per-invoice fallback ran.
+        Assert.True(sdk.ListQueries.Count > 10,
+            $"the capped sweep must not silence the per-invoice fallback (got {sdk.ListQueries.Count})");
+    }
+
+    [Fact]
+    public async Task Reconciling_a_store_skips_the_shared_scan_when_every_invoice_has_an_SDK_payment_id()
+    {
+        // The shared scan exists only for records the point lookup cannot serve. Running it anyway would be
+        // the batching spending money it saves nobody.
+        var (reconciler, store, _) = Create();
+        var first = new string('a', 64);
+        var second = new string('b', 64);
+        Seed(store, first, sdkPaymentId: "sdk-a");
+        Seed(store, second, sdkPaymentId: "sdk-b");
+        var sdk = new FakeSparkSdkClient();
+        sdk.Seed(Receive(hash: first, sdkPaymentId: "sdk-a"));
+        sdk.Seed(Receive(hash: second, sdkPaymentId: "sdk-b"));
+
+        var settled = await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct);
+
+        Assert.Equal(2, settled);
+        Assert.Empty(sdk.ListQueries);
+        Assert.Equal(2, sdk.GetPaymentCalls.Count);
+    }
+
+    [Fact]
     public async Task Finding_a_receive_falls_back_to_a_scan_when_the_recorded_id_resolves_to_nothing()
     {
         // The recorded id came from a PaymentPending event. If the SDK has since replaced or re-keyed that row,
