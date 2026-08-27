@@ -4,6 +4,40 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [Unreleased]
+
+### Changed
+
+- **The packaged plugin is ~23% smaller: linux native libraries are stripped at packaging time.**
+  Breez ships its Rust `.so` files with ~28 MB of DWARF debug info apiece — sections that are never
+  mapped at run time, but that nonetheless travel inside every `.btcpay`. Packaging now runs
+  `scripts/strip-native-payloads.sh` between the build and PluginPacker: 196 MB of runtimes become
+  ~100 MB, and the artifact from 67.4 MB to 51.7 MB. The osx dylibs are additionally stripped when
+  packaging happens on a macOS host (GNU strip cannot rewrite Mach-O; the step warns and ships them
+  as-is on linux runners), and the Windows DLLs are untouched — they carry no strippable debug
+  data. The costs are stated where the fix lives: symbolised native backtraces on linux are lost
+  (Rust panic *messages* survive), and the shipped hashes no longer match Breez's upstream
+  byte-for-byte — the script prints each pre-strip upstream sha256, MIT permits the modification,
+  and the Sigstore attestation still binds the artifact to this repository and commit.
+- **A store's reconciliation pass shares one Spark payment-history scan across an invoice page.**
+  Each invoice with no recorded SDK payment id previously ran its own paged history scan — up to
+  ten pages — every pass. A quiet store with five waiting invoices and no traffic paid five full
+  scans per minute to find nothing. The pass now runs one scan per page anchored to its oldest
+  unpaid invoice and settles records from a payment-hash index; a miss counts as unpaid only when
+  the shared scan reached the end of its window, and anything else (a capped or failed scan, a
+  record with a recorded id) keeps its own scan, bit-for-bit the path it took before. Settlement
+  coverage is unchanged; the number of SDK calls per idle store per minute drops from one per
+  unpaid invoice to one.
+- **The Spark network status is read once per process, not once per store per request.** It is a
+  process-global provider status; every configured store's status page and every Greenfield status
+  call re-struck the identical third-party request. Successful reads are now reused for 45 seconds
+  and failed reads back off for 10, with concurrent first callers folded into one round trip. The
+  cached value is diagnostic only — no settlement, sweep or credit decision reads it.
+- **SDK log lines below the operator's effective log level no longer pay for redaction.** The
+  scrubber's five regex passes run only on lines that will actually be emitted. Lines that are
+  emitted scrub exactly as before.
+
 ## [1.0.1] — 2026-08-26
 
 ### Changed

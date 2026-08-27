@@ -35,6 +35,17 @@ public sealed record SparkReconciliationTarget(string StoreId, ISparkSdkClient S
 /// invoice that expires unpaid while the sats sit in the merchant's wallet.
 /// </para>
 /// <para>
+/// <b>A quiet store would pay for its own scan, so a pass shares one across an invoice page.</b> Each
+/// invoice with no recorded SDK payment id costs up to ten pages of payment history per pass, every
+/// minute, and a store with five waiting invoices and no incoming traffic pays that five times over to
+/// find nothing. So the pass runs one scan for the whole page — anchored to its oldest unpaid invoice and
+/// indexed by payment hash — and settles records straight out of the index. What the index does not name
+/// counts as unpaid <em>only</em> when the scan saw a short page: ten full pages prove only that more
+/// history was there to read, not that the payment is absent, so on a capped or failed sweep every miss
+/// falls back to the per-invoice scan that ran before the batching existed. Coverage is unchanged; only
+/// the cost is shared.
+/// </para>
+/// <para>
 /// <b>Settling is not the same as crediting, and both happen here.</b> Notifying BTCPay's listener only works
 /// while that listener is watching the BOLT11 in question, and it watches only each invoice's <em>current</em>
 /// payment prompt — so a superseded BOLT11 paid after a restart settles here and reaches no BTCPay invoice.
@@ -319,10 +330,27 @@ public class SparkSettlementReconciler
     /// <summary>
     /// Resolves one invoice against the SDK and settles it if it has been paid. Returns the current record.
     /// </summary>
-    public async Task<InvoiceRecord> ResolveAsync(
+    public Task<InvoiceRecord> ResolveAsync(
         ISparkSdkClient sdk,
         InvoiceRecord record,
         CancellationToken cancellationToken = default)
+        => ResolveAsync(sdk, record, sweep: null, cancellationToken);
+
+    /// <summary>
+    /// The batched form of <see cref="ResolveAsync(ISparkSdkClient,InvoiceRecord,CancellationToken)"/>: one
+    /// invoice resolved against a payment sweep already run for its page.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="sweep"/> is the only difference, and it only ever spends less: a record the index
+    /// names settles exactly as one a scan would have found, and a record it does not name is passed over
+    /// only when the sweep drained. A null sweep — every caller outside the store walk, and every batch the
+    /// sweep declined or failed to run — is the pre-batching path, unchanged.
+    /// </remarks>
+    internal async Task<InvoiceRecord> ResolveAsync(
+        ISparkSdkClient sdk,
+        InvoiceRecord record,
+        ReceiveSweep? sweep,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(record);
         // Paid is terminal. A cancelled invoice is still scanned: on Spark it remains payable, so a late
@@ -330,12 +358,155 @@ public class SparkSettlementReconciler
         if (record.Status is InvoiceRecordStatus.Paid)
             return record;
 
-        var payment = await FindReceiveAsync(sdk, record, cancellationToken).ConfigureAwait(false);
+        SparkPayment? payment;
+        if (record.SdkPaymentId is null && sweep is { } shared)
+        {
+            if (shared.Index.TryGetValue(record.PaymentHash, out var swept))
+            {
+                payment = swept;
+            }
+            else if (shared.Drained)
+            {
+                // The shared scan walked its window to the end without naming this hash — the same evidence
+                // a per-invoice scan stopping at a short page used to produce, bought with one query for the
+                // whole page instead of one per invoice. Absent Drained this would be the only way batching
+                // can lose a settlement, which is why Drained exists.
+                return record;
+            }
+            else
+            {
+                payment = await FindReceiveAsync(sdk, record, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            // A recorded id still needs its point lookup — the shared scan neither covers GetPayment nor is
+            // run for a page of such records — and a record without a sweep gets exactly the scan it always
+            // got.
+            payment = await FindReceiveAsync(sdk, record, cancellationToken).ConfigureAwait(false);
+        }
+
         if (payment is not { Status: SparkPaymentStatus.Completed, PaymentHash: not null })
             return record;
 
         var result = await ApplyAsync(record.StoreId, payment, cancellationToken).ConfigureAwait(false);
         return result.Record ?? record;
+    }
+
+    /// <summary>
+    /// The result of one shared history scan for a page of invoices: every completed receive it saw, keyed
+    /// by payment hash, and whether it reached the end of the window.
+    /// </summary>
+    /// <remarks>
+    /// <c>Drained</c> carries the whole epistemic weight. "Not in the index" means "not paid" only if the
+    /// scan drained its window; a run of full pages stopped by the cap proves only that more history was
+    /// there. Settling from <see cref="Index"/> is safe either way — the hash matched — but treating a miss
+    /// as absence is not, and that miss is the only thing a non-drained sweep could otherwise be used for.
+    /// </remarks>
+    internal sealed record ReceiveSweep(Dictionary<string, SparkPayment> Index, bool Drained);
+
+    /// <summary>
+    /// Scans the payment history once for a whole page of invoices, or returns null when there is nothing
+    /// for the scan to serve or the scan itself failed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Anchored to the oldest invoice on the page still needing a scan, so the shared window contains every
+    /// per-invoice window it replaces; the paging, the deadline and the cap are the ones
+    /// <see cref="FindReceiveAsync"/> would have paid per record, paid once instead.
+    /// </para>
+    /// <para>
+    /// A failure is a null, not a throw: the sweep is a cost optimisation layered over the old path, and
+    /// losing it must cost the pass its batching and not its invoices. A null sweep sends every record down
+    /// exactly the route it took before the sweep existed.
+    /// </para>
+    /// </remarks>
+    private async Task<ReceiveSweep?> BuildReceiveSweepAsync(
+        string storeId,
+        ISparkSdkClient sdk,
+        IReadOnlyList<InvoiceRecord> page,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            // Only a record with no id to look up by needs the scan; running one for a page where every
+            // record has an id would spend the shared query to serve nobody.
+            DateTimeOffset? anchor = null;
+            var awaiting = 0;
+            foreach (var record in page)
+            {
+                if (record.SdkPaymentId is not null)
+                    continue;
+                awaiting++;
+                if (anchor is null || record.CreatedAt < anchor)
+                    anchor = record.CreatedAt;
+            }
+
+            if (anchor is null)
+                return null;
+
+            var index = new Dictionary<string, SparkPayment>(StringComparer.Ordinal);
+            for (var pageIndex = 0; pageIndex < MaxPaymentPages; pageIndex++)
+            {
+                var payments = await SparkDeadline.OrNullAsync(
+                        sdk.ListPaymentsAsync(
+                            new SparkListPaymentsQuery(
+                                SparkPaymentDirection.Receive,
+                                CompletedOnly: true,
+                                // Anchored to the oldest invoice still waiting, so the shared window holds
+                                // every window the per-invoice scans would each have walked.
+                                From: anchor.Value - ReconciliationSlack,
+                                Offset: pageIndex * PaymentPageSize,
+                                Limit: PaymentPageSize),
+                            cancellationToken),
+                        Constants.SdkCallDeadline,
+                        () => _logger.LogWarning(
+                            "Store {StoreId}: the shared Spark payment scan for {Invoices} invoice(s) "
+                            + "exceeded {Seconds}s",
+                            storeId, awaiting, Constants.SdkCallDeadline.TotalSeconds),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                // Null means the deadline passed. Whatever this index holds, what it omits now proves
+                // nothing, so no invoice may be concluded unpaid from it.
+                if (payments is null)
+                    return new ReceiveSweep(index, Drained: false);
+
+                foreach (var payment in payments)
+                {
+                    // The same shape the per-invoice scan matched on: a hashless row or a send leg settles
+                    // nothing. First writer under a hash wins, because paging walks newest-first and that is
+                    // the row a per-invoice scan's FirstOrDefault would have returned.
+                    if (payment.PaymentHash is not { } hash
+                        || payment.Direction is not SparkPaymentDirection.Receive)
+                    {
+                        continue;
+                    }
+
+                    index.TryAdd(hash, payment);
+                }
+
+                // A short page is the end of the window, and the only thing that lets a miss in this index
+                // stand for "not paid".
+                if (payments.Count < PaymentPageSize)
+                    return new ReceiveSweep(index, Drained: true);
+            }
+
+            _logger.LogWarning(
+                "Store {StoreId}: the shared scan of Spark payments for {Invoices} invoice(s) hit the "
+                + "{Count}-payment cap without draining the window; anything it did not name falls back to "
+                + "its own scan. If this repeats, the wallet's history has outgrown the scan window",
+                storeId, awaiting, MaxPaymentPages * PaymentPageSize);
+            return new ReceiveSweep(index, Drained: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: the shared Spark payment scan failed ({Reason}); this pass reconciles "
+                + "invoice by invoice, as it did before the scan was shared",
+                storeId, SparkErrors.Describe(ex));
+            return null;
+        }
     }
 
     /// <summary>
@@ -490,6 +661,13 @@ public class SparkSettlementReconciler
             if (page.Count == 0)
                 break;
 
+            // One history scan for the whole page rather than one per unpaid invoice: this walk used to
+            // spend up to ten pages of SDK paging per record lacking an id, every minute, mostly to prove
+            // nobody had paid. A null sweep — nothing to share, or the sweep itself failed — leaves every
+            // record on the pre-batching path.
+            var sweep = await BuildReceiveSweepAsync(storeId, sdk, page, cancellationToken)
+                .ConfigureAwait(false);
+
             foreach (var record in page)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -499,7 +677,7 @@ public class SparkSettlementReconciler
 
                 try
                 {
-                    var resolved = await ResolveAsync(sdk, record, cancellationToken).ConfigureAwait(false);
+                    var resolved = await ResolveAsync(sdk, record, sweep, cancellationToken).ConfigureAwait(false);
                     if (resolved.Status is InvoiceRecordStatus.Paid)
                         settled++;
                 }

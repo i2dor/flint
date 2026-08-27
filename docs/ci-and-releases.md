@@ -25,6 +25,17 @@
   and `SHA256SUMS`) as a workflow artifact, and attaches it to the corresponding GitHub Release when
   triggered by a tag. On a tag it also refuses to build if the tag disagrees with the version in the
   csproj, so a `v0.2.0` tag on a 0.1.0 tree fails rather than producing a mislabelled release.
+  - **The linux native payload is stripped at packaging time** by
+    [`scripts/strip-native-payloads.sh`](../scripts/strip-native-payloads.sh): Breez ships its Rust
+    `.so` files with ~28 MB of DWARF debug info apiece — never-mapped data that nonetheless travels
+    inside every `.btcpay` — and stripping takes the packaged runtimes from ~196 MB to ~100 MB
+    uncompressed. The trade (symbolised native backtraces on linux, and hashes that no longer match
+    Breez's upstream byte-for-byte — hence the upstream sha256 each strip prints) is argued in the
+    script's header, which is also the local pre-release recipe: run `dotnet build -c Release`, run
+    the script against the output directory, then `PluginPacker` by hand. The step is idempotent and
+    fails the package loudly if an ELF cannot be stripped; the osx dylibs are stripped on macOS
+    hosts only (GNU strip cannot rewrite Mach-O) and the Windows DLLs are not touched at all,
+    because they carry no strippable debug data.
   - **Artifacts are signed with keyless Sigstore build provenance**
     (`actions/attest-build-provenance`), not a maintainer GPG key: there is no long-lived key for
     anyone to generate, store, lose or leak, and the attestation binds the artifact's digest to this
