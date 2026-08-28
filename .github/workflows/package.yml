@@ -208,7 +208,10 @@ jobs:
           set -euo pipefail
           cd "$ARTIFACT_DIR"
           sha256sum -c SHA256SUMS
-          listed="$(sed 's/  .*$//' SHA256SUMS | sort)"
+          # PluginPacker separates the digest from the file name with a single
+          # space (GNU sha256sum -c accepts it); strip the anchored hex digest
+          # rather than assuming the two-space text-mode format.
+          listed="$(sed 's/^[0-9a-f]\{64\}[[:space:]]\+//' SHA256SUMS | sort)"
           present="$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)"
           if [ "$listed" != "$present" ]; then
             echo "error: SHA256SUMS and the artifact directory disagree:" >&2

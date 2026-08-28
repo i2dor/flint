@@ -251,6 +251,7 @@ strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + expl
         printf 'no-op  %-12s %3s MB — already stripped\n' "$(basename "$(dirname "$(dirname "$f")")")" "$(mb "$before")"
         return 3
       fi
+      chmod "$before_mode" "$out"
       mv "$out" "$f"
       return 0
     fi
@@ -271,14 +272,17 @@ strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + expl
       mode="$(python3 /macho_sig.py flags "/src/$1")"
       case "$mode" in unsigned|adhoc) ;; *) echo "signature state: $mode" >&2; exit 3 ;; esac
       cp "/src/$1" /out/stripped.dylib
-      "$(ls /usr/bin/llvm-strip-* | sort -V | tail -n 1)" -x /out/stripped.dylib
       python3 /macho_sig.py verify /out/stripped.dylib
+      chmod --reference "/src/$1" /out/stripped.dylib
     ' macho "$(basename "$f")"; then
     if [ "$(fsize "$work/stripped.dylib")" = "$before" ]; then
       rm -rf "$work"
       printf 'no-op  %-12s %3s MB — already stripped\n' "$(basename "$(dirname "$(dirname "$f")")")" "$(mb "$before")"
       return 3
     fi
+    # The container wrote the file as root; it set the mode itself, but if the
+    # volume mapping ever changes under us, re-apply what the original had.
+    chmod "$before_mode" "$f" 2>/dev/null || true
     mv "$work/stripped.dylib" "$f"
     rm -rf "$work"
     return 0
@@ -329,6 +333,11 @@ total_before=0; total_after=0
 while read -r f; do
   plat="$(basename "$(dirname "$(dirname "$f")")")"
   before="$(fsize "$f")"
+  # The Mach-O paths replace the file via rename(2) from a mktemp copy (mode
+  # 0600, root-owned when the copy was made inside the container); without
+  # re-applying the original mode the stripped file is unreadable to whoever
+  # zips the directory next.
+  before_mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f")"
   total_before=$((total_before + before))
 
   case "$f" in
