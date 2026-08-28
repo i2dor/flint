@@ -34,6 +34,14 @@ public class SparkPluginDbContext : DbContext
             entity.HasIndex(record => new { record.StoreId, record.Status });
             // ListInvoices pages newest-first within a store.
             entity.HasIndex(record => new { record.StoreId, record.CreatedAt });
+            // The every-minute cross-store credit walk (ListStoreIdsAwaitingCreditAsync) and the
+            // per-store ListUncreditedAsync both filter on exactly this predicate. Without it the
+            // cross-store DISTINCT scans every InvoiceRecords row each pass; with it both queries are
+            // index-only over a partial index that holds roughly the unsettled tail of the table.
+            // Quoted identifiers: the columns are created mixed-case and Postgres would otherwise
+            // fold the filter's references to lowercase and fail to match.
+            entity.HasIndex(record => new { record.StoreId, record.SettledAt })
+                .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
         });
 
         modelBuilder.Entity<OutgoingPaymentRecord>(entity =>
