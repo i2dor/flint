@@ -86,7 +86,9 @@ jobs:
     # nothing could ever settle, and no in-memory test can catch it.
     services:
       postgres:
-        image: postgres:17-alpine
+        # Digest-pinned like every other image on a gate path: a retagged
+        # postgres:17-alpine must not be able to change what store-test runs on.
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
         env:
           POSTGRES_PASSWORD: sparktest
           POSTGRES_DB: sparktests
