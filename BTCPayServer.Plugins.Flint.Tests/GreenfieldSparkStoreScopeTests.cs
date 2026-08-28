@@ -231,6 +231,8 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData("stable-put")]
     [InlineData("sync")]
     [InlineData("sweep-record")]
+    [InlineData("send-payment")]
+    [InlineData("refund-invoice")]
     public async Task Every_endpoint_refuses_when_no_store_was_authorised_at_all(string endpoint)
     {
         // The other half of the guard: HttpContext carries no authorised store, which is what a future filter
@@ -261,6 +263,15 @@ public class GreenfieldSparkStoreScopeTests
                 SparkSurfaceHarness.AttackerStore, new StableBalanceInput(), CancellationToken.None),
             "sync" => await h.Api.SyncBalance(SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             "sweep-record" => await h.Api.GetSweepRecord(SparkSurfaceHarness.AttackerStore, "key", CancellationToken.None),
+            "send-payment" => await h.Api.SendPayment(
+                SparkSurfaceHarness.AttackerStore,
+                new SparkSendPaymentRequest { Destination = "lnbc1pvjluezpp5", AmountSats = 1000 },
+                CancellationToken.None),
+            "refund-invoice" => await h.Api.RefundInvoice(
+                SparkSurfaceHarness.AttackerStore,
+                "test-invoice-id",
+                new SparkRefundRequest { Destination = "lnbc1pvjluezpp5", AmountSats = 1000 },
+                CancellationToken.None),
             _ => await h.Api.Sweep(SparkSurfaceHarness.AttackerStore, null, CancellationToken.None)
         };
 
