@@ -33,6 +33,10 @@ jobs:
   check:
     name: Check for a newer Breez SDK release
     runs-on: ubuntu-latest
+    # Discovery only reads the csproj and talks to the NuGet/GitHub APIs: the
+    # write powers the bump job needs must not leak into the scheduled check.
+    permissions:
+      contents: read
     outputs:
       changed: ${{ steps.check.outputs.changed }}
       current: ${{ steps.check.outputs.current }}
@@ -42,7 +46,7 @@ jobs:
       # No submodule checkout needed: the discovery script only reads the csproj and queries the
       # GitHub and NuGet APIs, so this stays cheap enough to run unconditionally every week.
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run discovery script
         id: check
@@ -71,7 +75,7 @@ jobs:
       DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure git identity
         run: |

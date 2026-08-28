@@ -13,7 +13,26 @@
 # ~200 MB instead of ~100 MB. Measured on Breez.Sdk.Spark 0.23.0:
 #
 #   linux-x64   60 MB -> 21 MB     linux-arm64  59 MB -> 18 MB
-#   osx-x64     25 MB -> 16 MB     osx-arm64    24 MB -> 13 MB
+#   osx-x64     26 MB -> 16 MB     osx-arm64    25 MB -> 14 MB
+#
+# The osx payload is stripped on every host now: llvm-strip rewrites Mach-O
+# (the earlier "LLVM strip cannot rewrite Mach-O" note was wrong — only GNU
+# strip cannot). For these files that rewrite keeps the code signature valid,
+# verified on llvm 18.1.3 (the version inside the pinned container) and on a
+# current brew llvm: `codesign -v --strict` passes, the stripped arm64 dylib
+# dlopens on a real arm64 macOS, and every CodeDirectory page hash recomputes.
+# Because signature validity is an observed property of llvm-strip rather than
+# a contract, the Mach-O path never ships on trust:
+#   - Before stripping, the CodeDirectory flags are read (the script's own
+#     Python parser): files with no signature and ad-hoc/linker-signed files
+#     are stripped; anything else — a Developer ID or other real identity —
+#     is skipped with a warning, exactly as the macOS path has always done.
+#   - After stripping, every CodeDirectory page hash is recomputed against the
+#     file (the same check dyld performs at load). A stripped copy that fails
+#     is discarded and the original bytes kept: a fat artifact is a size
+#     regression, an invalid signature is a broken plugin.
+# On a macOS host the Apple toolchain is used instead, where `strip -x`
+# re-establishes the ad-hoc signature and `codesign -v` proves it.
 #
 # What stripping costs, stated plainly:
 #   - Native crash triage: Rust panic *messages* (with file:line) survive, they
@@ -27,19 +46,19 @@
 # What it deliberately does not touch:
 #   - Windows DLLs. Checked on 0.23.0: the PE debug directory is a CodeView
 #     pointer of tens of bytes on win-x64; the payload is all real code.
-#   - Mach-O on a non-macOS host: GNU/LLVM strip cannot rewrite Mach-O. Warn and
-#     skip rather than fail — CI packaging runs on linux and the osx payload is
-#     dev-only there; a mac host strips it for free.
 #   - A Mach-O carrying a real (non-ad-hoc, non-linker-signed) signature: strip
-#     would invalidate the signing identity. Today the dylibs are ad-hoc and
-#     macOS strip re-establishes an ad-hoc signature (verified with codesign -v
-#     after each strip); if Breez ever ships Developer ID-signed binaries,
-#     skipping them is the correct behaviour, not a size loss.
+#     would invalidate the signing identity. Today the dylibs are unsigned
+#     (x86_64) and ad-hoc linker-signed (arm64); if Breez ever ships Developer
+#     ID-signed binaries, skipping them is the correct behaviour.
+#   - Fat/universal or 32-bit Mach-O: not among Breez's payloads, and not
+#     worth a second code path — they are detected and skipped.
 #
 # Toolchain resolution per ELF file (first that can handle the file's arch):
 # llvm-strip (any ELF arch) -> <arch>-linux-gnu-strip -> host strip (probed) ->
-# docker (ubuntu:24.04 + cross binutils). Idempotent: an already-stripped file
-# is a no-op, so re-running after an incremental build is always safe.
+# docker (ubuntu:24.04 + cross binutils). Per Mach-O file on a non-macOS host:
+# llvm-strip (host, or versioned llvm-strip-NN) -> docker (pinned container:
+# llvm-18 + python3 strip and verify together). Idempotent: an already-stripped
+# file is a no-op, so re-running after an incremental build is always safe.
 #
 # Usage: scripts/strip-native-payloads.sh <target-dir>   (expects <target-dir>/runtimes/)
 
@@ -53,8 +72,8 @@ RUNTIMES="$TARGET_DIR/runtimes"
 # produces rewrites libraries that ship inside the attested artifact, so a
 # repointed ubuntu:24.04 would put unverified bytes on the release path while
 # the Sigstore attestation still vouched for the result. The apt-installed
-# binutils are themselves GPG-verified against the Ubuntu archive key by apt.
-# This digest is what `ubuntu:24.04` resolved to when the first stripped,
+# binutils/llvm are themselves GPG-verified against the Ubuntu archive key by
+# apt. This digest is what `ubuntu:24.04` resolved to when the first stripped,
 # server-verified artifacts were produced; refresh deliberately (and re-verify
 # the output) when the base image is next needed for anything new.
 DOCKER_IMAGE="ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
@@ -81,42 +100,108 @@ docker_strip() { # $1 = directory, $2 = file name — strips in place via bind m
   ' strip "$2"
 }
 
-strip_elf() { # $1 = path to .so
-  local f="$1" arch tool=""
-  arch="$(elf_arch "$f")"
-  [ "$arch" != unknown ] || { echo "error: $f has an unrecognised ELF machine id" >&2; return 1; }
+# ---------------------------------------------------------------------------
+# Mach-O signature inspection, shared by the guard and the verification.
+#
+# A thin little-endian 64-bit Mach-O only (Breez ships one dylib per RID).
+# Modes:
+#   flags  -> prints one of: unsigned (no LC_CODE_SIGNATURE), adhoc (ad-hoc or
+#             linker-signed CodeDirectory), signed (a real signing identity);
+#             dies on fat/32-bit/unrecognised files.
+#   verify -> exit 0 iff an ad-hoc CodeDirectory exists and every page hash
+#             recomputes against the file bytes — the check dyld performs at
+#             load time on arm64.
+# Code Signature blobs are BIG-endian (Apple's embedded signature
+# specification); only the Mach-O load commands themselves are LE.
+# ---------------------------------------------------------------------------
+MACHO_PY="$(mktemp "${TMPDIR:-/tmp}/flint-macho-sig.XXXXXX")"
+trap 'rm -f "$MACHO_PY"' EXIT
+cat > "$MACHO_PY" <<'PY'
+import hashlib, struct, sys
 
-  if command -v llvm-strip >/dev/null 2>&1; then
-    tool="llvm-strip"
-  elif command -v "${arch}-linux-gnu-strip" >/dev/null 2>&1; then
-    tool="${arch}-linux-gnu-strip"
-  elif command -v strip >/dev/null 2>&1; then
-    # Host GNU strip is single-arch on Debian/Ubuntu images and macOS has no ELF
-    # support at all; probe with a copy so a miss never touches the real file.
-    if cp "$f" "$f.probe" && strip -s "$f.probe" 2>/dev/null; then
-      tool="strip"
-    fi
-    rm -f "$f.probe"
-  fi
+def die(msg):
+    sys.stderr.write("error: " + msg + "\n")
+    sys.exit(2)
 
-  if [ -n "$tool" ]; then
-    "$tool" -s "$f"
-    return 0
-  fi
+with open(sys.argv[2], "rb") as fh:
+    data = fh.read()
+if len(data) < 32:
+    die("file too small to be a Mach-O")
+magic = struct.unpack_from("<I", data, 0)[0]
+if magic != 0xFEEDFACF:  # MH_MAGIC_64, little-endian
+    die("not a thin little-endian 64-bit Mach-O (fat/32-bit are skipped, not stripped)")
 
-  command -v docker >/dev/null 2>&1 || {
-    echo "error: no ELF stripper for $f (install llvm or binutils-${arch}-linux-gnu, or run with docker)" >&2
-    return 1
-  }
-  docker_strip "$(dirname "$f")" "$(basename "$f")"
-}
+ncmds = struct.unpack_from("<I", data, 16)[0]
+off = 32
+sig_off = None
+for _ in range(ncmds):
+    cmd, cmdsize = struct.unpack_from("<II", data, off)
+    if cmd == 0x1D:  # LC_CODE_SIGNATURE
+        sig_off = struct.unpack_from("<I", data, off + 8)[0]
+    off += cmdsize
 
-strip_macho() { # $1 = path to .dylib
+cd = None
+if sig_off is not None and sig_off + 12 <= len(data):
+    sb_magic, _sb_len, count = struct.unpack_from(">III", data, sig_off)
+    if sb_magic != 0xFADE0CC0:
+        die("code signature superblob has an unexpected magic")
+    for i in range(count):
+        blob_type, blob_off = struct.unpack_from(">II", data, sig_off + 12 + 8 * i)
+        if blob_type == 0:  # CSSLOT_CODEDIRECTORY
+            cd = sig_off + blob_off
+            # ld's linker-signed layout writes 0xfade0c02; codesign(1)-written
+            # CodeDirectories use 0xfade0cde. Both parse identically thereafter.
+            blob_magic = struct.unpack_from(">I", data, cd)[0]
+            if blob_magic not in (0xFADE0CDE, 0xFADE0C02):
+                die("CodeDirectory has an unexpected magic")
+            break
+    if cd is None:
+        die("code signature carries no CodeDirectory")
+
+mode = sys.argv[1]
+if mode == "flags":
+    if cd is None:
+        print("unsigned")
+    elif struct.unpack_from(">I", data, cd + 12)[0] & 0x2:  # CS_ADHOC
+        print("adhoc")
+    else:
+        print("signed")
+    sys.exit(0)
+
+# verify mode
+if cd is None:
+    # An unsigned payload has nothing to invalidate: after a strip the only
+    # requirement is that it is still a well-formed thin 64-bit Mach-O (we
+    # just parsed it), which x86_64 macOS loads as-is.
+    print("unsigned: no signature to invalidate, structure intact")
+    sys.exit(0)
+version = struct.unpack_from(">I", data, cd + 8)[0]
+if version < 0x20200:
+    die("CodeDirectory version too old to verify")
+flags = struct.unpack_from(">I", data, cd + 12)[0]
+if not flags & 0x2:
+    die("signature is not ad-hoc; refusing to vouch for it")
+(hash_offset, _ident, _n_special, n_code, code_limit,
+ hash_size, _hash_type, _platform, page_pow) = struct.unpack_from(">IIIIIBBBB", data, cd + 16)
+page = 1 << page_pow
+sha256 = hashlib.sha256
+for i in range(n_code):
+    start = i * page
+    end = min(start + page, code_limit)
+    if end > len(data) or start >= end:
+        die(f"code limit {code_limit} does not fit the file; signature cannot be valid")
+    slot = cd + hash_offset + i * hash_size
+    if slot + hash_size > len(data):
+        die("CodeDirectory hash slots run past end of file")
+    if sha256(data[start:end]).digest()[:hash_size] != data[slot:slot + hash_size]:
+        die(f"page hash mismatch in slot {i} (file bytes {start}..{end}); stripped copy is not loadable")
+print(f"verified: ad-hoc CodeDirectory, {n_code} page hashes match, page size {page}")
+PY
+
+macho_flags() { python3 "$MACHO_PY" flags "$1" || echo bad; }
+
+strip_macho_darwin() { # $1 = path to .dylib — Apple toolchain path
   local f="$1" sig
-  if [ "$(uname -s)" != "Darwin" ]; then
-    echo "warn: $f not stripped (Mach-O stripping needs a macOS host; linux CI ships the osx payload as-is)" >&2
-    return 2
-  fi
   # Safe to strip when unsigned (x86_64 payloads ship that way; x86_64 macOS
   # does not require signatures at load) or ad-hoc/linker-signed (strip
   # re-establishes an equivalent ad-hoc signature). A real signing identity
@@ -138,6 +223,105 @@ strip_macho() { # $1 = path to .dylib
   fi
   if printf '%s' "$sig" | grep -q 'adhoc\|linker-signed'; then codesign -v "$f"; fi   # verify the re-sign
   return 0
+}
+
+strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + explicit verification
+  local f="$1" mode tool out
+  mode="$(macho_flags "$f")"
+  case "$mode" in
+    unsigned|adhoc) ;;
+    *)
+      echo "warn: $f not stripped (Mach-O signature state: $mode; only unsigned and ad-hoc payloads are safe to rewrite)" >&2
+      return 2
+      ;;
+  esac
+
+  # Host llvm-strip first (package.yml's pinned container carries llvm-18; brew
+  # llvm exposes the unversioned name; Ubuntu only the versioned one). The
+  # fallback probe must not kill the script under pipefail when nothing matches.
+  tool="llvm-strip"
+  command -v llvm-strip >/dev/null 2>&1 || { tool="$(ls /usr/bin/llvm-strip-* 2>/dev/null | sort -V | tail -n 1)" || tool=""; }
+  if [ -n "$tool" ] && command -v python3 >/dev/null 2>&1; then
+    # Strip a copy, verify the copy, only then replace the original: a strip
+    # that invalidates the signature must degrade to "skipped", never ship.
+    out="$(mktemp "${TMPDIR:-/tmp}/flint-macho.XXXXXX")"
+    if cp "$f" "$out" && "$tool" -x "$out" 2>/dev/null && python3 "$MACHO_PY" verify "$out"; then
+      if [ "$(fsize "$out")" = "$before" ]; then
+        rm -f "$out"
+        printf 'no-op  %-12s %3s MB — already stripped\n' "$(basename "$(dirname "$(dirname "$f")")")" "$(mb "$before")"
+        return 3
+      fi
+      mv "$out" "$f"
+      return 0
+    fi
+    rm -f "$out"
+    echo "warn: $f stripped copy failed Mach-O signature verification; original kept" >&2
+    return 2
+  fi
+
+  command -v docker >/dev/null 2>&1 || {
+    echo "error: no Mach-O stripper for $f (install llvm, or run with docker)" >&2
+    return 1
+  }
+  local dir; dir="$(cd "$(dirname "$f")" && pwd)"
+  local work; work="$(mktemp -d "${TMPDIR:-/tmp}/flint-macho-work.XXXXXX")"
+  if docker run --rm -v "$dir:/src:ro" -v "$work:/out" -v "$MACHO_PY:/macho_sig.py:ro" "$DOCKER_IMAGE" bash -c '
+      set -e
+      apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends llvm-18 python3 >/dev/null
+      mode="$(python3 /macho_sig.py flags "/src/$1")"
+      case "$mode" in unsigned|adhoc) ;; *) echo "signature state: $mode" >&2; exit 3 ;; esac
+      cp "/src/$1" /out/stripped.dylib
+      "$(ls /usr/bin/llvm-strip-* | sort -V | tail -n 1)" -x /out/stripped.dylib
+      python3 /macho_sig.py verify /out/stripped.dylib
+    ' macho "$(basename "$f")"; then
+    if [ "$(fsize "$work/stripped.dylib")" = "$before" ]; then
+      rm -rf "$work"
+      printf 'no-op  %-12s %3s MB — already stripped\n' "$(basename "$(dirname "$(dirname "$f")")")" "$(mb "$before")"
+      return 3
+    fi
+    mv "$work/stripped.dylib" "$f"
+    rm -rf "$work"
+    return 0
+  fi
+  rm -rf "$work"
+  echo "warn: $f not stripped (container Mach-O strip declined or failed verification)" >&2
+  return 2
+}
+
+strip_elf() { # $1 = path to .so
+  local f="$1" arch tool=""
+  arch="$(elf_arch "$f")"
+  [ "$arch" != unknown ] || { echo "error: $f has an unrecognised ELF machine id" >&2; return 1; }
+
+  if command -v llvm-strip >/dev/null 2>&1; then
+    tool="llvm-strip"
+  elif tool="$(ls /usr/bin/llvm-strip-* 2>/dev/null | sort -V | tail -n 1)" && [ -n "$tool" ]; then
+    # llvm-strip handles every ELF arch; Ubuntu ships it versioned (llvm-strip-18)
+    :
+  elif command -v "${arch}-linux-gnu-strip" >/dev/null 2>&1; then
+    tool="${arch}-linux-gnu-strip"
+  elif command -v strip >/dev/null 2>&1; then
+    # Host GNU strip is single-arch on Debian/Ubuntu images and macOS has no ELF
+    # support at all; probe with a copy so a miss never touches the real file.
+    # The probe lives outside the TargetDir: a leaked probe file inside the
+    # build output would otherwise be zipped into the artifact by PluginPacker.
+    local probe; probe="$(mktemp "${TMPDIR:-/tmp}/flint-elf-probe.XXXXXX")"
+    if cp "$f" "$probe" && strip -s "$probe" 2>/dev/null; then
+      tool="strip"
+    fi
+    rm -f "$probe"
+  fi
+
+  if [ -n "$tool" ]; then
+    "$tool" -s "$f"
+    return 0
+  fi
+
+  command -v docker >/dev/null 2>&1 || {
+    echo "error: no ELF stripper for $f (install llvm or binutils-${arch}-linux-gnu, or run with docker)" >&2
+    return 1
+  }
+  docker_strip "$(dirname "$f")" "$(basename "$f")"
 }
 
 total_before=0; total_after=0
@@ -164,7 +348,11 @@ while read -r f; do
       ;;
     *.dylib)
       hash_before="$(sha "$f")"
-      rc=0; strip_macho "$f" || rc=$?
+      if [ "$(uname -s)" = "Darwin" ]; then
+        rc=0; strip_macho_darwin "$f" || rc=$?
+      else
+        rc=0; strip_macho_llvm "$f" || rc=$?
+      fi
       if [ "$rc" = 2 ] || [ "$rc" = 3 ]; then   # 2 = skipped (warn printed), 3 = no-op (printed)
         total_after=$((total_after + before))
         continue

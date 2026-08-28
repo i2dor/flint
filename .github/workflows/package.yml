@@ -87,18 +87,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
           fetch-depth: 1
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "10.0.x"
 
       - name: Cache NuGet packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
@@ -124,20 +124,32 @@ jobs:
           echo "path=$target_dir" >> "$GITHUB_OUTPUT"
 
 
-      # Strip the DWARF debug info and symbol tables Breez ships inside its linux .so files
-      # (and the fat symbol tables in the osx dylibs, though those ship as-is from a linux runner:
-      # GNU strip cannot rewrite Mach-O). ~100 MB of the 196 MB runtimes payload is never-mapped
-      # debug data; see the header of the script for the full trade, the measured numbers, and the
-      # toolchain fallbacks. Idempotent, and it fails the build loudly if an ELF cannot be stripped.
+      # Strip the DWARF debug info and symbol tables Breez ships inside its native payloads.
+      # ~100 MB of the 196 MB runtimes payload is never-mapped debug data. This runs inside the
+      # digest-pinned container rather than on the mutable runner image so the toolchain that
+      # rewrites the attested bytes is itself pinned (apt-GPG-verified llvm-18 inside an
+      # ubuntu:24.04 pinned by manifest digest — the same policy as the script's own docker
+      # fallback). The container strips all four ELF/Mach-O payloads: llvm-strip rewrites Mach-O
+      # and the script re-verifies every CodeDirectory page hash afterwards, discarding the result
+      # if any hash fails (verified end to end: the stripped arm64 dylib passes `codesign -v
+      # --strict` and dlopens on a real arm64 macOS). See the script header for the full trade,
+      # the measured numbers, and the toolchain fallbacks. Idempotent; fails the build loudly if
+      # an ELF cannot be stripped.
       - name: Strip debug info from native payloads
+        env:
+          TARGET_DIR: ${{ steps.build-dir.outputs.path }}
         run: |
           set -euo pipefail
-          # The runner is x86-64, so host strip covers linux-x64; the aarch64 cross-tool covers
-          # linux-arm64. Without it the script's docker fallback works too, but pays an apt-get
-          # per file inside a container.
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq binutils-aarch64-linux-gnu
-          ./scripts/strip-native-payloads.sh "${{ steps.build-dir.outputs.path }}"
+          docker run --rm \
+            -v "$PWD:$PWD" -w "$PWD" \
+            -e TARGET_DIR \
+            ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 \
+            bash -c '
+              set -euo pipefail
+              apt-get update -qq >/dev/null
+              apt-get install -y -qq --no-install-recommends llvm-18 python3 file >/dev/null
+              bash scripts/strip-native-payloads.sh "$TARGET_DIR"
+            '
 
       - name: Run PluginPacker
         env:
@@ -184,6 +196,26 @@ jobs:
             fi
           done
           echo "NOTICE and LICENSE are inside the artifact."
+
+      # SHA256SUMS is attested and its contents are what release consumers verify
+      # against, so it must list exactly the shipped files with the hashes they
+      # actually carry — a stale or superset sums file would ship a lie with a
+      # signature on it. PluginPacker writes it; this proves it.
+      - name: SHA256SUMS matches the artifacts it will be trusted for
+        env:
+          ARTIFACT_DIR: ${{ steps.artifact.outputs.dir }}
+        run: |
+          set -euo pipefail
+          cd "$ARTIFACT_DIR"
+          sha256sum -c SHA256SUMS
+          listed="$(sed 's/  .*$//' SHA256SUMS | sort)"
+          present="$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)"
+          if [ "$listed" != "$present" ]; then
+            echo "error: SHA256SUMS and the artifact directory disagree:" >&2
+            diff <(echo "$listed") <(echo "$present") >&2 || true
+            exit 1
+          fi
+          echo "SHA256SUMS covers exactly: $listed"
 
       # A tag is the one input to this workflow that nothing else validates. Note what is and is not
       # at stake: the plugin registry does *not* key anything off the tag -- it reads the version out
@@ -236,7 +268,7 @@ jobs:
       - name: Attest build provenance
         id: attest
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             ${{ steps.artifact.outputs.dir }}/*.btcpay
@@ -277,7 +309,7 @@ jobs:
           echo "Attestation: ${{ steps.attest.outputs.attestation-url }}"
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ env.PLUGIN_NAME }}
           path: |

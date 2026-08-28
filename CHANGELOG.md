@@ -5,6 +5,58 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.0.3] — 2026-08-28
+
+### Changed
+
+- **The osx native payload is now stripped from CI builds too, and the strip runs in a pinned
+  container.** The 1.0.2 strip covered the linux `.so` files; the osx dylibs shipped as-is from the
+  linux runner because "GNU/LLVM strip cannot rewrite Mach-O" — the LLVM half of that claim was
+  wrong. `llvm-strip` rewrites Mach-O fine, and for these payloads the rewrite preserves the code
+  signature: the stripped arm64 dylib passes `codesign -v --strict` and `dlopen`s on a real arm64
+  macOS, verified on both the runner's llvm-18 and a current brew llvm. Because that validity is an
+  observed property rather than a contract, the script now reads each dylib's CodeDirectory before
+  stripping (only unsigned and ad-hoc/linker-signed payloads are rewritten; a Developer ID-signed
+  one is skipped, as the macOS path already did) and re-verifies every page hash after stripping,
+  discarding the result if any hash fails — a fat artifact is a size regression, an invalid
+  signature is a broken plugin. Net effect: the packed `.btcpay` drops from ~51.7 MB to ~31 MB.
+  The strip step itself moved off the mutable runner image and into the digest-pinned
+  `ubuntu:24.04` container (apt-verified llvm-18), so the toolchain that rewrites the attested
+  bytes is pinned like everything else on the release path.
+- **The strip script no longer risks leaving probe or backup files inside the packaged artifact.**
+  The ELF probe (and the new Mach-O copies) are created outside the build output directory; a
+  leaked 60 MB probe file previously could have been zipped into the `.btcpay` by a crash at the
+  wrong moment.
+
+### Fixed
+
+- **`SSH.NET` is pinned to 2026.0.0**, clearing NU1903 (CVE-2026-48798, GHSA-q939-rpr3-3284, high:
+  `ScpClient` recursive download could write outside the target directory on a malicious server).
+  The pin forces the resolved dependency graph to the fixed version while `ExcludeAssets` keeps
+  SSH.NET and its BouncyCastle dependency out of the plugin's build output — the plugin never
+  calls SSH.NET, so nothing about the shipped artifact changes. Drop the pin once the pinned
+  btcpayserver submodule carries a fixed SSH.NET on its own.
+- **All GitHub Actions are pinned by commit SHA** (`checkout`, `setup-dotnet`, `cache`,
+  `upload-artifact`, `attest-build-provenance`) with Dependabot continuing to move the pins.
+  Mutable major tags on the workflow that mints the release attestation were the same class of
+  supply-chain risk the docker fallback image was already pinned against.
+- **The Postgres service image in CI is digest-pinned**, and **`SHA256SUMS` contents are verified
+  against the packed artifacts before attestation** — the sums file is what release consumers
+  trust, so CI now proves it lists exactly the shipped files with the hashes they carry.
+- **The weekly update workflows' discovery jobs run with read-only permissions** — the write
+  powers the bump jobs need no longer leak into the scheduled checks.
+- **`global.json` pins the .NET SDK** (`10.0.400`, `rollForward: latestFeature`) so local and CI
+  builds resolve the same compiler.
+
+### Performance
+
+- **`InvoiceRecords` gained a partial index for the credit sweep.** The every-minute cross-store
+  query behind `ListStoreIdsAwaitingCreditAsync` (Paid, uncredited, settled in the window,
+  `DISTINCT StoreId`) had no usable index and scanned the whole table each pass; the new partial
+  index on `(StoreId, SettledAt)` filtered to exactly that predicate makes both it and the
+  per-store `ListUncreditedAsync` index-only over roughly the unsettled tail of the table.
+
+
 ## [1.0.2] — 2026-08-27
 
 ### Changed
@@ -644,3 +696,4 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
 [1.0.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.0
 [1.0.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.1
 [1.0.2]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.2
+[1.0.3]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.3
