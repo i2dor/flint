@@ -149,3 +149,21 @@
   unknown outcome that blocks the store's sweeps for five minutes. Note also that the classification test
   runs in a `continue-on-error` CI job — an SDK wording change will show as a failed job in the run
   summary but will not turn CI red, so it has to be looked at rather than waited for.
+- **Outgoing payments are not rate-limited at the plugin level.** The `send-payment` and `refund`
+  endpoints are protected only by a BTCPay API key scoped to `CanModifyStoreSettings`. If that key
+  is compromised, an attacker can issue payment requests at whatever rate the Spark SDK and network
+  allow. Operators running high-value stores should treat the API key as a spend credential and store
+  it accordingly; key rotation or creation of a narrowly-scoped key (one store, no other permissions)
+  reduces the blast radius.
+- **Outgoing-payment idempotency is in-memory only.** Each call to `send-payment` or `refund` mints
+  a fresh UUID idempotency key. If the request times out and the caller retries, the SDK cannot
+  deduplicate the second attempt — the payment may be sent twice. For safety, wait for the first
+  request to either succeed or return a definitive error before retrying, and check payment history
+  before assuming a timed-out send did not go through.
+- **Lightning Address SSRF protection does not survive DNS rebinding.** The plugin resolves the
+  domain's IP addresses before making any HTTP request and refuses private/reserved ranges. A
+  sophisticated attacker who controls DNS can use a very short TTL (1 second) to serve a public IP
+  for the validation check and then switch to a private IP for the subsequent HTTP connection. In
+  practice this requires the attacker to control both a public domain and the DNS TTL, making it an
+  unlikely scenario for typical deployments. A complete fix would require a custom HTTP handler that
+  pins the IP address resolved during the SSRF check; that complexity is not warranted at this time.
