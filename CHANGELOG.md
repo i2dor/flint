@@ -40,6 +40,13 @@ All notable changes to this plugin are recorded here. The format follows
 - Locale-dependent number formatting in `SparkSweepEngineTests`: the test's expected strings now use
   `CultureInfo.InvariantCulture` so they match the engine's output on non-English machines.
 
+- HTTP redirects are now disabled on the Lightning Address HttpClient (`AllowAutoRedirect = false`).
+  Without this, a malicious LNURL server could issue a redirect to an internal URL and bypass the
+  SSRF host-validation check that guards the initial request.
+
+- The Lightning Address HttpClient now caps response bodies at 64 KB. A valid LNURL response is
+  always under 1 KB; the limit prevents a rogue server from streaming an unbounded payload.
+
 
 ## [1.0.2] — 2026-08-27
 

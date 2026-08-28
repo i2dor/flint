@@ -230,11 +230,19 @@ public class SparkPlugin : BaseBTCPayServerPlugin
 
         // Outgoing Lightning payments: BOLT11 and Lightning Address (LUD-16). Named HttpClient so socket
         // lifetime is managed by the factory and the User-Agent identifies the plugin to LNURL endpoints.
+        // AllowAutoRedirect=false: redirect targets are not validated by the SSRF checks that run on
+        // the initial URL; a malicious LNURL server could redirect to an internal address and bypass them.
         services.AddHttpClient(SparkSendPaymentService.HttpClientName, client =>
         {
             client.Timeout = TimeSpan.FromSeconds(10);
+            // 64 KB is several times larger than any valid LNURL response;
+            // a server that returns more is either broken or malicious.
+            client.MaxResponseContentBufferSize = 65_536;
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        }).ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.HttpClientHandler
+        {
+            AllowAutoRedirect = false
         });
         services.AddSingleton<SparkSendPaymentService>();
 
