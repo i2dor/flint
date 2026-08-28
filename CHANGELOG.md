@@ -22,6 +22,15 @@ All notable changes to this plugin are recorded here. The format follows
 - **Lightning Address support (LUD-16).** Both new endpoints resolve `user@domain.com` addresses
   via the standard LNURL-pay protocol before sending.
 
+- **SSRF protection for Lightning Address resolution.** The domain from a Lightning Address is
+  DNS-resolved before any HTTP request is made; addresses that resolve to loopback, private,
+  link-local, or carrier-grade NAT ranges are refused. The callback URL returned by the LNURL
+  server must use HTTPS and must be on the same host as the original domain - a malicious LNURL
+  server cannot redirect resolution to an internal endpoint. The `user` portion of the address is
+  URL-encoded before being interpolated into the well-known path. Multi-@ addresses are split at
+  the last `@` so `user@real.com@attacker` cannot disguise `attacker` as the host. A ceiling of
+  100,000 sat on `maxFeeSats` prevents a single API call from approving an unbounded routing fee.
+
 ### Fixed
 
 - `SparkSdkClient.CreateInvoice`: the `receiverIdentityPublicKey` parameter added in SDK 0.23.0 was
