@@ -1,7 +1,10 @@
 using System;
 using System.Globalization;
+using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -53,6 +56,15 @@ public sealed class SparkSendPaymentService(
         long? maxFeeSats,
         CancellationToken cancellationToken)
     {
+        if (maxFeeSats is < 0)
+            return SparkSendOutcome.Failure("invalid-fee",
+                "maxFeeSats must be zero or positive.");
+
+        if (maxFeeSats > MaxFeeCapSats)
+            return SparkSendOutcome.Failure("invalid-fee",
+                string.Format(CultureInfo.InvariantCulture,
+                    "maxFeeSats cannot exceed {0} sat.", MaxFeeCapSats));
+
         if (await settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
             return SparkSendOutcome.Failure("spark-not-configured",
                 "Flint is not set up for this store.");
@@ -163,33 +175,54 @@ public sealed class SparkSendPaymentService(
 
     private static bool IsLightningAddress(string destination)
     {
-        var at = destination.IndexOf('@', StringComparison.Ordinal);
+        // LastIndexOf: "user@real.com@attacker" should split at the last @, making the
+        // domain "attacker" (which then fails SSRF checks) rather than "real.com@attacker"
+        // which in RFC 3986 URL syntax would be treated as userinfo=real.com, host=attacker.
+        var at = destination.LastIndexOf('@');
         return at > 0 && at < destination.Length - 1 && !destination.Contains(' ', StringComparison.Ordinal);
     }
 
     private async Task<(string? Bolt11, string? Error)> ResolveLightningAddressAsync(
         string address, long amountSats, CancellationToken cancellationToken)
     {
-        var at = address.IndexOf('@', StringComparison.Ordinal);
+        var at = address.LastIndexOf('@');
         var user = address[..at];
         var domain = address[(at + 1)..];
+
+        var ssrfError = await CheckSsrfAsync(domain, cancellationToken).ConfigureAwait(false);
+        if (ssrfError is not null)
+            return (null, ssrfError);
 
         var http = httpClientFactory.CreateClient(HttpClientName);
 
         LnurlPayResponse? lnurl;
         try
         {
-            var wellKnown = $"https://{domain}/.well-known/lnurlp/{user}";
+            // Uri.EscapeDataString encodes path-special chars (/, ?, #) in the user portion so
+            // they cannot alter the URL structure or inject query parameters.
+            var wellKnown = $"https://{domain}/.well-known/lnurlp/{Uri.EscapeDataString(user)}";
             lnurl = await http.GetFromJsonAsync<LnurlPayResponse>(
                 wellKnown, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            return (null, $"Could not reach the Lightning Address server for {domain}: {ex.Message}");
+            return (null, $"Could not reach the Lightning Address server: {ex.Message}");
         }
 
         if (lnurl?.Callback is null)
-            return (null, $"The Lightning Address server for {address} returned an invalid response.");
+            return (null, "The Lightning Address server returned an invalid response.");
+
+        // Validate the callback URL before following it: must be HTTPS and must resolve
+        // to the same domain we already verified. A malicious LNURL server cannot redirect
+        // us to an internal endpoint by returning a different host in the callback field.
+        if (!Uri.TryCreate(lnurl.Callback, UriKind.Absolute, out var callbackUri)
+            || !string.Equals(callbackUri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+            return (null, "The Lightning Address server returned a callback URL that is not HTTPS.");
+
+        if (!string.Equals(callbackUri.Host, domain, StringComparison.OrdinalIgnoreCase))
+            return (null,
+                "The Lightning Address server returned a callback URL on a different host. " +
+                "Cross-host callbacks are not permitted.");
 
         var amountMsats = amountSats * 1000L;
         if (lnurl.MinSendable > 0 && amountMsats < lnurl.MinSendable)
@@ -204,9 +237,8 @@ public sealed class SparkSendPaymentService(
                 "Amount {0} sat exceeds the maximum of {1} sat for this Lightning Address.",
                 amountSats, lnurl.MaxSendable / 1000));
 
-        var callbackUrl = $"{lnurl.Callback.TrimEnd('?')}" +
-                          (lnurl.Callback.Contains('?', StringComparison.Ordinal) ? "&" : "?") +
-                          $"amount={amountMsats}";
+        var sep = lnurl.Callback.Contains('?', StringComparison.Ordinal) ? "&" : "?";
+        var callbackUrl = $"{lnurl.Callback.TrimEnd('?')}{sep}amount={amountMsats}";
 
         LnurlPayInvoiceResponse? invoiceResponse;
         try
@@ -216,17 +248,68 @@ public sealed class SparkSendPaymentService(
         }
         catch (Exception ex)
         {
-            return (null, $"Failed to fetch invoice from Lightning Address {address}: {ex.Message}");
+            return (null, $"Failed to fetch invoice from Lightning Address: {ex.Message}");
         }
 
         if (string.IsNullOrEmpty(invoiceResponse?.Pr))
-            return (null, $"The Lightning Address server for {address} did not return an invoice.");
+            return (null, "The Lightning Address server did not return an invoice.");
 
         return (invoiceResponse.Pr, null);
     }
 
+    // ----- SSRF protection -----
+
+    // Resolves the domain to its IP addresses and rejects any that fall in RFC 1918,
+    // loopback, or link-local ranges. This prevents Lightning Address destinations like
+    // user@127.0.0.1 or user@169.254.169.254 from probing internal services.
+    private static async Task<string?> CheckSsrfAsync(string host, CancellationToken ct)
+    {
+        IPAddress[] addresses;
+        try
+        {
+            addresses = await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // DNS failure: let the HTTP call fail naturally with a network error.
+            return null;
+        }
+
+        foreach (var ip in addresses)
+        {
+            if (IsPrivateOrReservedAddress(ip))
+                return "Lightning Address destinations must resolve to a public IP address.";
+        }
+
+        return null;
+    }
+
+    private static bool IsPrivateOrReservedAddress(IPAddress ip)
+    {
+        if (IPAddress.IsLoopback(ip)) return true;
+
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal;
+
+        var b = ip.GetAddressBytes();
+        return b[0] == 10                                         // 10.0.0.0/8
+            || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)         // 172.16.0.0/12
+            || (b[0] == 192 && b[1] == 168)                      // 192.168.0.0/16
+            || (b[0] == 169 && b[1] == 254)                      // 169.254.0.0/16 link-local
+            || b[0] == 127                                        // 127.0.0.0/8 (belt+suspenders)
+            || (b[0] == 100 && b[1] >= 64 && b[1] <= 127);       // 100.64.0.0/10 carrier-grade NAT
+    }
+
     /// <summary>Named HttpClient for Lightning Address resolution.</summary>
     public const string HttpClientName = "SparkSendPaymentService";
+
+    /// <summary>
+    /// Hard ceiling on caller-supplied <c>maxFeeSats</c>. Prevents a single call from
+    /// approving an arbitrarily large routing fee on a shared or multi-user store.
+    /// 100,000 sat (0.001 BTC) is already several times the realistic fee for any
+    /// Lightning payment; legitimate callers should never need more.
+    /// </summary>
+    public const long MaxFeeCapSats = 100_000L;
 
     private sealed class LnurlPayResponse
     {
