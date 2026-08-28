@@ -30,14 +30,12 @@ All notable changes to this plugin are recorded here. The format follows
 
 ### Fixed
 
-- **`SSH.NET` is pinned to 2026.0.0 in the plugin**, clearing NU1903 (CVE-2026-48798,
-  GHSA-q939-rpr3-3284, high: `ScpClient` recursive download could write outside the target
-  directory on a malicious server). The plugin never calls SSH.NET, but the vulnerable 2025.1.0
-  copy flowed in transitively from BTCPayServer and travelled inside the artifact; the pin drops
-  once the pinned btcpayserver submodule carries a fixed version itself.
-
-### Security
-
+- **`SSH.NET` is pinned to 2026.0.0**, clearing NU1903 (CVE-2026-48798, GHSA-q939-rpr3-3284, high:
+  `ScpClient` recursive download could write outside the target directory on a malicious server).
+  The pin forces the resolved dependency graph to the fixed version while `ExcludeAssets` keeps
+  SSH.NET and its BouncyCastle dependency out of the plugin's build output — the plugin never
+  calls SSH.NET, so nothing about the shipped artifact changes. Drop the pin once the pinned
+  btcpayserver submodule carries a fixed SSH.NET on its own.
 - **All GitHub Actions are pinned by commit SHA** (`checkout`, `setup-dotnet`, `cache`,
   `upload-artifact`, `attest-build-provenance`) with Dependabot continuing to move the pins.
   Mutable major tags on the workflow that mints the release attestation were the same class of
