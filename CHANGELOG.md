@@ -5,6 +5,33 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.1.0] — 2026-08-28
+
+### Added
+
+- **Outgoing Lightning payments from the Greenfield API.** `POST /api/v1/stores/{storeId}/spark/send-payment`
+  sends a Lightning payment directly from the store's Spark balance. Accepts a BOLT11 invoice or a
+  Lightning Address (`user@domain.com`). A configurable fee cap (default: 3% of the amount or 25 sat,
+  whichever is larger) protects against runaway routing costs; fees above the cap are refused rather
+  than silently paid.
+
+- **Refund endpoint.** `POST /api/v1/stores/{storeId}/spark/refund/{invoiceId}` sends a Lightning
+  refund associated with a BTCPay invoice. The invoice must belong to the calling store. The amount
+  and Lightning destination are provided by the caller.
+
+- **Lightning Address support (LUD-16).** Both new endpoints resolve `user@domain.com` addresses
+  via the standard LNURL-pay protocol before sending.
+
+### Fixed
+
+- `SparkSdkClient.CreateInvoice`: the `receiverIdentityPublicKey` parameter added in SDK 0.23.0 was
+  being passed positionally but the generated binding requires a named argument. Passing it explicitly
+  by name now.
+
+- Locale-dependent number formatting in `SparkSweepEngineTests`: the test's expected strings now use
+  `CultureInfo.InvariantCulture` so they match the engine's output on non-English machines.
+
+
 ## [1.0.2] — 2026-08-27
 
 ### Changed

@@ -508,6 +508,123 @@
                     }
                 ]
             }
+        },
+        "/api/v1/stores/{storeId}/spark/send-payment": {
+            "post": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Send a Lightning payment from the store's Spark wallet",
+                "description": "Sends an outgoing Lightning payment funded by the store's Spark balance. The destination can be a BOLT11 invoice or a Lightning Address (`user@domain.com`). A Lightning Address requires an explicit `amountSats`; so does an amountless BOLT11. When `amountSats` is also set on a BOLT11 that carries its own amount the BOLT11 amount is used and `amountSats` is ignored.\n\n**Fee cap.** When `maxFeeSats` is omitted a default cap of 3% of the payment amount or 25 sat, whichever is larger, applies. A fee quoted above the cap causes the payment to be refused rather than sent — the response is a 400 with code `fee-too-high`.\n\n**No persistence.** A crash during send leaves the outcome unknown until the SDK's own history is queried. The returned `paymentId` is the idempotency key minted for this call; it identifies the attempt in the SDK's history.\n\n**Idempotency.** Each call mints a fresh idempotency key. Do not retry on a network timeout without first checking the SDK's payment history: the send may have completed before the connection dropped.",
+                "operationId": "Spark_SendPayment",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SparkSendPaymentRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "The payment was sent successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SparkSendPaymentData"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "The payment could not be sent. The `code` field identifies the reason: `spark-not-configured` (Spark is not set up for this store), `spark-not-running` (the wallet is not live yet), `amount-required` (a Lightning Address or amountless BOLT11 was given without `amountSats`), `lightning-address-error` (the Lightning Address server could not be reached or returned an invalid response), `fee-too-high` (the quoted routing fee exceeds the cap), `insufficient-balance` (the wallet does not have enough funds), `invalid-invoice` (the BOLT11 is malformed or expired), `unknown` (a transient network or timeout error whose outcome is indeterminate)"
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to modify the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found or the request named a store it was not authorised for"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canmodifystoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/stores/{storeId}/spark/refund/{invoiceId}": {
+            "post": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Refund a BTCPay invoice via Lightning from the store's Spark wallet",
+                "description": "Sends a Lightning payment to the caller-supplied destination, funded by the store's Spark balance, and associates the send with a BTCPay invoice for audit purposes. The invoice must belong to this store. Ownership is verified before any funds move.\n\n**Amount.** `amountSats` is required. It names the amount to refund — which may differ from the original invoice amount for a partial refund.\n\n**Fee cap.** Same rules as `POST /spark/send-payment`: `maxFeeSats` defaults to 3% / 25 sat floor.\n\n**Destination.** The customer must supply a Lightning Address or BOLT11 to receive the refund. Flint has no record of the address the customer paid from.",
+                "operationId": "Spark_RefundInvoice",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    },
+                    {
+                        "name": "invoiceId",
+                        "in": "path",
+                        "required": true,
+                        "description": "The BTCPay invoice ID to associate the refund with",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SparkRefundRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "The refund was sent successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SparkSendPaymentData"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "The refund could not be sent. Same error codes as `POST /spark/send-payment`."
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to modify the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found, the request named a store it was not authorised for, or the invoice was not found (`invoice-not-found`)"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canmodifystoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            }
         }
     },
     "components": {
@@ -1542,6 +1659,89 @@
                     "BitcoinAddress",
                     "EvmAddress"
                 ]
+            },
+            "SparkSendPaymentRequest": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "destination": {
+                        "type": "string",
+                        "description": "The payment destination: a BOLT11 invoice or a Lightning Address (`user@domain.com`). Required."
+                    },
+                    "amountSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "nullable": true,
+                        "description": "Amount to pay in satoshi. Required for a Lightning Address and for an amountless BOLT11. Ignored when the BOLT11 carries its own amount."
+                    },
+                    "maxFeeSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "nullable": true,
+                        "description": "Maximum routing fee to accept, in satoshi. When omitted a default cap of 3% of the amount or 25 sat (whichever is larger) applies."
+                    }
+                }
+            },
+            "SparkSendPaymentData": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "paymentId": {
+                        "type": "string",
+                        "description": "The idempotency key that identified this send attempt in the SDK."
+                    },
+                    "bolt11": {
+                        "type": "string",
+                        "description": "The BOLT11 invoice that was paid. For a Lightning Address destination this is the invoice fetched from the address server."
+                    },
+                    "paymentHash": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "The Lightning payment hash, if the SDK returned one."
+                    },
+                    "amountSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "The amount paid, in satoshi."
+                    },
+                    "feeSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "The routing fee charged, in satoshi."
+                    },
+                    "totalDebitSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "The total debit from the wallet balance: `amountSats + feeSats`."
+                    },
+                    "paidAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the payment settled, as reported by the SDK."
+                    }
+                }
+            },
+            "SparkRefundRequest": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "destination": {
+                        "type": "string",
+                        "description": "Where to send the refund: a BOLT11 invoice or a Lightning Address (`user@domain.com`). Required."
+                    },
+                    "amountSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "nullable": true,
+                        "description": "Amount to refund in satoshi. Required."
+                    },
+                    "maxFeeSats": {
+                        "type": "integer",
+                        "format": "int64",
+                        "nullable": true,
+                        "description": "Maximum routing fee to accept, in satoshi. Defaults to 3% / 25 sat floor when omitted."
+                    }
+                }
             }
         }
     }

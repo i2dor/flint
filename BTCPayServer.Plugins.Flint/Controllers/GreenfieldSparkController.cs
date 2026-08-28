@@ -11,6 +11,7 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
+using BTCPayServer.Services.Invoices;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Http;
@@ -85,6 +86,8 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkSweepEngine _sweepEngine;
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
+    private readonly SparkSendPaymentService _sendPayment;
+    private readonly InvoiceRepository _invoiceRepository;
     private readonly ILogger<GreenfieldSparkController> _logger;
 
     public GreenfieldSparkController(
@@ -96,6 +99,8 @@ public class GreenfieldSparkController : ControllerBase
         SparkSweepEngine sweepEngine,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
+        SparkSendPaymentService sendPayment,
+        InvoiceRepository invoiceRepository,
         ILogger<GreenfieldSparkController> logger)
     {
         _settingsStore = settingsStore;
@@ -106,6 +111,8 @@ public class GreenfieldSparkController : ControllerBase
         _sweepEngine = sweepEngine;
         _deposits = deposits;
         _stableBalance = stableBalance;
+        _sendPayment = sendPayment;
+        _invoiceRepository = invoiceRepository;
         _logger = logger;
     }
 
@@ -602,6 +609,77 @@ public class GreenfieldSparkController : ControllerBase
 
         var view = await _stableBalance.ReadAsync(store.Id, cancellationToken).ConfigureAwait(false);
         return Ok(SparkStableBalanceData.From(view, result.Message));
+    }
+
+    #endregion
+
+    #region Send Payment
+
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPost("~/api/v1/stores/{storeId}/spark/send-payment")]
+    public async Task<IActionResult> SendPayment(
+        [FromRoute] string storeId,
+        [FromBody] SparkSendPaymentRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        if (string.IsNullOrWhiteSpace(request?.Destination))
+        {
+            ModelState.AddModelError(JsonName(nameof(SparkSendPaymentRequest.Destination)),
+                "destination is required.");
+            return this.CreateValidationError(ModelState);
+        }
+
+        var outcome = await _sendPayment.SendAsync(
+            store.Id, request.Destination, request.AmountSats, request.MaxFeeSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!outcome.Succeeded)
+            return this.CreateAPIError(400, outcome.ErrorCode!, outcome.ErrorMessage!);
+
+        return Ok(SparkSendPaymentData.From(outcome.Payment!));
+    }
+
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPost("~/api/v1/stores/{storeId}/spark/refund/{invoiceId}")]
+    public async Task<IActionResult> RefundInvoice(
+        [FromRoute] string storeId,
+        [FromRoute] string invoiceId,
+        [FromBody] SparkRefundRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        if (string.IsNullOrWhiteSpace(request?.Destination))
+        {
+            ModelState.AddModelError(JsonName(nameof(SparkRefundRequest.Destination)),
+                "destination is required.");
+            return this.CreateValidationError(ModelState);
+        }
+
+        if (request.AmountSats is null or <= 0)
+        {
+            ModelState.AddModelError(JsonName(nameof(SparkRefundRequest.AmountSats)),
+                "amountSats is required and must be positive.");
+            return this.CreateValidationError(ModelState);
+        }
+
+        var invoice = await _invoiceRepository.GetInvoice(invoiceId).ConfigureAwait(false);
+        if (invoice is null || invoice.StoreId != store.Id)
+            return this.CreateAPIError(404, "invoice-not-found",
+                "The invoice was not found or does not belong to this store.");
+
+        var outcome = await _sendPayment.SendAsync(
+            store.Id, request.Destination, request.AmountSats, request.MaxFeeSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!outcome.Succeeded)
+            return this.CreateAPIError(400, outcome.ErrorCode!, outcome.ErrorMessage!);
+
+        return Ok(SparkSendPaymentData.From(outcome.Payment!));
     }
 
     #endregion

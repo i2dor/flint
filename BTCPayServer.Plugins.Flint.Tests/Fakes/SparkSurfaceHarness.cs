@@ -268,10 +268,18 @@ public sealed class SparkSurfaceHarness
             depositService, stableBalanceService, crossChainCatalog,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
+        var sendPaymentService = new SparkSendPaymentService(
+            runtime, settings,
+            new StubHttpClientFactory(StubHttpMessageHandler.Offline()),
+            NullLogger<SparkSendPaymentService>.Instance);
+
         var api = new GreenfieldSparkController(
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
             depositService, stableBalanceService,
+            sendPaymentService,
+            // InvoiceRepository requires a real DB; no existing harness test exercises the refund endpoint.
+            null!,
             NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };

@@ -884,3 +884,103 @@ public sealed record SparkCrossChainQuoteData(
         quote.ExpiresAt,
         quote.ProviderQuoteId);
 }
+
+#region Send payment
+
+/// <summary>
+/// Request body for <c>POST /api/v1/stores/{storeId}/spark/send-payment</c>.
+/// </summary>
+public class SparkSendPaymentRequest
+{
+    /// <summary>
+    /// The BOLT11 invoice to pay, or a Lightning Address in <c>user@domain.com</c> form.
+    /// </summary>
+    public string? Destination { get; set; }
+
+    /// <summary>
+    /// Amount in satoshi.
+    /// </summary>
+    /// <remarks>
+    /// Required for a Lightning Address destination and for a BOLT11 that has no embedded amount.
+    /// Silently ignored when the BOLT11 already carries an amount.
+    /// </remarks>
+    public long? AmountSats { get; set; }
+
+    /// <summary>
+    /// Routing fee ceiling in satoshi.
+    /// </summary>
+    /// <remarks>
+    /// When omitted, the default cap (<see cref="Constants.DefaultMaxFeePercent"/> % of the
+    /// payment amount or <see cref="Constants.DefaultMaxFeeFloorSats"/> sat, whichever is larger)
+    /// applies. The payment is refused when the Spark-quoted fee exceeds the cap.
+    /// </remarks>
+    public long? MaxFeeSats { get; set; }
+}
+
+/// <summary>
+/// Response to a successful <c>POST /api/v1/stores/{storeId}/spark/send-payment</c>.
+/// </summary>
+public class SparkSendPaymentData
+{
+    /// <summary>
+    /// UUID minted by this service call and used as the SDK idempotency key.
+    /// Present in any 200 response regardless of whether the payment landed.
+    /// </summary>
+    public string PaymentId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The BOLT11 invoice that was paid. For a Lightning Address destination this is the invoice
+    /// obtained from the address server, not the address itself.
+    /// </summary>
+    public string Bolt11 { get; set; } = string.Empty;
+
+    /// <summary>Payment hash, if reported by the SDK.</summary>
+    public string? PaymentHash { get; set; }
+
+    /// <summary>Amount the destination received, in satoshi.</summary>
+    public long AmountSats { get; set; }
+
+    /// <summary>Routing fee charged, in satoshi.</summary>
+    public long FeeSats { get; set; }
+
+    /// <summary>Total debited from the Spark wallet: <c>amountSats + feeSats</c>.</summary>
+    public long TotalDebitSats { get; set; }
+
+    /// <summary>When the payment settled.</summary>
+    public DateTimeOffset PaidAt { get; set; }
+
+    public static SparkSendPaymentData From(SparkSendPaymentResult r) => new()
+    {
+        PaymentId = r.PaymentId,
+        Bolt11 = r.Bolt11,
+        PaymentHash = r.PaymentHash,
+        AmountSats = r.AmountSats,
+        FeeSats = r.FeeSats,
+        TotalDebitSats = r.AmountSats + r.FeeSats,
+        PaidAt = r.PaidAt
+    };
+}
+
+/// <summary>
+/// Request body for <c>POST /api/v1/stores/{storeId}/spark/refund/{invoiceId}</c>.
+/// </summary>
+public class SparkRefundRequest
+{
+    /// <summary>
+    /// Where to send the refund: a BOLT11 invoice or a Lightning Address.
+    /// </summary>
+    public string? Destination { get; set; }
+
+    /// <summary>
+    /// Amount to refund in satoshi. When omitted the full invoice amount is used.
+    /// </summary>
+    public long? AmountSats { get; set; }
+
+    /// <summary>
+    /// Routing fee ceiling in satoshi. When omitted the default cap applies.
+    /// See <see cref="SparkSendPaymentRequest.MaxFeeSats"/>.
+    /// </summary>
+    public long? MaxFeeSats { get; set; }
+}
+
+#endregion
