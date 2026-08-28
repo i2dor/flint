@@ -110,6 +110,16 @@
       win-x64/x86. There is no linux-musl (Alpine) or win-arm64 payload.
     -->
     <PackageReference Include="Breez.Sdk.Spark" Version="0.23.0" />
+    <!--
+      Transitive-vulnerability pin: SSH.NET 2025.1.0 flows in from BTCPayServer.csproj and lands in
+      this plugin's build output via CopyLocalLockFileAssemblies, and 2025.1.0 is the last version
+      affected by CVE-2026-48798 (GHSA-q939-rpr3-3284, high: ScpClient recursive download writes
+      outside the target directory on a malicious server; fixed in 2026.0.0). This plugin never
+      calls SSH.NET itself, but it would redistribute the vulnerable copy; NuGet resolves the
+      direct reference to the higher version, so this ships 2026.0.0. Drop it once the pinned
+      btcpayserver submodule carries a fixed SSH.NET on its own.
+    -->
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <!--
