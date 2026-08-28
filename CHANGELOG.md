@@ -40,6 +40,11 @@ All notable changes to this plugin are recorded here. The format follows
 - Locale-dependent number formatting in `SparkSweepEngineTests`: the test's expected strings now use
   `CultureInfo.InvariantCulture` so they match the engine's output on non-English machines.
 
+- The BOLT11 invoice returned by a Lightning Address server is now parsed and its embedded amount
+  verified against the requested `amountSats` before the payment is sent. A rogue LNURL server
+  that returns an invoice for a higher amount is refused rather than paid. Applies to both
+  `send-payment` and `refund` when a Lightning Address destination is used.
+
 - HTTP redirects are now disabled on the Lightning Address HttpClient (`AllowAutoRedirect = false`).
   Without this, a malicious LNURL server could issue a redirect to an internal URL and bypass the
   SSRF host-validation check that guards the initial request.
