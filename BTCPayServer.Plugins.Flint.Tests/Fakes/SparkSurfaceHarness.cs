@@ -271,6 +271,7 @@ public sealed class SparkSurfaceHarness
         var sendPaymentService = new SparkSendPaymentService(
             runtime, settings,
             new StubHttpClientFactory(StubHttpMessageHandler.Offline()),
+            new StubBolt11Parser(),
             NullLogger<SparkSendPaymentService>.Instance);
 
         var api = new GreenfieldSparkController(

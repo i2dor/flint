@@ -31,6 +31,7 @@ public sealed class SparkSendPaymentService(
     ISparkStoreRuntime runtime,
     ISparkStoreSettingsStore settingsStore,
     IHttpClientFactory httpClientFactory,
+    IBolt11Parser bolt11Parser,
     ILogger<SparkSendPaymentService> logger)
 {
     /// <summary>
@@ -253,6 +254,24 @@ public sealed class SparkSendPaymentService(
 
         if (string.IsNullOrEmpty(invoiceResponse?.Pr))
             return (null, "The Lightning Address server did not return an invoice.");
+
+        // Verify the returned BOLT11 encodes the exact amount we requested.
+        // A rogue LNURL server could embed a larger amount; we would otherwise pay it
+        // because the SDK uses the invoice's embedded amount for fixed-amount invoices.
+        var info = bolt11Parser.Parse(invoiceResponse.Pr);
+        if (info is null)
+            return (null, "The Lightning Address server returned an invoice that could not be parsed.");
+
+        var expectedMsat = amountSats * 1000L;
+        if (info.AmountMsat is null)
+            return (null, "The Lightning Address server returned an amountless invoice. A fixed amount is required.");
+
+        if (info.AmountMsat.Value != expectedMsat)
+            return (null, string.Format(
+                CultureInfo.InvariantCulture,
+                "The Lightning Address server returned an invoice for {0} msat but {1} msat ({2} sat) was requested. " +
+                "The payment was refused to prevent overpayment.",
+                info.AmountMsat.Value, expectedMsat, amountSats));
 
         return (invoiceResponse.Pr, null);
     }
