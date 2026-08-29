@@ -30,6 +30,9 @@ public static class SparkNavPages
     /// <summary>Stable Balance settings. Rendered only where Stable Balance can work — mainnet.</summary>
     public const string StableBalance = "SparkStableBalance";
 
+    /// <summary>Send a Lightning payment from the store's Spark wallet.</summary>
+    public const string Send = "SparkSend";
+
     /// <summary>
     /// Wallet details, recovery-phrase provenance and the settings most stores never touch. The deposits and
     /// removal pages borrow this entry: both are reached from the Advanced page rather than from the nav.

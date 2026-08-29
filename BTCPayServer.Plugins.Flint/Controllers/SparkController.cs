@@ -79,6 +79,7 @@ public class SparkController : Controller
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly CrossChainCatalog _crossChainCatalog;
+    private readonly SparkSendPaymentService _sendPayment;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
 
@@ -93,6 +94,7 @@ public class SparkController : Controller
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
         CrossChainCatalog crossChainCatalog,
+        SparkSendPaymentService sendPayment,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
     {
@@ -106,6 +108,7 @@ public class SparkController : Controller
         _deposits = deposits;
         _stableBalance = stableBalance;
         _crossChainCatalog = crossChainCatalog;
+        _sendPayment = sendPayment;
         _authorizationService = authorizationService;
         _logger = logger;
     }
@@ -940,6 +943,73 @@ public class SparkController : Controller
     /// <summary>
     /// Confirmation page for removing the store's Spark wallet.
     /// </summary>
+    #region Send Payment
+
+    [HttpGet("send")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Send([FromRoute] string storeId)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        return View(new SparkSendViewModel { StoreId = storeId });
+    }
+
+    [HttpPost("send")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Send(
+        [FromRoute] string storeId,
+        SparkSendViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+        vm.StoreId = storeId;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(vm.Destination))
+        {
+            ModelState.AddModelError(nameof(vm.Destination), "Destination is required.");
+            return View(vm);
+        }
+
+        var outcome = await _sendPayment.SendAsync(
+            storeId, vm.Destination.Trim(), vm.AmountSats, vm.MaxFeeSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!outcome.Succeeded)
+        {
+            ModelState.AddModelError(string.Empty, outcome.ErrorMessage ?? outcome.ErrorCode ?? "Payment failed.");
+            return View(vm);
+        }
+
+        var p = outcome.Payment!;
+        vm.Result = new SparkSendResult
+        {
+            PaymentId  = p.PaymentId,
+            PaymentHash = p.PaymentHash,
+            AmountSats = p.AmountSats,
+            FeeSats    = p.FeeSats,
+            PaidAt     = p.PaidAt
+        };
+        // Clear form fields so the result panel is the focus and a page reload shows a fresh form.
+        vm.Destination = null;
+        vm.AmountSats  = null;
+        vm.MaxFeeSats  = null;
+        return View(vm);
+    }
+
+    #endregion
+
     [HttpGet("remove")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> Remove([FromRoute] string storeId, CancellationToken cancellationToken)
