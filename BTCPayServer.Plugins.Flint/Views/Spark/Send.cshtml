@@ -90,8 +90,15 @@
                         <td>@p.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) UTC</td>
                         <td class="text-end font-monospace">@p.AmountSats.ToString("N0", CultureInfo.InvariantCulture)</td>
                         <td class="text-end font-monospace">@p.FeeSats.ToString("N0", CultureInfo.InvariantCulture)</td>
-                        <td class="font-monospace text-truncate" style="max-width:200px" title="@p.PaymentHash">
-                            @(p.PaymentHash is { } h ? h[..Math.Min(12, h.Length)] + "..." : "-")
+                        <td>
+                            @if (p.PaymentHash is { } h)
+                            {
+                                <vc:truncate-center text="@h" classes="truncate-center-id" />
+                            }
+                            else
+                            {
+                                <span>-</span>
+                            }
                         </td>
                     </tr>
                 }
