@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net;
@@ -136,6 +137,22 @@ public sealed class SparkSendPaymentService(
 
             return SparkSendOutcome.Failure("unknown", description);
         }
+    }
+
+    public async Task<IReadOnlyList<SparkPayment>> ListSentAsync(
+        string storeId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var sdk = await runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
+        if (sdk is null)
+            return [];
+        return await sdk.ListPaymentsAsync(
+            new SparkListPaymentsQuery(
+                Direction: SparkPaymentDirection.Send,
+                CompletedOnly: true,
+                Limit: limit),
+            cancellationToken).ConfigureAwait(false);
     }
 
     // ----- fee approval -----

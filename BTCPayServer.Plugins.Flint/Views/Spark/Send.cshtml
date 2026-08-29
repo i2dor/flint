@@ -1,5 +1,6 @@
 @model SparkSendViewModel
 @using System.Globalization
+@using BTCPayServer.Plugins.Flint.Sdk
 @{
     ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Send, "Send payment").SetCategory(SparkNavCategory.Id));
 
@@ -68,3 +69,33 @@
 
     </div>
 </div>
+
+@if (Model.History.Count > 0)
+{
+    <h3 class="mt-5 mb-3">Payment history</h3>
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th>When</th>
+                    <th class="text-end">Amount (sat)</th>
+                    <th class="text-end">Fee (sat)</th>
+                    <th>Payment hash</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var p in Model.History)
+                {
+                    <tr>
+                        <td>@p.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) UTC</td>
+                        <td class="text-end font-monospace">@p.AmountSats.ToString("N0", CultureInfo.InvariantCulture)</td>
+                        <td class="text-end font-monospace">@p.FeeSats.ToString("N0", CultureInfo.InvariantCulture)</td>
+                        <td class="font-monospace text-truncate" style="max-width:200px" title="@p.PaymentHash">
+                            @(p.PaymentHash is { } h ? h[..Math.Min(12, h.Length)] + "..." : "-")
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
