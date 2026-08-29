@@ -220,10 +220,27 @@ public sealed class SparkSendPaymentService(
             || !string.Equals(callbackUri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
             return (null, "The Lightning Address server returned a callback URL that is not HTTPS.");
 
-        if (!string.Equals(callbackUri.Host, domain, StringComparison.OrdinalIgnoreCase))
+        // Allow the callback on the same host or a subdomain/parent of the metadata host.
+        // Providers like Blink serve the well-known from blink.sv but route callbacks through
+        // api.blink.sv. Completely unrelated domains are still blocked.
+        var callbackHost = callbackUri.Host;
+        var sameOrRelated =
+            string.Equals(callbackHost, domain, StringComparison.OrdinalIgnoreCase)
+            || callbackHost.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)
+            || domain.EndsWith("." + callbackHost, StringComparison.OrdinalIgnoreCase);
+        if (!sameOrRelated)
             return (null,
-                "The Lightning Address server returned a callback URL on a different host. " +
-                "Cross-host callbacks are not permitted.");
+                "The Lightning Address server returned a callback URL on an unrelated host. " +
+                "Callbacks must be on the same domain or a subdomain of the Lightning Address domain.");
+
+        // SSRF-check the callback host independently - the metadata host passed but the callback
+        // might resolve to a private address on a different subdomain.
+        if (!string.Equals(callbackHost, domain, StringComparison.OrdinalIgnoreCase))
+        {
+            var callbackSsrfError = await CheckSsrfAsync(callbackHost, cancellationToken).ConfigureAwait(false);
+            if (callbackSsrfError is not null)
+                return (null, callbackSsrfError);
+        }
 
         var amountMsats = amountSats * 1000L;
         if (lnurl.MinSendable > 0 && amountMsats < lnurl.MinSendable)

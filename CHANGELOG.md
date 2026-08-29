@@ -25,8 +25,11 @@ All notable changes to this plugin are recorded here. The format follows
 - **SSRF protection for Lightning Address resolution.** The domain from a Lightning Address is
   DNS-resolved before any HTTP request is made; addresses that resolve to loopback, private,
   link-local, or carrier-grade NAT ranges are refused. The callback URL returned by the LNURL
-  server must use HTTPS and must be on the same host as the original domain - a malicious LNURL
-  server cannot redirect resolution to an internal endpoint. The `user` portion of the address is
+  server must use HTTPS and must be on the same domain or a subdomain of the original domain
+  (e.g. `api.blink.sv` is accepted for a `blink.sv` Lightning Address). The callback host is
+  independently DNS-checked for private addresses, so a different subdomain that resolves to an
+  internal IP is also refused. A malicious LNURL server cannot redirect resolution to a completely
+  unrelated host or to an internal endpoint. The `user` portion of the address is
   URL-encoded before being interpolated into the well-known path. Multi-@ addresses are split at
   the last `@` so `user@real.com@attacker` cannot disguise `attacker` as the host. A ceiling of
   100,000 sat on `maxFeeSats` prevents a single API call from approving an unbounded routing fee.
