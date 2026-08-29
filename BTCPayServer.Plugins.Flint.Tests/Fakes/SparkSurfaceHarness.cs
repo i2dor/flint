@@ -263,16 +263,17 @@ public sealed class SparkSurfaceHarness
             TimeProvider.System,
             NullLogger<CrossChainCatalog>.Instance);
 
-        var mvc = new SparkController(
-            settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
-            depositService, stableBalanceService, crossChainCatalog,
-            new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
-
         var sendPaymentService = new SparkSendPaymentService(
             runtime, settings,
             new StubHttpClientFactory(StubHttpMessageHandler.Offline()),
             new StubBolt11Parser(),
             NullLogger<SparkSendPaymentService>.Instance);
+
+        var mvc = new SparkController(
+            settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
+            depositService, stableBalanceService, crossChainCatalog,
+            sendPaymentService,
+            new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(
             settings,
