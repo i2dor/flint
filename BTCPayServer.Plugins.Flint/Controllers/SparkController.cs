@@ -947,7 +947,7 @@ public class SparkController : Controller
 
     [HttpGet("send")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
-    public async Task<IActionResult> Send([FromRoute] string storeId)
+    public async Task<IActionResult> Send([FromRoute] string storeId, CancellationToken cancellationToken)
     {
         if (!ResolveStore(storeId, out var store))
             return NotFound();
@@ -957,7 +957,8 @@ public class SparkController : Controller
         if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
-        return View(new SparkSendViewModel { StoreId = storeId });
+        var history = await _sendPayment.ListSentAsync(storeId, 25, cancellationToken).ConfigureAwait(false);
+        return View(new SparkSendViewModel { StoreId = storeId, History = history });
     }
 
     [HttpPost("send")]
@@ -1005,6 +1006,7 @@ public class SparkController : Controller
         vm.Destination = null;
         vm.AmountSats  = null;
         vm.MaxFeeSats  = null;
+        vm.History = await _sendPayment.ListSentAsync(storeId, 25, cancellationToken).ConfigureAwait(false);
         return View(vm);
     }
 
