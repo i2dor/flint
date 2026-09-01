@@ -1,3 +1,4 @@
+using BTCPayServer.Data;
 using BTCPayServer.Plugins.Flint.Services;
 
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
@@ -45,8 +46,22 @@ public sealed class FakeStoreLightningConfigStore : IStoreLightningConfigStore
         return this;
     }
 
-    public Task<StoreLightningConfig?> GetAsync(string storeId, CancellationToken cancellationToken = default) =>
-        Task.FromResult(Stores.TryGetValue(storeId, out var config) ? config : null);
+    /// <summary>How many reads went through the store-id lookup — a sweep classifying from loaded rows
+    /// must not use it per store.</summary>
+    public int IdReads { get; private set; }
+
+    public Task<StoreLightningConfig?> GetAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        IdReads++;
+        return Task.FromResult(Stores.TryGetValue(storeId, out var config) ? config : null);
+    }
+
+    public StoreLightningConfig Read(StoreData store) =>
+        // A row that exists but holds no entry here stands for a row with no BTC-LN configuration —
+        // the same answer the real Read gives when the payment-method config is absent.
+        Stores.TryGetValue(store.Id, out var config)
+            ? config
+            : new StoreLightningConfig(false, null, false);
 
     /// <summary>Thrown by the next <see cref="SetAsync"/> — a store repository whose write failed.</summary>
     public Exception? FailNextSetWith { get; set; }

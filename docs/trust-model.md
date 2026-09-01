@@ -30,9 +30,10 @@ Setup writes a `type=flint;store-id=…;key=…` string into the store's Lightni
 embedded store id binds the key to a wallet, and the plugin refuses to save the string on any *other*
 store: `SparkLightningClient.Validate` runs inside every save request — the store's own Lightning settings
 page and the Greenfield PUT alike — where core has placed the store being configured, and rejects a string
-naming a different store. A cross-store configuration that predates or bypasses that check is cleared at
-startup by the plugin's configuration sweep, which also rotates the victim's payment key so every
-previously leaked copy of the victim's string stops resolving. What this leaves: anyone who can *read* the
+naming a different store. A cross-store configuration that predates or bypasses that check is cleared
+at startup and about every half hour thereafter by the plugin's configuration sweep, which also
+rotates the victim's payment key so every previously leaked copy of the victim's string stops
+resolving. What this leaves: anyone who can *read* the
 string still holds a live credential for the wallet it names — save it on the victim's own store and it
 works — so it must still be treated as a secret; what is closed is the import onto another store through
 any HTTP save path, which is exactly the cross-store drive this paragraph used to describe as open. The

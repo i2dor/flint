@@ -308,20 +308,13 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             _startupGate.TrySetResult();
         }
 
-        // Catch up on anything that settled while the process was down, and clear any cross-store Lightning
-        // configuration saved before the save-time guard existed. Not awaited: both are walks over every
-        // store, and the host must not wait on them.
+        // Catch up on anything that settled while the process was down. Not awaited: it is a walk over
+        // every store, and the host must not wait on it. The cross-store Lightning sweep is deliberately
+        // not run here — SparkLightningConfigSweepTask's first pass fires at startup through BTCPay's
+        // periodic task launcher, and running it from both places would walk the store table twice and
+        // widen the window in which a sweep could rotate a victim's payment key twice.
         _ = Task.Run(async () =>
         {
-            try
-            {
-                await SweepLightningConfigsAsync(CancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (!CancellationToken.IsCancellationRequested)
-            {
-                _logger.LogError(ex, "The Spark startup Lightning configuration sweep failed");
-            }
-
             try
             {
                 await ReconcileAllStoresAsync(CancellationToken).ConfigureAwait(false);

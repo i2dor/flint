@@ -22,7 +22,7 @@ public class SparkLightningConfigSweeperTests
         FakeStoreLightningConfigStore configs,
         FakeSparkStoreSettingsStore settings,
         params string[] storeIds) => new(
-        new FakeStoreIdSource(storeIds),
+        new FakeStoreSource(storeIds),
         new SparkLightningWiring(configs, NullLogger<SparkLightningWiring>.Instance),
         settings,
         NullLogger<SparkLightningConfigSweeper>.Instance);
@@ -74,6 +74,9 @@ public class SparkLightningConfigSweeperTests
         var result = await sweeper.SweepAsync(Ct);
 
         Assert.Equal(new SparkLightningConfigSweepResult(0, 0), result);
+        // Classification came from the loaded rows: nothing re-looked a store up by id, which is the
+        // per-store FindStore the sweep used to pay once per store per pass.
+        Assert.Equal(0, configs.IdReads);
         Assert.Equal(
             SparkConnectionString.Format("store-1", VictimKey),
             configs.Stores["store-1"].ConnectionString);
