@@ -1,4 +1,5 @@
 using System;
+using System.Net.Http;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
@@ -202,6 +203,17 @@ public class SparkPlugin : BaseBTCPayServerPlugin
             client.Timeout = CrossChainCatalog.FetchTimeout;
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        })
+        // Redirects are not followed. The catalogue response is parsed into routing decisions a
+        // sweep can spend against, so it is only trusted from the endpoint the plugin itself
+        // named: a 3xx to a different host — a compromised or misconfigured CDN, an open
+        // redirect on the path — would otherwise be answered by whoever it points at, and the
+        // default handler follows up to twenty of them transparently. A redirect is a fetch
+        // failure here, which the catalogue's own cache-and-skip handling already treats as
+        // "no routes this round", not as routes.
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+        {
+            AllowAutoRedirect = false
         });
         services.AddSingleton<CrossChainCatalog>();
 
