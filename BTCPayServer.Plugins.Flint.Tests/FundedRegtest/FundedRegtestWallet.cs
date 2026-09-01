@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
@@ -292,9 +293,10 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
     /// the preimage, payment hash and txid the tests recorded, with the words on either side of it.
     /// </para>
     /// <para>
-    /// <b>The raw file is withheld if the seed is in it.</b> These artefacts are downloadable by anyone who can
-    /// see the repository, and the seed is a CI secret. A leak would be a finding worth failing on — the tests
-    /// assert against it — but it must not also be a publication.
+    /// <b>The raw file is withheld if the seed, a payment preimage, or the service provider's
+    /// <c>session_token</c> would be in it.</b> These artefacts are downloadable by anyone who can see the
+    /// repository, and the seed is a CI secret. A leak would be a finding worth failing on — the tests assert
+    /// against it — but it must not also be a publication.
     /// </para>
     /// </remarks>
     /// <returns>
@@ -313,8 +315,10 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         File.WriteAllLines(Path.Combine(directory, "forwarded.log"), forwarded);
 
         var raw = ReadRawSdkLog();
+        var rawSecret = raw is null ? null : SecretMaterialIn(raw);
+        var rawWithheld = rawSecret is not null;
         var rawCarriesSeed = raw is not null && SeedAppearsIn(raw, _mnemonic!);
-        if (raw is not null && !rawCarriesSeed)
+        if (raw is not null && !rawWithheld)
             File.WriteAllText(Path.Combine(directory, "sdk.log"), raw);
 
         var report = new StringBuilder();
@@ -326,8 +330,8 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         report.AppendLine(raw is null
             ? "- Raw `sdk.log`: **not found** — the Rust subscriber wrote nothing to the log directory."
             : $"- Raw `sdk.log`: **{raw.Split('\n').Length}** lines, "
-              + (rawCarriesSeed
-                  ? "**WITHHELD from this artefact because the wallet seed appears in it**"
+              + (rawWithheld
+                  ? $"**WITHHELD from this artefact because {rawSecret} appears in it**"
                   : "attached as `sdk.log`"));
         report.AppendLine();
 
@@ -515,6 +519,44 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
 
         return count;
     }
+
+    /// <summary>
+    /// The secret material the raw log would publish — the wallet seed, a payment preimage this run recorded,
+    /// or the service provider's session token — or null when the log carries none of it.
+    /// </summary>
+    private string? SecretMaterialIn(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return null;
+
+        if (SeedAppearsIn(text, _mnemonic!))
+            return "the wallet seed";
+
+        foreach (var identifier in Snapshot())
+        {
+            if (identifier.Kind.Contains("preimage", StringComparison.OrdinalIgnoreCase)
+                && CountOccurrences(text, identifier.Value) > 0)
+                return "a payment preimage";
+        }
+
+        return SessionTokenAppearsIn(text) ? "the service provider's session token" : null;
+    }
+
+    /// <summary>
+    /// True when the text carries the service provider's GraphQL <c>session_token</c> name next to a value —
+    /// the shape <c>SparkLogScrubber</c> redacts on. Trace, where the token is logged, is clamped out before
+    /// the subscriber is installed, so this is belt-and-braces: if a raw response body ever reached the log,
+    /// the artefact must not publish it.
+    /// </summary>
+    internal static bool SessionTokenAppearsIn(string text) => SessionTokenShape.IsMatch(text);
+
+    private static readonly Regex SessionTokenShape = new(
+        $$"""
+        (?ix)
+        \\?"? \b session_?token \b \\?"? \s* [:=] \s*
+        (?: " [^"\\]* " | ' [^']* ' | [^\s,;}\]\)]+ )
+        """,
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
 
     /// <summary>Every distinct 64-character hex run in the text, with the 48 characters in front of it.</summary>
     internal static IReadOnlyList<HexRun> DistinctHexRuns(string text)

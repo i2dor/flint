@@ -12,3 +12,5 @@ packages/
 
 # Local-only deploy/test notes (never commit).
 .local/
+TESTING.local.md
+*.local.md
