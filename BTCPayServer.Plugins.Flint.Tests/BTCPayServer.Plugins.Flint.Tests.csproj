@@ -34,6 +34,12 @@
       cannot carry a double hyphen, which is why this one does not).
     -->
     <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    <!--
+      NuGet dependency locking, same contract as the plugin project: packages.lock.json (committed
+      next to this file) is the pinned graph, CI restores it in locked mode, and after changing
+      any PackageReference both files are regenerated and committed together.
+    -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <!--

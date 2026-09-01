@@ -47,8 +47,10 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      # setup-dotnet's own `cache: true` input keys on packages.lock.json, which this repo does
-      # not use, so NuGet caching is done directly against the global-packages folder instead.
+      # setup-dotnet's own `cache: true` input keys on packages.lock.json; this repo now commits
+      # lock files, but the caching here stays a direct global-packages cache keyed on the csproj
+      # files so all jobs share one mechanism and one key. The locks are enforced separately by
+      # the locked-mode restore step below.
       - name: Cache NuGet packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -56,6 +58,16 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
           restore-keys: |
             nuget-${{ runner.os }}-
+
+      # The committed packages.lock.json files pin the full resolved graph. A restore in locked
+      # mode fails right here if any PackageReference drifts from the locks, instead of the build
+      # step's implicit restore silently re-resolving a graph nobody reviewed. When a dependency
+      # legitimately changes, regenerate with `dotnet restore` and commit the lock with it.
+      - name: Restore (locked mode)
+        run: |
+          set -euo pipefail
+          dotnet restore --locked-mode BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
+          dotnet restore --locked-mode BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
 
       - name: Build (plugin + tests)
         # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
