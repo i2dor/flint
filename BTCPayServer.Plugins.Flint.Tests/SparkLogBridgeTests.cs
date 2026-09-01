@@ -118,6 +118,32 @@ public class SparkLogBridgeTests
     }
 
     /// <summary>
+    /// The other exit an SDK payload has: error text a merchant is shown.
+    /// </summary>
+    /// <remarks>
+    /// <c>SparkErrors.Describe</c> relays the SDK's own payload to banners, Greenfield validation
+    /// bodies, stored sweep errors and claim outcome messages — none of which stand in front of
+    /// the bridge above. The scrubbing therefore also sits at <c>Describe</c>'s choke point, and
+    /// this is what pins that it does: an SDK error whose payload carries the shape the trace-level
+    /// leak was observed in must come out with the value replaced and the diagnosis intact.
+    /// </remarks>
+    [Fact]
+    public void An_SDK_error_relayed_to_a_merchant_is_scrubbed()
+    {
+        const string token = "eyJ1aWQiOiIwMTlmZDQ5Ny03Yjc3LTZlZDgifQ.anPdDQ.9noMLLWPhHNXSkl3YtayTfpEtMbvonj";
+
+        var described = SparkErrors.Describe(new SdkException.SparkException(
+            $"@v1=Tree service error: verify_challenge rejected session_token: \"{token}\""));
+
+        Assert.DoesNotContain(token, described);
+        Assert.Contains(SparkLogScrubber.Redacted, described);
+
+        // Not merely redacted: still the error the merchant needs to see, prefix stripped.
+        Assert.Contains("Tree service error: verify_challenge rejected session_token:", described);
+        Assert.DoesNotContain("@v1=", described);
+    }
+
+    /// <summary>
     /// The other half: the lines that carry the diagnostic value must survive intact.
     /// </summary>
     /// <remarks>

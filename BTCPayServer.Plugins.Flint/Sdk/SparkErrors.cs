@@ -23,7 +23,13 @@ public static class SparkErrors
     public static string Describe(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
-        return exception switch
+        // Scrubbed at the choke point. What leaves this method is free text from the SDK and its
+        // service providers, and every one of its sinks is merchant-facing — TempData banners,
+        // Greenfield validation bodies, stored `SweepRecord.Error`s, claim outcome messages —
+        // none of them standing behind the log bridge's scrubbing. The rules that cover the
+        // operator's log cover the merchant's error by standing here; scrubbing at each call
+        // site instead would be forty chances to forget one.
+        return SparkLogScrubber.Scrub(exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
             SdkException.SparkException spark => Strip(spark.v1),
@@ -40,7 +46,7 @@ public static class SparkErrors
             SdkException => Strip(exception.Message),
             ObjectDisposedException => "The Spark wallet for this store is no longer running.",
             _ => Strip(exception.Message)
-        };
+        });
     }
 
     /// <summary>
