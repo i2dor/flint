@@ -101,6 +101,7 @@ public sealed class PostgresTestDatabase : IAsyncLifetime
         await context.Database.ExecuteSqlRawAsync(
             $"""
              TRUNCATE TABLE
+                 "{Constants.DatabaseSchema}"."InvoicePaymentHashes",
                  "{Constants.DatabaseSchema}"."InvoiceRecords",
                  "{Constants.DatabaseSchema}"."OutgoingPayments",
                  "{Constants.DatabaseSchema}"."SweepRecords";
