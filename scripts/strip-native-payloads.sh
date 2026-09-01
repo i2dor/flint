@@ -272,6 +272,11 @@ strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + expl
       mode="$(python3 /macho_sig.py flags "/src/$1")"
       case "$mode" in unsigned|adhoc) ;; *) echo "signature state: $mode" >&2; exit 3 ;; esac
       cp "/src/$1" /out/stripped.dylib
+      # The actual strip. The llvm-18 package names its binary llvm-strip-18; probe the
+      # unversioned name as a fallback, mirroring the host path above. Until this line
+      # existed the container only copied and verified, so the docker fallback reported
+      # every dylib as a no-op ("already stripped") and shipped it unstripped.
+      "$(command -v llvm-strip-18 || command -v llvm-strip)" -x /out/stripped.dylib
       python3 /macho_sig.py verify /out/stripped.dylib
       chmod --reference "/src/$1" /out/stripped.dylib
     ' macho "$(basename "$f")"; then
