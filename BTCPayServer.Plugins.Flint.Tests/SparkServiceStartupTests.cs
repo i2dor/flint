@@ -39,6 +39,7 @@ public class SparkServiceStartupTests
 
     private const string HangingStore = "store-that-hangs";
     private const string HealthyStore = "store-that-works";
+    private const string ThrowingStore = "store-that-throws";
 
     [Fact]
     public void A_store_whose_SDK_connect_never_returns_does_not_hold_up_the_host()
@@ -97,14 +98,55 @@ public class SparkServiceStartupTests
     public async Task A_store_whose_connect_throws_does_not_stop_another_stores_wallet_from_starting()
     {
         using var h = SparkServiceHarness.Create();
-        h.SeedStore("store-that-throws", SparkServiceHarness.MnemonicFor(3));
+        h.SeedStore(ThrowingStore, SparkServiceHarness.MnemonicFor(3));
         h.SeedStore(HealthyStore, SparkServiceHarness.MnemonicFor(2));
-        h.Sdk.FailFor["store-that-throws"] = new InvalidOperationException("the SDK refused this seed");
+        h.Sdk.FailFor[ThrowingStore] = new InvalidOperationException("the SDK refused this seed");
 
         StartWithinTimeout(h);
 
         Assert.NotNull(await h.Service.GetClient(HealthyStore));
-        Assert.Null(await h.Service.GetClient("store-that-throws"));
+        Assert.Null(await h.Service.GetClient(ThrowingStore));
+    }
+
+    /// <summary>
+    /// A connect that throws must not lock its store out of its own wallet either.
+    /// </summary>
+    /// <remarks>
+    /// The timeout path already released the storage claim it had taken (see
+    /// <see cref="A_permanently_hung_connect_releases_the_storage_lock_so_the_store_can_be_reconfigured"/>),
+    /// but a connect that fails immediately is rethrown by <c>SparkDeadline</c> past both ownership handoffs,
+    /// and the leaked <c>FileShare.None</c> handle then refused the store's own next attempt with the
+    /// two-BTCPay-instances message — accusing another process of a hold this process was doing to itself,
+    /// which reconfiguring could never clear.
+    /// </remarks>
+    [Fact]
+    public async Task A_store_whose_connect_throws_leaves_the_storage_lock_claimable()
+    {
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(ThrowingStore, SparkServiceHarness.MnemonicFor(3));
+        h.Sdk.FailFor[ThrowingStore] = new InvalidOperationException("the SDK refused this seed");
+
+        StartWithinTimeout(h);
+
+        // The refused attempt named the failure it actually hit — the connection error — never the lock
+        // message. Startup swallows the throw per-store, so it surfaces in the operator's log.
+        Assert.Contains("the SDK refused this seed", h.Log.AllText);
+        Assert.DoesNotContain("Another process", h.Log.AllText);
+
+        // The decisive half: the claim the throwing attempt took is back on the shelf. Before the fix a
+        // FileStream nothing could any longer reach still held the directory, and this returned null.
+        var reclaimed = Sdk.SparkStorageLock.TryAcquire(h.StorageDirFor(ThrowingStore), out _);
+        Assert.NotNull(reclaimed);
+        reclaimed!.Dispose();
+
+        // And reconfiguring the store starts its wallet, rather than being told another process holds it.
+        h.Sdk.FailFor.Remove(ThrowingStore);
+        var settings = (await h.Service.Get(ThrowingStore))!;
+        var applied = await h.Service.Set(ThrowingStore, settings);
+
+        // Before the fix this came back not-running with the "Another process" refusal.
+        Assert.True(applied.WalletRunning, $"the store should be running, got: {applied.Reason}");
+        Assert.NotNull(await h.Service.GetClient(ThrowingStore));
     }
 
     /// <summary>
