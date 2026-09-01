@@ -122,11 +122,18 @@ internal sealed class SparkStorageLock : IDisposable
                 + "own.";
             return null;
         }
-        catch (UnauthorizedAccessException ex)
+        catch (UnauthorizedAccessException)
         {
+            // The platform refused the open on permission grounds. .NET embeds the absolute path
+            // of the denied file in this exception's message, and this reason is relayed to
+            // whoever is saving the store's settings — a store manager, not necessarily a server
+            // operator — so no exception text goes into it, exactly as the IOException branch
+            // above. The caller that logs the refusal logs the storage directory alongside the
+            // reason, which is where that detail belongs.
             reason =
-                "This store's Spark wallet storage could not be claimed, so the wallet was not started: "
-                + ex.Message;
+                "This store's Spark wallet storage could not be claimed, so the wallet was not "
+                + "started. The server process cannot open its storage directory for writing; a "
+                + "server operator needs to check that directory's ownership and permissions.";
             return null;
         }
     }

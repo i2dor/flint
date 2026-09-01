@@ -429,11 +429,15 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         var storageLock = SparkStorageLock.TryAcquire(GetWorkDir(storeId), out var lockReason);
         if (storageLock is null)
         {
+            // The reason is logged as well as returned: an instance holding the claim and a
+            // permission refusal arrive here through different exceptions and call for
+            // different fixes, and a log line that pre-decided which one it was would
+            // misdirect the operator on half of them.
             _logger.LogError(
-                "Store {StoreId}: refusing to start its Spark wallet because another process holds the lock on "
-                + "{StorageDir}. Two instances on one storage directory corrupt the wallet's database. Run a "
-                + "single BTCPay instance against this data directory",
-                storeId, GetWorkDir(storeId));
+                "Store {StoreId}: refusing to start its Spark wallet. {LockReason} The storage "
+                + "directory is {StorageDir}; run a single BTCPay instance against this data "
+                + "directory.",
+                storeId, lockReason, GetWorkDir(storeId));
             return lockReason;
         }
 
