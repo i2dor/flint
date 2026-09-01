@@ -136,4 +136,41 @@ public class SparkMigrationTests
         Assert.Equal(added.Length, operations.Count);
         Assert.Equal(added.Length, operations.Select(o => o.Name).Distinct().Count());
     }
+
+    /// <summary>
+    /// The reconciliation walk gets a partial covering index, and nothing about the walk's shape is accidental.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every field here is load-bearing for the query it serves.</b>
+    /// <c>ListForReconciliationAsync</c> filters on store, on not-yet-paid, and on an expiry floor, then pages
+    /// by <c>CreatedAt</c>/<c>PaymentHash</c> under a small limit. The index leads with <c>ExpiresAt</c> after
+    /// <c>StoreId</c> so the floor is a seek, carries the two ordering columns as INCLUDE payload so a page is
+    /// index-only, and is partial on <c>"Status" &lt;&gt; 1</c> — the enum value of
+    /// <see cref="InvoiceRecordStatus.Paid"/> — so paid (terminal) rows never enter it, exactly mirroring the
+    /// query's rule that only a paid invoice is settled. A rename of the enum's ordering, a dropped INCLUDE
+    /// column, or a filter widened to include paid rows each fail here. The Down has to drop the same index in
+    /// the same schema, or unwinding an upgrade would strand it.
+    /// </remarks>
+    [Fact]
+    public void The_settleable_index_is_partial_covering_and_drops_cleanly()
+    {
+        var operation = Assert.Single(
+            new SettleableInvoiceIndex().UpOperations.OfType<CreateIndexOperation>());
+
+        Assert.Equal("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable", operation.Name);
+        Assert.Equal("BTCPayServer.Plugins.Flint", operation.Schema);
+        Assert.Equal("InvoiceRecords", operation.Table);
+        Assert.Equal(
+            new[] { nameof(InvoiceRecord.StoreId), nameof(InvoiceRecord.ExpiresAt) },
+            operation.Columns);
+        Assert.Equal(new[] { nameof(InvoiceRecord.CreatedAt), nameof(InvoiceRecord.PaymentHash) },
+            Assert.IsType<string[]>(operation["Npgsql:IndexInclude"]));
+        Assert.Equal("\"Status\" <> 1", operation.Filter);
+
+        var drop = Assert.Single(
+            new SettleableInvoiceIndex().DownOperations.OfType<DropIndexOperation>());
+        Assert.Equal(operation.Name, drop.Name);
+        Assert.Equal(operation.Schema, drop.Schema);
+        Assert.Equal(operation.Table, drop.Table);
+    }
 }
