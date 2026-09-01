@@ -195,7 +195,7 @@ jobs:
           set -euo pipefail
           btcpay_file="$(find "$ARTIFACT_DIR" -name '*.btcpay' -print -quit)"
           for required in NOTICE LICENSE; do
-            if ! python3 -c "import sys, zipfile; sys.exit(0 if '$required' in zipfile.ZipFile('$btcpay_file').namelist() else 1)"; then
+            if ! python3 -c "import sys, zipfile; f=sys.argv[1]; required=sys.argv[2]; sys.exit(0 if required in zipfile.ZipFile(f).namelist() else 1)" "$btcpay_file" "$required"; then
               echo "error: $required is not inside $btcpay_file; the packaged plugin redistributes" \
                    "Breez's MIT-licensed binaries and must carry their notices" >&2
               exit 1
