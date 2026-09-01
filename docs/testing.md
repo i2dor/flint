@@ -131,9 +131,9 @@ Every run uploads a **`funded-regtest-log-audit`** artifact, on success *and* on
 
 | file | what it is |
 |---|---|
-| `forwarded.log` | what an operator's BTCPay log would have shown — everything through `SparkLogScrubber` |
-| `sdk.log` | the raw file the Rust subscriber wrote, which no C# scrubbing reaches. **Withheld if the wallet's mnemonic appears in it** — these artifacts are downloadable by anyone with read access, and a leak must not also be a publication |
-| `preimage-audit.md` | the answer: every distinct 64-hex run the SDK emitted, classified against the preimage, payment hash and txid the run recorded, with the surrounding words |
+| `forwarded.log` | what an operator's BTCPay log would have shown — everything through `SparkLogScrubber`. **Withheld if secret material appears in it** — the wallet's mnemonic, a recorded payment preimage, the service provider's session token. This is the post-scrub log, so secret material in it *is* a scrubber hole, and even then a leak must not also be a publication |
+| `sdk.log` | the raw file the Rust subscriber wrote, which no C# scrubbing reaches. **Withheld if the wallet's mnemonic, a recorded payment preimage, or the session token appears in it** — these artifacts are downloadable by anyone with read access, and a leak must not also be a publication |
+| `preimage-audit.md` | the answer: every distinct 64-hex run the SDK emitted, classified against the preimage, payment hash and txid the run recorded, with the surrounding words. Under withholding, a withheld source's values print as one-way SHA-256 fingerprints, their contexts are redacted, and the forwarded columns print *withheld* instead of counts; classifications and the raw-side occurrence counts stay |
 
 Read `preimage-audit.md` first, and **check its banner before anything else**: a run that aborted on a drained
 wallet still produces hundreds of lines of connect chatter and an empty, clean-looking table, and the banner
