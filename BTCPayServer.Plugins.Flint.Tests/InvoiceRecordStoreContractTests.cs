@@ -427,7 +427,9 @@ public abstract class InvoiceRecordStoreContractTests
         var store = await CreateStoreAsync();
         var hashes = Enumerable.Range(0, 6).Select(i => i.ToString("x64")).ToArray();
         for (var i = 0; i < hashes.Length; i++)
-            await store.AddAsync(NewRecord(hashes[i], createdAt: DateTimeOffset.UtcNow.AddMinutes(-30 + i)), Ct);
+            await store.AddAsync(NewRecord(hashes[i],
+                createdAt: DateTimeOffset.UtcNow.AddMinutes(-30 + i),
+                expiresAt: DateTimeOffset.UtcNow.AddHours(1).AddMinutes(i)), Ct);
 
         var firstPage = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), after: null, limit: 2, Ct);
@@ -440,7 +442,7 @@ public abstract class InvoiceRecordStoreContractTests
                 StoreId, record.PaymentHash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
         }
 
-        var cursor = new InvoiceReconciliationCursor(firstPage[^1].CreatedAt, firstPage[^1].PaymentHash);
+        var cursor = new InvoiceSettlementCursor(firstPage[^1].ExpiresAt, firstPage[^1].PaymentHash);
         var secondPage = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), cursor, limit: 2, Ct);
 
@@ -449,20 +451,44 @@ public abstract class InvoiceRecordStoreContractTests
     }
 
     [Fact]
-    public async Task Reconciliation_breaks_ties_on_identical_creation_times()
+    public async Task Reconciliation_orders_by_expiry_ahead_of_creation()
     {
-        // Two invoices minted in the same tick must not sit either side of a page boundary forever, one of them
-        // never examined. The cursor therefore carries the payment hash as well as the timestamp.
+        // The walk's order — and therefore its keyset cursor and the partial covering index that serves it —
+        // is expiry, not creation. An invoice minted first but expiring later must page after one minted
+        // later but expiring sooner, or the resume position the pass hands forward points at the wrong row.
         var store = await CreateStoreAsync();
-        var sameInstant = DateTimeOffset.UtcNow.AddMinutes(-5);
-        var first = NewRecord("1".PadLeft(64, '0'), createdAt: sameInstant);
-        var second = NewRecord("2".PadLeft(64, '0'), createdAt: sameInstant);
+        var earlyCreatedLateExpiry = "a".PadLeft(64, '0');
+        var lateCreatedEarlyExpiry = "b".PadLeft(64, '0');
+        await store.AddAsync(NewRecord(earlyCreatedLateExpiry,
+            createdAt: DateTimeOffset.UtcNow.AddHours(-2),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(6)), Ct);
+        await store.AddAsync(NewRecord(lateCreatedEarlyExpiry,
+            createdAt: DateTimeOffset.UtcNow.AddHours(-1),
+            expiresAt: DateTimeOffset.UtcNow.AddHours(2)), Ct);
+
+        var listed = await store.ListForReconciliationAsync(
+            StoreId, DateTimeOffset.UtcNow.AddHours(-1), after: null, limit: 10, Ct);
+
+        Assert.Equal([lateCreatedEarlyExpiry, earlyCreatedLateExpiry],
+            listed.Select(r => r.PaymentHash).ToArray());
+    }
+
+    [Fact]
+    public async Task Reconciliation_breaks_ties_on_identical_expiry_times()
+    {
+        // Invoices minted in one batch share an expiry to the second, so ties on the ordering key are the
+        // norm — and they must not sit either side of a page boundary forever, one of them never examined.
+        // The cursor therefore carries the payment hash alongside the expiry.
+        var store = await CreateStoreAsync();
+        var sameExpiry = DateTimeOffset.UtcNow.AddHours(1);
+        var first = NewRecord("1".PadLeft(64, '0'), expiresAt: sameExpiry);
+        var second = NewRecord("2".PadLeft(64, '0'), expiresAt: sameExpiry);
         await store.AddAsync(second, Ct);
         await store.AddAsync(first, Ct);
 
         var page = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), after: null, limit: 1, Ct);
-        var cursor = new InvoiceReconciliationCursor(page[0].CreatedAt, page[0].PaymentHash);
+        var cursor = new InvoiceSettlementCursor(page[0].ExpiresAt, page[0].PaymentHash);
         var next = await store.ListForReconciliationAsync(
             StoreId, DateTimeOffset.UtcNow.AddHours(-1), cursor, limit: 1, Ct);
 

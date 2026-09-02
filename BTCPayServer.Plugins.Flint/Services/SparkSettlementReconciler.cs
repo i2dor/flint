@@ -121,9 +121,9 @@ public class SparkSettlementReconciler
 
     /// <summary>
     /// Where the last capped reconciliation pass stopped, per store, so the next pass resumes rather than
-    /// re-examining the same oldest invoices — see the note at the cursor's initialisation.
+    /// re-examining the same head of the walk — see the note at the cursor's initialisation.
     /// </summary>
-    private readonly ConcurrentDictionary<string, InvoiceReconciliationCursor> _resumeCursors = new();
+    private readonly ConcurrentDictionary<string, InvoiceSettlementCursor> _resumeCursors = new();
 
     public SparkSettlementReconciler(
         IInvoiceRecordStore invoiceStore,
@@ -593,8 +593,8 @@ public class SparkSettlementReconciler
     }
 
     /// <summary>
-    /// Walks a store's still-settleable invoices, oldest first, and settles any that have been paid. Returns the
-    /// number settled by this pass.
+    /// Walks a store's still-settleable invoices, soonest-expiring first, and settles any that have been paid.
+    /// Returns the number settled by this pass.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -638,7 +638,7 @@ public class SparkSettlementReconciler
         // more settleable invoices than the cap, the same oldest set is re-examined forever and everything
         // behind it is never reached. The cursor carries across passes and resets only when a pass drains the
         // set, so every invoice is reached within a bounded number of passes.
-        InvoiceReconciliationCursor? cursor = _resumeCursors.TryGetValue(storeId, out var resume) ? resume : null;
+        InvoiceSettlementCursor? cursor = _resumeCursors.TryGetValue(storeId, out var resume) ? resume : null;
 
         while (examined < MaxInvoicesPerPass)
         {
@@ -673,7 +673,9 @@ public class SparkSettlementReconciler
                 cancellationToken.ThrowIfCancellationRequested();
                 examined++;
                 // Advanced before the attempt, so a record that keeps failing cannot stall the walk on itself.
-                cursor = new InvoiceReconciliationCursor(record.CreatedAt, record.PaymentHash);
+                // Carries the record's expiry, not its creation time: the walk pages by expiry, and the keyset
+                // only resumes correctly on the columns the ordering uses.
+                cursor = new InvoiceSettlementCursor(record.ExpiresAt, record.PaymentHash);
 
                 try
                 {

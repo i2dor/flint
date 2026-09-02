@@ -143,13 +143,14 @@ public class SparkMigrationTests
     /// <remarks>
     /// <b>Every field here is load-bearing for the query it serves.</b>
     /// <c>ListForReconciliationAsync</c> filters on store, on not-yet-paid, and on an expiry floor, then pages
-    /// by <c>CreatedAt</c>/<c>PaymentHash</c> under a small limit. The index leads with <c>ExpiresAt</c> after
-    /// <c>StoreId</c> so the floor is a seek, carries the two ordering columns as INCLUDE payload so a page is
-    /// index-only, and is partial on <c>"Status" &lt;&gt; 1</c> — the enum value of
-    /// <see cref="InvoiceRecordStatus.Paid"/> — so paid (terminal) rows never enter it, exactly mirroring the
-    /// query's rule that only a paid invoice is settled. A rename of the enum's ordering, a dropped INCLUDE
-    /// column, or a filter widened to include paid rows each fail here. The Down has to drop the same index in
-    /// the same schema, or unwinding an upgrade would strand it.
+    /// by <c>ExpiresAt</c>/<c>PaymentHash</c> under a small limit. The index leads with <c>ExpiresAt</c> after
+    /// <c>StoreId</c> so the floor is a seek, and its key <em>is</em> the walk's ordering — measured against
+    /// Postgres, the planner only reaches for this index when the ORDER BY rides its columns — with the
+    /// per-row <c>CreatedAt</c>/<c>PaymentHash</c> payload carried in INCLUDE. It is partial on
+    /// <c>"Status" &lt;&gt; 1</c>, the enum value of <see cref="InvoiceRecordStatus.Paid"/>, so paid (terminal)
+    /// rows never enter it, exactly mirroring the query's rule that only a paid invoice is settled. A dropped
+    /// INCLUDE column or a filter widened to include paid rows fails here. The Down has to drop the same index
+    /// in the same schema, or unwinding an upgrade would strand it.
     /// </remarks>
     [Fact]
     public void The_settleable_index_is_partial_covering_and_drops_cleanly()

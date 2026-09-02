@@ -44,12 +44,15 @@ public class SparkPluginDbContext : DbContext
                 .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
 
             // ListForReconciliationAsync walks this store's settleable tail: StoreId equality,
-            // Status <> Paid, an ExpiresAt floor, then CreatedAt/PaymentHash order with a small
-            // LIMIT. The partial index covers the walk end to end — ExpiresAt leads so the range
-            // start is an index seek, and the ordering columns ride along in INCLUDE so the page
-            // is index-only. Paid is the enum value 1 (InvoiceRecordStatus.Paid), so the predicate
-            // admits Unpaid (0) and Expired (2), exactly matching the query's "a cancelled invoice
-            // is still payable" rule. Status is a non-nullable int, so <> 1 is null-safe here.
+            // Status <> Paid, an ExpiresAt floor, then ExpiresAt/PaymentHash order with a small
+            // LIMIT. The partial index serves the walk end to end: the key is the equality column
+            // followed by the range floor, and it matches the walk's own ordering, so a page is a
+            // forward scan with a keyset seek instead of a sort — the planner only picks this index
+            // when the ORDER BY rides its columns, which is why the walk orders by expiry at all.
+            // The INCLUDE payload carries the per-row columns the walk reads off each record. Paid
+            // is the enum value 1 (InvoiceRecordStatus.Paid), so the predicate admits Unpaid (0)
+            // and Expired (2), exactly matching the query's "a cancelled invoice is still payable"
+            // rule. Status is a non-nullable int, so <> 1 is null-safe here.
             // Quoted identifiers as above: the columns are mixed-case.
             entity.HasIndex(record => new { record.StoreId, record.ExpiresAt })
                 .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
