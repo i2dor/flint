@@ -123,10 +123,16 @@ public sealed class SparkServiceHarness : IDisposable
         return new Mnemonic(Wordlist.English, entropy).ToString();
     }
 
+    /// <param name="failWalletAdoption">
+    /// Builds the service without the BOLT11 parser, so <c>SparkLightningClient</c>'s own ctor throws the
+    /// moment it tries to adopt a connected wallet. The throw is production code's own argument check, not a
+    /// fake standing in for it — the only thing this withholds is a real dependency.
+    /// </param>
     public static SparkServiceHarness Create(
         TimeSpan? connectDeadline = null,
         TimeSpan? confirmStatusDeadline = null,
-        TimeSpan? abandonedConnectGrace = null)
+        TimeSpan? abandonedConnectGrace = null,
+        bool failWalletAdoption = false)
     {
         var dataDir = Path.Combine(
             Path.GetTempPath(), "spark-service-tests", Guid.NewGuid().ToString("N"));
@@ -146,7 +152,8 @@ public sealed class SparkServiceHarness : IDisposable
                 confirmStatusDeadline ?? Constants.SdkCallDeadline,
                 // Long by default so the existing abandon tests still observe a late connect being adopted and
                 // shut down; the release-the-lock test shortens it deliberately.
-                abandonedConnectGrace ?? TimeSpan.FromMinutes(5)));
+                abandonedConnectGrace ?? TimeSpan.FromMinutes(5)),
+            failWalletAdoption);
     }
 
     /// <summary>
@@ -170,7 +177,8 @@ public sealed class SparkServiceHarness : IDisposable
         return Create(_dataDir, _durable, _deadlines);
     }
 
-    private static SparkServiceHarness Create(string dataDir, Durable durable, Deadlines deadlines)
+    private static SparkServiceHarness Create(
+        string dataDir, Durable durable, Deadlines deadlines, bool failWalletAdoption = false)
     {
         var log = new CapturingLogger<SparkService>();
         var logs = new Logs();
@@ -193,6 +201,11 @@ public sealed class SparkServiceHarness : IDisposable
             NullLogger<SparkSettlementReconciler>.Instance);
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
 
+        // The one dependency a test may ask to be withheld. SparkLightningClient's own ctor rejects a null
+        // BOLT11 parser, so a service built without one throws at the moment it adopts a connected wallet —
+        // that throw is production code's own argument check, and nothing in production gained a seam for it.
+        IBolt11Parser bolt11Parser = failWalletAdoption ? null! : durable.Bolt11;
+
         // The startup sweep is real here — it runs against the stores this harness knows about — so the
         // deferred factory is wired to a sweeper built over the same fakes. The sweeper is constructed after
         // the service because its settings store is the service itself; the closure makes that ordering safe.
@@ -213,7 +226,7 @@ public sealed class SparkServiceHarness : IDisposable
             broadcaster,
             protector,
             wiring,
-            durable.Bolt11,
+            bolt11Parser,
             TimeProvider.System,
             () => sweeper ?? throw new InvalidOperationException("harness sweep not wired"),
             NullLoggerFactory.Instance,

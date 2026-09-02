@@ -437,91 +437,122 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             return lockReason;
         }
 
-        var options = new SparkConnectOptions(
-            storeId,
-            mnemonic,
-            // NBXplorer does not store BIP39 passphrases, so a hot-wallet seed reused from BTCPay never
-            // carries one, and a passphrase changes the Spark identity entirely. Defaulting one silently
-            // would derive a different wallet from the seed the merchant backed up.
-            passphrase: null,
-            apiKey: string.IsNullOrWhiteSpace(settings.ApiKeyOverride)
-                ? Constants.BreezApiKey
-                : settings.ApiKeyOverride,
-            network: sdkNetwork,
-            // Always supplied, never left to the SDK. Its default is Rate(1 sat/vB) — a cap rather than a bid —
-            // which is below the mainnet floor essentially always, and above it a deposit is never claimed and
-            // never surfaces anywhere the merchant looks.
-            maxDepositClaimFee: (settings.Deposits ?? new SparkDepositSettings()).ToMaxFee(),
-            stableBalance: BuildStableBalance(settings));
-
-        // Created before the SDK because the factory registers the event listener against this writer, and
-        // events can arrive the moment it does. The channel buffers until the consumer starts below.
-        var events = Channel.CreateBounded<SparkEventEnvelope>(new BoundedChannelOptions(EventQueueCapacity)
+        // The two handoffs below — AbandonConnect in the timeout branch, and the instance registration —
+        // are the only things that can own the claim past this point, so every other route out of the
+        // guarded region goes through the finally: until it existed, only the timeout path released the
+        // claim, and an already-faulted connect (SparkDeadline rethrows it rather than returning null)
+        // leaked the FileShare.None handle so the store's own next attempt was refused as if a second
+        // BTCPay held it.
+        var handedOff = false;
+        ISparkSdkClient? sdk = null;
+        Channel<SparkEventEnvelope>? events = null;
+        try
         {
-            // Wait, combined with the listener only ever using the non-blocking TryWrite. That pairing is the
-            // one that reports a full queue: TryWrite returns false and the listener logs it. DropOldest and
-            // DropWrite both return true and evict silently, and silently losing a settlement notification is
-            // exactly the class of bug this plugin exists to avoid. The listener never blocks regardless,
-            // because it never calls WriteAsync.
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false
-        });
+            var options = new SparkConnectOptions(
+                storeId,
+                mnemonic,
+                // NBXplorer does not store BIP39 passphrases, so a hot-wallet seed reused from BTCPay never
+                // carries one, and a passphrase changes the Spark identity entirely. Defaulting one silently
+                // would derive a different wallet from the seed the merchant backed up.
+                passphrase: null,
+                apiKey: string.IsNullOrWhiteSpace(settings.ApiKeyOverride)
+                    ? Constants.BreezApiKey
+                    : settings.ApiKeyOverride,
+                network: sdkNetwork,
+                // Always supplied, never left to the SDK. Its default is Rate(1 sat/vB) — a cap rather than a bid —
+                // which is below the mainnet floor essentially always, and above it a deposit is never claimed and
+                // never surfaces anywhere the merchant looks.
+                maxDepositClaimFee: (settings.Deposits ?? new SparkDepositSettings()).ToMaxFee(),
+                stableBalance: BuildStableBalance(settings));
 
-        // Bounded, and this is the one call site where that matters most. This method runs on the host's
-        // IHostedService.StartAsync path, once per configured store, inside _instanceLock — and
-        // HostOptions.StartupTimeout is infinite by default. An unbounded await here is
-        // therefore a silent, permanent hang of BTCPay's startup: no exception, so no log line and no
-        // auto-disable, which is exactly how PR #6's deadlock presented. Today's SDK Connect does no network
-        // I/O and returns in tens of milliseconds, but that is an SDK property and not a guarantee this plugin
-        // holds, so the wait is bounded rather than trusted.
-        var connect = _sdkClientFactory.ConnectAsync(options, events.Writer, cancellationToken);
-        var deadline = ConnectDeadline;
-        var sdk = await SparkDeadline.OrNullAsync(
-                connect,
-                deadline,
-                () => _logger.LogError(
-                    "Store {StoreId}: connecting its Spark wallet exceeded {Seconds}s, so it was abandoned and "
-                    + "the store was left without a running wallet. BTCPay itself started normally. No SDK call "
-                    + "can be cancelled, so the connect is still running and whatever it produces will be shut "
-                    + "down; nothing will be started on this wallet until the store is reconfigured or the "
-                    + "server is restarted",
-                    storeId, deadline.TotalSeconds),
-                cancellationToken)
-            .ConfigureAwait(false);
+            // Created before the SDK because the factory registers the event listener against this writer, and
+            // events can arrive the moment it does. The channel buffers until the consumer starts below.
+            events = Channel.CreateBounded<SparkEventEnvelope>(new BoundedChannelOptions(EventQueueCapacity)
+            {
+                // Wait, combined with the listener only ever using the non-blocking TryWrite. That pairing is the
+                // one that reports a full queue: TryWrite returns false and the listener logs it. DropOldest and
+                // DropWrite both return true and evict silently, and silently losing a settlement notification is
+                // exactly the class of bug this plugin exists to avoid. The listener never blocks regardless,
+                // because it never calls WriteAsync.
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false
+            });
 
-        if (sdk is null)
-        {
-            // Ownership of the claim moves with the abandoned connect: releasing it here would let the next
-            // attempt start a second instance on storage the late arrival is still holding.
-            AbandonConnect(storeId, connect, events, storageLock);
-            return "This store's Spark wallet did not finish connecting in time, so it is not running. Check "
-                   + "the server logs, then reconfigure the store or restart the server to try again.";
+            // Bounded, and this is the one call site where that matters most. This method runs on the host's
+            // IHostedService.StartAsync path, once per configured store, inside _instanceLock — and
+            // HostOptions.StartupTimeout is infinite by default. An unbounded await here is
+            // therefore a silent, permanent hang of BTCPay's startup: no exception, so no log line and no
+            // auto-disable, which is exactly how PR #6's deadlock presented. Today's SDK Connect does no network
+            // I/O and returns in tens of milliseconds, but that is an SDK property and not a guarantee this plugin
+            // holds, so the wait is bounded rather than trusted.
+            var connect = _sdkClientFactory.ConnectAsync(options, events.Writer, cancellationToken);
+            var deadline = ConnectDeadline;
+            sdk = await SparkDeadline.OrNullAsync(
+                    connect,
+                    deadline,
+                    () => _logger.LogError(
+                        "Store {StoreId}: connecting its Spark wallet exceeded {Seconds}s, so it was abandoned and "
+                        + "the store was left without a running wallet. BTCPay itself started normally. No SDK call "
+                        + "can be cancelled, so the connect is still running and whatever it produces will be shut "
+                        + "down; nothing will be started on this wallet until the store is reconfigured or the "
+                        + "server is restarted",
+                        storeId, deadline.TotalSeconds),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (sdk is null)
+            {
+                // The abandoned connect's cleanup owns the claim from this call's entry: releasing it here
+                // would let the next attempt start a second instance on storage the late wallet is still
+                // holding.
+                handedOff = true;
+                AbandonConnect(storeId, connect, events, storageLock);
+                return "This store's Spark wallet did not finish connecting in time, so it is not running. Check "
+                       + "the server logs, then reconfigure the store or restart the server to try again.";
+            }
+
+            var client = new SparkLightningClient(
+                storeId,
+                settings.PaymentKey,
+                sdk,
+                _invoiceStore,
+                _outgoingStore,
+                _reconciler,
+                _broadcaster,
+                _bolt11Parser,
+                _loggerFactory.CreateLogger<SparkLightningClient>());
+
+            var instance = new SparkStoreInstance(storeId, sdk, client, events, storageLock);
+            _instances[storeId] = instance;
+            // Owned from the registration, not from the constructor call: a SparkStoreInstance ctor throw
+            // means the instance never accepted the lock.
+            handedOff = true;
+            _walletOwners[walletKey] = storeId;
+            instance.StartConsumer(envelope => HandleEventAsync(envelope, instance), _logger);
+
+            _logger.LogInformation("Store {StoreId}: Spark wallet connected on {Network}", storeId, sdkNetwork);
+
+            // Connect does no network I/O and validates no credentials, so it is not evidence of health. The first
+            // synced call costs ~2.2 s, which is why this is deliberately not awaited: N stores would otherwise
+            // add N × 2.2 s to BTCPay's startup for information nothing is waiting on.
+            _ = WarmUpAsync(storeId, sdk);
+            return null;
         }
-
-        var client = new SparkLightningClient(
-            storeId,
-            settings.PaymentKey,
-            sdk,
-            _invoiceStore,
-            _outgoingStore,
-            _reconciler,
-            _broadcaster,
-            _bolt11Parser,
-            _loggerFactory.CreateLogger<SparkLightningClient>());
-
-        var instance = new SparkStoreInstance(storeId, sdk, client, events, storageLock);
-        _instances[storeId] = instance;
-        _walletOwners[walletKey] = storeId;
-        instance.StartConsumer(envelope => HandleEventAsync(envelope, instance), _logger);
-
-        _logger.LogInformation("Store {StoreId}: Spark wallet connected on {Network}", storeId, sdkNetwork);
-
-        // Connect does no network I/O and validates no credentials, so it is not evidence of health. The first
-        // synced call costs ~2.2 s, which is why this is deliberately not awaited: N stores would otherwise
-        // add N × 2.2 s to BTCPay's startup for information nothing is waiting on.
-        _ = WarmUpAsync(storeId, sdk);
-        return null;
+        finally
+        {
+            if (!handedOff)
+            {
+                // Partial construction: an SDK that connected but that no instance ever adopted belongs to
+                // nobody yet, so it dies here next to the claim it was meant to guard. Its event channel is
+                // completed for the reason AbandonConnect completes one: no consumer was ever started for it,
+                // so an open writer would only buffer envelopes silently, while a completed one makes the
+                // listener's TryWrite report the refusal.
+                events?.Writer.TryComplete();
+                sdk?.Dispose();
+                storageLock.Dispose();
+            }
+        }
     }
 
     /// <summary>

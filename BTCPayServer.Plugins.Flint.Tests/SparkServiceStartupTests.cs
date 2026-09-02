@@ -39,6 +39,8 @@ public class SparkServiceStartupTests
 
     private const string HangingStore = "store-that-hangs";
     private const string HealthyStore = "store-that-works";
+    private const string ThrowingStore = "store-that-throws";
+    private const string NeverAdoptedStore = "store-never-adopted";
 
     [Fact]
     public void A_store_whose_SDK_connect_never_returns_does_not_hold_up_the_host()
@@ -97,14 +99,55 @@ public class SparkServiceStartupTests
     public async Task A_store_whose_connect_throws_does_not_stop_another_stores_wallet_from_starting()
     {
         using var h = SparkServiceHarness.Create();
-        h.SeedStore("store-that-throws", SparkServiceHarness.MnemonicFor(3));
+        h.SeedStore(ThrowingStore, SparkServiceHarness.MnemonicFor(3));
         h.SeedStore(HealthyStore, SparkServiceHarness.MnemonicFor(2));
-        h.Sdk.FailFor["store-that-throws"] = new InvalidOperationException("the SDK refused this seed");
+        h.Sdk.FailFor[ThrowingStore] = new InvalidOperationException("the SDK refused this seed");
 
         StartWithinTimeout(h);
 
         Assert.NotNull(await h.Service.GetClient(HealthyStore));
-        Assert.Null(await h.Service.GetClient("store-that-throws"));
+        Assert.Null(await h.Service.GetClient(ThrowingStore));
+    }
+
+    /// <summary>
+    /// A connect that throws must not lock its store out of its own wallet either.
+    /// </summary>
+    /// <remarks>
+    /// The timeout path already released the storage claim it had taken (see
+    /// <see cref="A_permanently_hung_connect_releases_the_storage_lock_so_the_store_can_be_reconfigured"/>),
+    /// but a connect that fails immediately is rethrown by <c>SparkDeadline</c> past both ownership handoffs,
+    /// and the leaked <c>FileShare.None</c> handle then refused the store's own next attempt with the
+    /// two-BTCPay-instances message — accusing another process of a hold this process was doing to itself,
+    /// which reconfiguring could never clear.
+    /// </remarks>
+    [Fact]
+    public async Task A_store_whose_connect_throws_leaves_the_storage_lock_claimable()
+    {
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(ThrowingStore, SparkServiceHarness.MnemonicFor(3));
+        h.Sdk.FailFor[ThrowingStore] = new InvalidOperationException("the SDK refused this seed");
+
+        StartWithinTimeout(h);
+
+        // The refused attempt named the failure it actually hit — the connection error — never the lock
+        // message. Startup swallows the throw per-store, so it surfaces in the operator's log.
+        Assert.Contains("the SDK refused this seed", h.Log.AllText);
+        Assert.DoesNotContain("Another process", h.Log.AllText);
+
+        // The decisive half: the claim the throwing attempt took is back on the shelf. Before the fix a
+        // FileStream nothing could any longer reach still held the directory, and this returned null.
+        var reclaimed = Sdk.SparkStorageLock.TryAcquire(h.StorageDirFor(ThrowingStore), out _);
+        Assert.NotNull(reclaimed);
+        reclaimed!.Dispose();
+
+        // And reconfiguring the store starts its wallet, rather than being told another process holds it.
+        h.Sdk.FailFor.Remove(ThrowingStore);
+        var settings = (await h.Service.Get(ThrowingStore))!;
+        var applied = await h.Service.Set(ThrowingStore, settings);
+
+        // Before the fix this came back not-running with the "Another process" refusal.
+        Assert.True(applied.WalletRunning, $"the store should be running, got: {applied.Reason}");
+        Assert.NotNull(await h.Service.GetClient(ThrowingStore));
     }
 
     /// <summary>
@@ -187,6 +230,44 @@ public class SparkServiceStartupTests
         Assert.False(
             writer.TryWrite(new Sdk.SparkEventEnvelope(HangingStore, Sdk.SparkEventKind.Synced, null)),
             "a completed writer refuses, which is what makes the listener report the loss rather than hide it");
+    }
+
+    /// <summary>
+    /// A wallet that connected but that no client ever adopted must die with the attempt, not leak.
+    /// </summary>
+    /// <remarks>
+    /// The <c>finally</c> guards a failed adoption on three halves — the storage claim, the SDK handle, and
+    /// the event channel — and the throwing-connect tests above cover only the claim, because that throw
+    /// lands before a handle exists. This reaches the other two: the harness builds the service without the
+    /// BOLT11 parser, so <c>SparkLightningClient</c>'s own argument check throws precisely where a real bad
+    /// dependency would, after a successful connect. No production seam was added for the test; the throw is
+    /// shipped code refusing a shipped-null argument.
+    /// </remarks>
+    [Fact]
+    public async Task A_wallet_that_connected_but_was_never_adopted_is_disposed_and_its_events_refused()
+    {
+        using var h = SparkServiceHarness.Create(failWalletAdoption: true);
+        h.SeedStore(NeverAdoptedStore, SparkServiceHarness.MnemonicFor(4));
+
+        // Startup swallows the adoption throw per-store, exactly as it swallows a connect throw: one broken
+        // store must not stop BTCPay starting.
+        StartWithinTimeout(h);
+        Assert.Contains("could not start its Spark wallet", h.Log.AllText);
+
+        var client = h.Sdk.Clients[NeverAdoptedStore];
+        Assert.True(
+            client.Disposed,
+            "a connected SDK handle that no instance ever adopted must die in the finally next to the claim "
+            + "it was meant to guard");
+
+        // And nothing is left buffering events for a consumer that will never start — the same proof the
+        // abandonment test above makes, now on the finally's own path.
+        Assert.False(
+            h.Sdk.EventWriters[NeverAdoptedStore].TryWrite(
+                new Sdk.SparkEventEnvelope(NeverAdoptedStore, Sdk.SparkEventKind.Synced, null)),
+            "the failed attempt's event writer must be completed, not left open and unreferenced");
+
+        Assert.Null(await h.Service.GetClient(NeverAdoptedStore));
     }
 
     /// <summary>
