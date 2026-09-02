@@ -37,8 +37,12 @@ string still holds a live credential for the wallet it names — save it on the 
 works — so it must still be treated as a secret; what is closed is the import onto another store through
 any HTTP save path, which is exactly the cross-store drive this paragraph used to describe as open. The
 caveats on the enforcement are that BTCPay's `ILightningConnectionStringHandler` is still never told which
-store is being configured, so the two plugin layers (*save-time refusal* and *startup sweep*) carry the
-enforcement rather than the string itself, and that the plugin generated this credential for you rather
+store is being configured, so the three plugin layers (*save-time refusal* in `SparkLightningClient.Validate`,
+the *render-time authorised-store match* in the setup-tab partials, and the *startup sweep*) carry the
+enforcement rather than the string itself — with the middle one meaning a read of the string through the
+Lightning settings page is now refused on mismatch too: those partials resolve the store from what the
+request was authorised for, never from the form-bound model id, and render nothing when the two disagree —
+and that the plugin generated this credential for you rather
 than you choosing to issue it. It **is rotated on every provision** — setting Spark up again (same seed or
 a new one) mints a fresh key and rewrites the store's Lightning configuration with it, invalidating every
 copy of the old string — so a leaked string is revoked by re-running setup, without waiting for a removal.
