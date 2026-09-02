@@ -93,7 +93,7 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
     public async Task<IReadOnlyList<InvoiceRecord>> ListForReconciliationAsync(
         string storeId,
         DateTimeOffset settleableFrom,
-        InvoiceReconciliationCursor? after,
+        InvoiceSettlementCursor? after,
         int limit,
         CancellationToken cancellationToken = default)
     {
@@ -111,16 +111,17 @@ public class EfInvoiceRecordStore : IInvoiceRecordStore
         if (after is not null)
         {
             // Keyset, not offset: a settled record leaves this result set, so an offset would skip whatever had
-            // shifted into its place.
-            var cursorCreatedAt = after.CreatedAt;
+            // shifted into its place. The comparison is on the ordering's own columns — expiry, then hash —
+            // which is also what makes the walk a seek into the partial covering index rather than a sort.
+            var cursorExpiresAt = after.ExpiresAt;
             var cursorHash = after.PaymentHash;
-            query = query.Where(r => r.CreatedAt > cursorCreatedAt
-                                     || (r.CreatedAt == cursorCreatedAt
+            query = query.Where(r => r.ExpiresAt > cursorExpiresAt
+                                     || (r.ExpiresAt == cursorExpiresAt
                                          && string.Compare(r.PaymentHash, cursorHash) > 0));
         }
 
         return await query
-            .OrderBy(r => r.CreatedAt)
+            .OrderBy(r => r.ExpiresAt)
             .ThenBy(r => r.PaymentHash)
             .Take(limit)
             .ToListAsync(cancellationToken);

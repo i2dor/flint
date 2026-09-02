@@ -6,13 +6,34 @@ using System.Threading.Tasks;
 namespace BTCPayServer.Plugins.Flint.Data;
 
 /// <summary>
-/// Position in a reconciliation walk. Ordered by creation time, then payment hash to break ties.
+/// Position in the credit walk. Ordered by creation time, then payment hash to break ties.
 /// </summary>
 /// <remarks>
 /// The payment hash is part of the cursor rather than decoration: two invoices created in the same tick would
 /// otherwise sit either side of a page boundary forever, one of them never examined.
+/// <para>
+/// The settlement walk carries <see cref="InvoiceSettlementCursor"/> instead: that walk pages by expiry, and a
+/// keyset cursor must name the same columns the ordering does, or a resumed page re-reads or skips records.
+/// </para>
 /// </remarks>
 public sealed record InvoiceReconciliationCursor(DateTimeOffset CreatedAt, string PaymentHash);
+
+/// <summary>
+/// Position in the settlement walk. Ordered by expiry, then payment hash to break ties.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Expiry rather than creation time because <see cref="IInvoiceRecordStore.ListForReconciliationAsync"/> pages
+/// soonest-expiring first — deliberately, so the walk is served by the partial covering index on
+/// <c>(StoreId, ExpiresAt)</c> — and the cursor has to advance over the columns the ordering uses.
+/// </para>
+/// <para>
+/// The payment hash is part of the cursor as much as in <see cref="InvoiceReconciliationCursor"/>, and it earns
+/// its keep more often here: invoices minted in one batch share an expiry to the second, so ties are the norm
+/// rather than the edge case.
+/// </para>
+/// </remarks>
+public sealed record InvoiceSettlementCursor(DateTimeOffset ExpiresAt, string PaymentHash);
 
 /// <summary>
 /// Durable storage for <see cref="InvoiceRecord"/>s.
@@ -47,7 +68,7 @@ public interface IInvoiceRecordStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// One page of a store's still-settleable invoices, oldest first, for the reconciliation pass.
+    /// One page of a store's still-settleable invoices, soonest-expiring first, for the reconciliation pass.
     /// </summary>
     /// <param name="settleableFrom">
     /// Lower bound on <see cref="InvoiceRecord.ExpiresAt"/>. Passing a time slightly in the past deliberately
@@ -59,13 +80,16 @@ public interface IInvoiceRecordStore
     /// removes it from this query's result set, which would shift an offset and silently skip its neighbours.
     /// </param>
     /// <remarks>
-    /// Ordered oldest-first, unlike <see cref="ListAsync"/>. The oldest pending invoices are the ones closest to
-    /// falling out of the window entirely, so they are the ones that must not starve behind newer arrivals.
+    /// Ordered by soonest-expiring, unlike <see cref="ListAsync"/>: a record near its expiry horizon is
+    /// processed first, and Expired-but-not-paid rows stay in the set because the predicate treats a cancelled
+    /// invoice as still payable. The expiry order is what lets the walk run over the partial covering index on
+    /// <c>(StoreId, ExpiresAt)</c>; the ordering and the <see cref="InvoiceSettlementCursor"/> must name the
+    /// same columns for exactly that reason.
     /// </remarks>
     Task<IReadOnlyList<InvoiceRecord>> ListForReconciliationAsync(
         string storeId,
         DateTimeOffset settleableFrom,
-        InvoiceReconciliationCursor? after,
+        InvoiceSettlementCursor? after,
         int limit,
         CancellationToken cancellationToken = default);
 
@@ -179,7 +203,9 @@ public interface IInvoiceRecordStore
     /// </param>
     /// <param name="after">
     /// Keyset cursor, exactly as in <see cref="ListForReconciliationAsync"/> and for the same reason: crediting
-    /// a record removes it from this result set, so an offset would skip its neighbours.
+    /// a record removes it from this result set, so an offset would skip its neighbours. This walk keeps
+    /// creation time as both its order and its cursor shape: it restarts from the top every pass and never
+    /// resumes across passes, so it never has to align with the settlement walk's expiry-ordered index.
     /// </param>
     /// <remarks>
     /// Normally empty — the credit is attempted the moment a settlement is recorded, and only fails when

@@ -35,6 +35,12 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     /// </remarks>
     public Exception? FailReconciliationListWith { get; set; }
 
+    /// <summary>
+    /// The cursors each <see cref="ListForReconciliationAsync"/> call received, in call order — so a test can
+    /// see what resume position the pass actually handed to the next page.
+    /// </summary>
+    public List<InvoiceSettlementCursor?> ReconciliationCursors { get; } = [];
+
     public IReadOnlyDictionary<string, InvoiceRecord> Records => _records;
 
     public Task AddAsync(InvoiceRecord record, CancellationToken cancellationToken = default)
@@ -73,10 +79,11 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     public Task<IReadOnlyList<InvoiceRecord>> ListForReconciliationAsync(
         string storeId,
         DateTimeOffset settleableFrom,
-        InvoiceReconciliationCursor? after,
+        InvoiceSettlementCursor? after,
         int limit,
         CancellationToken cancellationToken = default)
     {
+        ReconciliationCursors.Add(after);
         if (FailReconciliationListWith is not null)
             throw FailReconciliationListWith;
 
@@ -87,14 +94,14 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
 
         if (after is not null)
         {
-            query = query.Where(r => r.CreatedAt > after.CreatedAt
-                                     || (r.CreatedAt == after.CreatedAt
+            query = query.Where(r => r.ExpiresAt > after.ExpiresAt
+                                     || (r.ExpiresAt == after.ExpiresAt
                                          && string.Compare(r.PaymentHash, after.PaymentHash,
                                              StringComparison.Ordinal) > 0));
         }
 
         return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
-            .OrderBy(r => r.CreatedAt)
+            .OrderBy(r => r.ExpiresAt)
             .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
             .Take(limit)
             .ToList());

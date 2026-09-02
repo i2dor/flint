@@ -42,6 +42,23 @@ public class SparkPluginDbContext : DbContext
             // fold the filter's references to lowercase and fail to match.
             entity.HasIndex(record => new { record.StoreId, record.SettledAt })
                 .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
+
+            // ListForReconciliationAsync walks this store's settleable tail: StoreId equality,
+            // Status <> Paid, an ExpiresAt floor, then ExpiresAt/PaymentHash order with a small
+            // LIMIT. The partial index serves the walk end to end: the key is the equality column
+            // followed by the range floor, and it matches the walk's own ordering, so a page is a
+            // forward scan with a keyset seek instead of a sort — the planner only picks this index
+            // when the ORDER BY rides its columns, which is why the walk orders by expiry at all.
+            // There is deliberately no INCLUDE payload: the walk materialises whole InvoiceRecord
+            // entities, so no index-only scan is possible and every returned row is a heap fetch
+            // anyway — the index earns its keep on the key and the seek alone. Paid is the enum
+            // value 1 (InvoiceRecordStatus.Paid), so the predicate admits Unpaid (0) and Expired (2),
+            // exactly matching the query's "a cancelled invoice is still payable" rule. Status is a
+            // non-nullable int, so <> 1 is null-safe here.
+            // Quoted identifiers as above: the columns are mixed-case.
+            entity.HasIndex(record => new { record.StoreId, record.ExpiresAt })
+                .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
+                .HasFilter("\"Status\" <> 1");
         });
 
         modelBuilder.Entity<OutgoingPaymentRecord>(entity =>

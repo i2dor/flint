@@ -461,6 +461,69 @@ public class SparkSettlementReconcilerTests
         Assert.Equal(130, settled);
     }
 
+    /// <summary>
+    /// Seeds a store with one record more than the per-pass cap (1000), every record a permanent miss —
+    /// looked up, no payment behind the id — so only the cap itself can stop a pass over it — and runs one
+    /// capped pass. Expiries ascend with the record index and creation times descend with it, so the two
+    /// candidate orderings visit these records in opposite orders: a walk paging by expiry and a walk paging
+    /// by creation cannot be confused for each other, and neither can their cursors.
+    /// </summary>
+    private static async Task<(SparkSettlementReconciler Reconciler, InMemoryInvoiceRecordStore Store,
+        FakeSparkSdkClient Sdk, CapturingLogger<SparkSettlementReconciler> Log, InvoiceRecord StoppedAt)>
+        ACappedPassOverAManufacturedBacklog()
+    {
+        var (reconciler, store, _, log) = CreateWithLog();
+        var sdk = new FakeSparkSdkClient();
+        var expiryBase = DateTimeOffset.UtcNow.AddHours(1);
+        var createdBase = DateTimeOffset.UtcNow.AddMinutes(-10);
+        for (var i = 0; i < 1001; i++)
+        {
+            Seed(store, i.ToString("x64"), sdkPaymentId: $"sdk-{i}",
+                createdAt: createdBase.AddMinutes(-i),
+                expiresAt: expiryBase.AddMinutes(i));
+        }
+
+        // Page size 100 × cap 1000: the pass examines records 0..999 in expiry order and stops with one
+        // record still unexamined.
+        Assert.Equal(0, await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct));
+        Assert.Contains("per-pass limit", log.AllText);
+        return (reconciler, store, sdk, log, store.Records[999.ToString("x64")]);
+    }
+
+    [Fact]
+    public async Task The_resume_cursor_handed_across_passes_carries_expiry_and_hash()
+    {
+        // The resume position has to name the walk's own ordering columns — expiry, then hash. A creation-time
+        // cursor would point the next pass at the wrong row in exactly the backlog case the resume exists for.
+        var (reconciler, store, sdk, _, stoppedAt) = await ACappedPassOverAManufacturedBacklog();
+
+        Assert.Equal(0, await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct));
+
+        // Pass 1 made ten list requests (cursors 0..9, the first null); pass 2's first request is the
+        // eleventh, and it carries the record the capped pass stopped on — by expiry, not by creation.
+        var resumed = Assert.IsType<InvoiceSettlementCursor>(store.ReconciliationCursors[10]);
+        Assert.Equal(new InvoiceSettlementCursor(stoppedAt.ExpiresAt, stoppedAt.PaymentHash), resumed);
+        Assert.NotEqual(stoppedAt.CreatedAt, resumed.ExpiresAt);
+    }
+
+    [Fact]
+    public async Task The_next_pass_resumes_past_the_capped_prefix_instead_of_restarting_it()
+    {
+        // The starvation property, end to end: a store whose settleable set outgrows the cap must have every
+        // record reached within a bounded number of passes. The first thousand permanent misses are the
+        // abandoned prefix; the next pass must walk past them straight to the one record it never saw,
+        // not re-examine the prefix.
+        var (reconciler, store, sdk, _, _) = await ACappedPassOverAManufacturedBacklog();
+
+        Assert.Equal(0, await reconciler.ReconcileStoreAsync(StoreId, sdk, Ct));
+
+        // Exactly one more record was looked up across the two passes — the last-expiring one — and pass 2
+        // asked for exactly one page to find it.
+        Assert.Equal(1001, sdk.GetPaymentCalls.Count);
+        Assert.Equal("sdk-1000", sdk.GetPaymentCalls[^1]);
+        Assert.Equal(11, store.ReconciliationCursors.Count);
+    }
+
     [Fact]
     public async Task Reconciling_a_store_includes_a_recently_expired_invoice()
     {
