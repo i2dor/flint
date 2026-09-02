@@ -5,6 +5,122 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.0.4] — 2026-09-02
+
+### Security
+
+- **A store owner can no longer read another store's connection string through the setup page's
+  extension points.** The two Spark setup-tab partials resolved everything from the form-bound
+  `Model.StoreId`, and BTCPay's Lightning-setup POST never overwrites the view model's store id — so
+  a user holding `canmodifystoresettings` on store A could make the page re-render with store B's
+  `type=flint;store-id=…;key=…` bearer spend credential embedded in it (the attacker reaches the
+  partial on every validation-failure re-render, and there are six). Both partials now resolve the
+  store the request was authorised for (`HttpContext.GetStoreDataOrNull()`, populated by core's
+  authorisation on GET and POST alike) and render nothing when there is none or it disagrees; the
+  connection-string lookup takes only the authorised id and documents that as a caller contract.
+  Regression tests render the actual compiled partials for all three cases (and the tests were
+  shown to fail when the guard is bypassed). Verified end to end against a live BTCPay v2.4.2 host:
+  the forged re-render shows nothing, the owner's own view is unchanged. Core-side companion:
+  [btcpayserver#7544](https://github.com/btcpayserver/btcpayserver/issues/7544).
+- **A Spark SDK connect that throws rather than hangs no longer leaves the store's wallet locked
+  out of its own storage.** `StartInstanceAsync` handed the `FileShare.None` storage lock over only
+  on its timeout and success paths; a throw (bad Breez API key, corrupt SQLite store, unsupported
+  target, listener setup failing) escaped both and every later reconfigure of that store failed with
+  the misleading "Another process is already using this store's storage" refusal until a server
+  restart. The region now releases the lock — and any SDK client it connected but never adopted —
+  on every exit; a factory test proves the second save for the same store is not refused. The
+  SDK's abandoned event channel is completed along the same path.
+- **The funded-regtest CI artifacts can no longer publish the one thing the suite exists to catch.**
+  `forwarded.log` was written before any gate and `preimage-audit.md` printed every 64-hex run
+  verbatim into a 14-day downloadable artifact even when `sdk.log` was withheld for carrying the
+  seed, a payment preimage or the provider session token. The same withholding gate now covers the
+  scrubbed stream, preimages print one-way fingerprints everywhere (including the assertion the
+  suite makes into the public job log), occurrence counts and classifications survive, and a
+  `<file>.WITHHELD.txt` marker names what was withheld and why.
+- **The dependency graph is pinned and hash-verified at restore.** Committed `packages.lock.json`
+  for the plugin and test projects (covering the ~200 MB native payload by content hash), an exact
+  `[0.23.0]` pin for `Breez.Sdk.Spark` on the comment that always claimed it, a root
+  `NuGet.config` restricted to api.nuget.org with `packageSourceMapping` pinning every package id
+  to that source, locked-mode restores that fail the build on any graph drift, and the release
+  packaging no longer restores from a prefix-matched NuGet cache. The Breez update automation
+  (check script and bump workflow) survives the bracketed pin and preserves it when bumping.
+- **SDK exception text shown to merchants is scrubbed at the single choke point.** `SparkErrors.
+  Describe` relays Breez error payloads (with their `@v1=` prefix stripped) into banners, Greenfield
+  4xx bodies, sweep errors and claim outcomes; its output now passes through the log scrubber, so a
+  secret-shaped payload in an SDK exception cannot reach a merchant's screen, the API or the
+  database verbatim. The fail-closed replacement text is merchant-phrased rather than a redaction
+  marker.
+- **Rejected imports no longer land in any cache.** `SparkController` sets `ResponseCache(NoStore)`
+  at class level: a rejected seed-import re-render carries the submitted recovery phrase back to the
+  merchant, and nothing set cache headers before.
+
+### Changed
+
+- **The shipped native payload set drops win-x86.** The Breez SDK's 32-bit Windows library (~15 MB,
+  15% of the pre-prune payload) is deleted at packaging and the packaged RID set is asserted to be
+  exactly `linux-x64`, `linux-arm64`, `osx-arm64`, `osx-x64` and `win-x64` — no BTCPay host loads
+  32-bit plugins. This is a support change: instances pinned to a 32-bit runtime were already
+  unable to run any of the plugin's IL, and the 64-bit payloads were and are unchanged.
+- **The cross-store configuration sweep runs at startup plus every half hour, and classifies each
+  store from the store rows it already loaded.** The backstop rode the reconciliation's one-minute
+  cadence and, per store, re-fetched the store by id to then parse the same two JSONB columns it had
+  just materialised and thrown away — 1+N round trips and 2N parses per pass over every store on
+  the server, to find a condition save-time validation refuses on every HTTP path. It now runs from
+  one loaded store table, on a 30-minute schedule whose launcher-fired first pass is the startup
+  sweep. Remediation semantics (clearing the cross-store config and rotating the victim's payment
+  key) are unchanged.
+
+### Performance
+
+- **The settleable-invoice walk now seeks a partial covering index instead of walking a store's
+  whole invoice history.** `ListForReconciliationAsync` ordered by creation, so a store's abandoned
+  checkouts — unpaid and never pruned — sat permanently at the front of every pass: on a seeded
+  500k-row history the planner walked and discarded 491k rows per pass (~62 ms, ~9.5k buffers). The
+  walk now orders by expiry over `IX_InvoiceRecords_StoreId_ExpiresAt_Settleable`
+  (`(StoreId, ExpiresAt)`, partial on non-paid invoices), turns the same query into an indexed range
+  seek at both the 500-row and 500k-row shapes, and keeps keyset resume, per-pass caps and the
+  settleability of recently-expired invoices exactly as they were. A Postgres contract test pins the
+  planner's use of the index.
+- **The payment-hash prompt recording stops writing for stores that do not use Flint, and its table
+  retains rows for 14 days.** The indexer previously subscribed to every BTCPay Lightning prompt
+  mint (the LNURL path writes one per payer request) and nothing ever deleted: its rows are only
+  read within the credit walk's 7-day retry horizon plus 7-day reporting grace. Recording is now
+  gated on any Flint store being provisioned (re-read live per event, so provisioning re-arms it
+  without a restart), and an hourly task deletes rows past the walk's own listing floor via a single
+  indexed `ExecuteDeleteAsync` — see `docs/limitations.md` for the window and its one stated edge.
+
+### Fixed
+
+- **A platform-refused storage claim no longer tells the merchant where the storage is.** The
+  lock-refusal path for `UnauthorizedAccessException` echoed the exception message (an absolute
+  path) to `canviewstoresettings` users; it now returns the same fixed merchant wording the
+  permission failure already used, and the OS detail goes to the operator log as a structured field.
+- **The cross-chain catalog client no longer follows redirects**, so a moved or hijacked catalog
+  source surfaces as a fetch failure (treated as "no routes this round") rather than being silently
+  trusted wherever it pointed.
+- **The strip script's docker fallback now actually strips the Mach-O payloads it handles.** The
+  fallback installed llvm but copied the file and verified the untouched copy, printing a false
+  "already stripped" no-op; the `llvm-strip -x` step now sits between the copy and the signature
+  verification, and the fallback was exercised end to end (page-hash verification and dlopen probe
+  on arm64 macOS).
+- **`plugin-register.sh` writes valid dev settings for any path.** The JSON was printf-interpolated
+  into the file (broken by quotes/backslashes, silently truncated if jq was missing); it is now
+  emitted with `jq -n --arg` behind an availability guard, and `docs/building.md` lists jq as a
+  prerequisite.
+- **The Postgres test harness truncates all four plugin tables**, including `InvoicePaymentHashes`
+  (rows previously leaked across tests and could mask a credit-gateway fallback regression).
+
+### Documentation
+
+- `docs/trust-model.md` enforces the three-layer enumeration (save-time refusal, render-time
+  authorised-store match, periodic sweep) and states the sweep's cadence.
+- `docs/testing.md`'s artifact table states the withholding conditions for both artifact files and
+  the fingerprinting behaviour.
+- `docs/limitations.md` documents the 14-day payment-hash retention window and the one edge a
+  payment minted near the window's floor can still meet.
+- `docs/ci-and-releases.md` documents the shipped RID set and the packaging prune step.
+
+
 ## [1.0.3] — 2026-08-28
 
 ### Changed
@@ -697,3 +813,4 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
 [1.0.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.1
 [1.0.2]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.2
 [1.0.3]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.3
+[1.0.4]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.4
