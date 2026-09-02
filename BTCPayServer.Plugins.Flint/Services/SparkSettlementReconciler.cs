@@ -634,10 +634,10 @@ public class SparkSettlementReconciler
         var settled = 0;
         var examined = 0;
         // Resumed from where the previous pass stopped, not from the top. The per-pass cap exists to bound a
-        // pass's work, but restarting at the oldest invoice every pass would make it a starvation line: with
-        // more settleable invoices than the cap, the same oldest set is re-examined forever and everything
-        // behind it is never reached. The cursor carries across passes and resets only when a pass drains the
-        // set, so every invoice is reached within a bounded number of passes.
+        // pass's work, but restarting at the soonest-expiring invoice every pass would make it a starvation
+        // line: with more settleable invoices than the cap, the same soonest set is re-examined forever
+        // and everything behind it is never reached. The cursor carries across passes and resets only
+        // when a pass drains the set, so every invoice is reached within a bounded number of passes.
         InvoiceSettlementCursor? cursor = _resumeCursors.TryGetValue(storeId, out var resume) ? resume : null;
 
         while (examined < MaxInvoicesPerPass)
@@ -702,8 +702,8 @@ public class SparkSettlementReconciler
 
         if (examined >= MaxInvoicesPerPass && cursor is { } stopped)
         {
-            // The next pass resumes here rather than restarting at the oldest invoice, which is what makes the
-            // sentence below true rather than a starvation line.
+            // The next pass resumes here rather than restarting at the soonest-expiring invoice, which is what
+            // makes the sentence below true rather than a starvation line.
             _resumeCursors[storeId] = stopped;
             _logger.LogInformation(
                 "Store {StoreId}: reconciliation examined its per-pass limit of {Count} Spark invoices; the "
@@ -712,7 +712,10 @@ public class SparkSettlementReconciler
         }
         else
         {
-            // The set drained; the next pass starts from the top again.
+            // The set drained; the next pass starts from the top again. One fairness note on the shape the
+            // resume changed: under expiry order a newly minted short-TTL invoice can sort behind a cursor
+            // parked on a long-dated one and wait until the set drains to be reached — bounded by the same
+            // per-pass cap, and backstop-only, since a settlement normally arrives on its own event.
             _resumeCursors.TryRemove(storeId, out _);
         }
 
