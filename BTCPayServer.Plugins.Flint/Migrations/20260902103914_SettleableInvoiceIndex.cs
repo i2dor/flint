@@ -15,8 +15,7 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                 schema: "BTCPayServer.Plugins.Flint",
                 table: "InvoiceRecords",
                 columns: new[] { "StoreId", "ExpiresAt" },
-                filter: "\"Status\" <> 1")
-                .Annotation("Npgsql:IndexInclude", new[] { "CreatedAt", "PaymentHash" });
+                filter: "\"Status\" <> 1");
         }
 
         /// <inheritdoc />

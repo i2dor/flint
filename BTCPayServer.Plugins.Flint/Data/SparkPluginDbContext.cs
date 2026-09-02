@@ -49,14 +49,15 @@ public class SparkPluginDbContext : DbContext
             // followed by the range floor, and it matches the walk's own ordering, so a page is a
             // forward scan with a keyset seek instead of a sort — the planner only picks this index
             // when the ORDER BY rides its columns, which is why the walk orders by expiry at all.
-            // The INCLUDE payload carries the per-row columns the walk reads off each record. Paid
-            // is the enum value 1 (InvoiceRecordStatus.Paid), so the predicate admits Unpaid (0)
-            // and Expired (2), exactly matching the query's "a cancelled invoice is still payable"
-            // rule. Status is a non-nullable int, so <> 1 is null-safe here.
+            // There is deliberately no INCLUDE payload: the walk materialises whole InvoiceRecord
+            // entities, so no index-only scan is possible and every returned row is a heap fetch
+            // anyway — the index earns its keep on the key and the seek alone. Paid is the enum
+            // value 1 (InvoiceRecordStatus.Paid), so the predicate admits Unpaid (0) and Expired (2),
+            // exactly matching the query's "a cancelled invoice is still payable" rule. Status is a
+            // non-nullable int, so <> 1 is null-safe here.
             // Quoted identifiers as above: the columns are mixed-case.
             entity.HasIndex(record => new { record.StoreId, record.ExpiresAt })
                 .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
-                .IncludeProperties(nameof(InvoiceRecord.CreatedAt), nameof(InvoiceRecord.PaymentHash))
                 .HasFilter("\"Status\" <> 1");
         });
 

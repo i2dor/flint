@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace BTCPayServer.Plugins.Flint.Migrations
 {
     [DbContext(typeof(SparkPluginDbContext))]
-    [Migration("20260901225821_SettleableInvoiceIndex")]
+    [Migration("20260902103914_SettleableInvoiceIndex")]
     partial class SettleableInvoiceIndex
     {
         /// <inheritdoc />
@@ -100,8 +100,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                     b.HasIndex("StoreId", "ExpiresAt")
                         .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
                         .HasFilter("\"Status\" <> 1");
-
-                    NpgsqlIndexBuilderExtensions.IncludeProperties(b.HasIndex("StoreId", "ExpiresAt"), new[] { "CreatedAt", "PaymentHash" });
 
                     b.HasIndex("StoreId", "SettledAt")
                         .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
