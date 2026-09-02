@@ -1020,6 +1020,42 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     }
 
     /// <summary>
+    /// Whether any store on this server has Flint configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The any-store form of <see cref="Get"/>, for the rare reader whose question is not about one store but
+    /// about whether the plugin has anything to serve at all — today only the prompt-mint indexer, which gates
+    /// its writes on it (see <see cref="SparkInvoicePaymentHashIndexer"/>). An empty cache before the load is
+    /// not evidence that no store is configured, so the read waits on the startup gate — but on the bounded
+    /// wait of <see cref="Resolve"/> (<see cref="StartupWaitTimeout"/>), not unboundedly: this runs on the
+    /// indexer's server-wide event-loop path, and a hung SDK call at startup must not stall its ProcessEvents
+    /// loop with an unbounded event channel. A wait that expires fails open — the caller proceeds as though a
+    /// store existed and records — because a wrong "no" silently drops a row the reconciliation story cannot
+    /// recover, while a wrong "yes" only costs a row retention will retire.
+    /// </para>
+    /// <para>
+    /// A snapshot, not a lease: a store provisioned concurrently with the read may or may not be counted,
+    /// which is exactly the granularity its one consumer needs — it re-reads on every event.
+    /// </para>
+    /// </remarks>
+    public async Task<bool> HasAnyStoreProvisioned()
+    {
+        if (!_startupGate.Task.IsCompleted)
+        {
+            try
+            {
+                await _startupGate.Task.WaitAsync(StartupWaitTimeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                return true;
+            }
+        }
+        return !_settings.IsEmpty;
+    }
+
+    /// <summary>
     /// One pass of the cross-store Lightning configuration sweep: clears any store whose Lightning payment
     /// method embeds another store's Spark wallet, and rotates that victim's payment key. See
     /// <see cref="SparkLightningConfigSweeper"/> for why this exists and why clearing cannot damage a

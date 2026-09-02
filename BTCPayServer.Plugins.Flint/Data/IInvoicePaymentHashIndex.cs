@@ -21,7 +21,8 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// <para>
 /// Write-once per hash, read by payment hash only — a payment hash is unique to the BOLT11 minted for one
 /// invoice, so there is no update path and no store-scoped key, exactly as in core's insert-only
-/// <c>AddressInvoices</c>.
+/// <c>AddressInvoices</c>. It is not insert-only forever, though: <see cref="PruneBeforeAsync"/> retires
+/// associations the credit walk can no longer consult, which is the one deletion this table ever sees.
 /// </para>
 /// </remarks>
 public interface IInvoicePaymentHashIndex
@@ -41,4 +42,17 @@ public interface IInvoicePaymentHashIndex
     Task<InvoicePaymentHash?> FindByPaymentHashAsync(
         string paymentHash,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes every association first seen strictly before <paramref name="cutoff"/> and returns how many
+    /// rows went. Idempotent: a second pass with the same cutoff deletes nothing.
+    /// </summary>
+    /// <remarks>
+    /// The one delete path on a table otherwise modeled on core's insert-only <c>AddressInvoices</c>. The
+    /// caller's bound is <c>SparkInvoiceCreditor.ListableFrom</c> — the age past which no settlement is
+    /// still listed by the credit walk, so an association older than it can never be consulted again.
+    /// See <c>Services.SparkPaymentHashRetentionTask</c>.
+    /// </remarks>
+    /// <param name="cutoff">Associations with a first-seen time older than this are removed.</param>
+    Task<int> PruneBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default);
 }

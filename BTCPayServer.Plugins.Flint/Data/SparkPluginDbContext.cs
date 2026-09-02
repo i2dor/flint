@@ -93,6 +93,14 @@ public class SparkPluginDbContext : DbContext
             // The table name is pinned so the raw SQL in EfInvoicePaymentHashIndex.RecordAsync names the same
             // table EF creates, rather than relying on both ending up at EF's default pluralisation.
             entity.ToTable("InvoicePaymentHashes");
+            // The retention pass (Services.SparkPaymentHashRetentionTask) deletes by exactly this column:
+            // DELETE ... WHERE "FirstSeenAt" < cutoff. Without an index that delete is a full scan of the
+            // whole association table on every pass; with one it is a range seek over the stale head of the
+            // table. The read path (FindByPaymentHashAsync) never touches FirstSeenAt, so this index serves
+            // the delete alone. Name pinned rather than left to EF's default, as the settleable index above
+            // pins its own.
+            entity.HasIndex(record => record.FirstSeenAt)
+                .HasDatabaseName("IX_InvoicePaymentHashes_FirstSeenAt");
         });
     }
 }

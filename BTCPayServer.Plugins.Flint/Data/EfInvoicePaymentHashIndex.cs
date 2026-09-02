@@ -75,4 +75,21 @@ public class EfInvoicePaymentHashIndex : IInvoicePaymentHashIndex
             .AsNoTracking()
             .FirstOrDefaultAsync(h => h.PaymentHash == paymentHash.ToLowerInvariant(), cancellationToken);
     }
+
+    /// <remarks>
+    /// <c>ExecuteDeleteAsync</c> rather than load-and-<c>Remove</c>: the retrying execution strategy refuses
+    /// user-initiated transactions (the class remarks above), and set-delete is the whole operation anyway —
+    /// no row is examined first, so there is nothing for a context to track. It emits the single
+    /// <c>DELETE ... WHERE "FirstSeenAt" &lt; {cutoff}</c> the <c>FirstSeenAt</c> index exists to serve; the
+    /// Postgres contract suite pins that it deletes exactly the rows the cutoff selects.
+    /// </remarks>
+    public async Task<int> PruneBeforeAsync(
+        DateTimeOffset cutoff,
+        CancellationToken cancellationToken = default)
+    {
+        await using var context = _contextFactory.CreateContext();
+        return await context.InvoicePaymentHashes
+            .Where(hash => hash.FirstSeenAt < cutoff)
+            .ExecuteDeleteAsync(cancellationToken);
+    }
 }
