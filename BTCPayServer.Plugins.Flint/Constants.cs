@@ -206,6 +206,15 @@ public static class Constants
     /// <summary>How often <c>SweepTask</c> runs, measured from the end of the previous pass.</summary>
     public static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(2);
 
+    /// <summary>How often <c>SparkPaymentHashRetentionTask</c> runs, measured from the end of the previous pass.</summary>
+    /// <remarks>
+    /// Hourly: the statement it runs is one indexed <c>DELETE</c>, so an hour buys a server an idle-day pass
+    /// that costs a point lookup, while the freshest a row can be when it dies stays within an hour of the
+    /// walk's own 14-day floor. Making the pass any sharper would prune nothing sooner that the walk could
+    /// still have consulted.
+    /// </remarks>
+    public static readonly TimeSpan PaymentHashRetentionInterval = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Wall clock a single reconciliation pass may spend before it stops starting new stores.
     /// </summary>

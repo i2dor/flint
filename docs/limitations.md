@@ -56,6 +56,16 @@
     it provisions a store; while that setting is on, core's own index covers the hash even through an
     outage.)
 
+    The plugin's own copy of the association is also bounded, and that bound is worth knowing by name:
+    rows are kept for **fourteen days** — the credit walk's own floor (seven days of credit retries plus the
+    seven-day abandoned-reporting grace), the point past which nothing in the plugin will ever read the row
+    again — and an hourly background pass deletes everything older, so this table, unlike `sdk.log` below,
+    cannot grow without bound. On a server with no Flint store it never grows at all: prompt-mint recording
+    is gated on at least one store being provisioned. The bound costs one case: a payment arriving **more
+    than fourteen days after its prompt was minted** reaches an association this pass may already have
+    deleted, and is reported unattributable — the same outcome as the outage gap above, and the same
+    fourteen-day line as the bullet before it.
+
   One thing the plugin does *not* keep from BTCPay's own listener is worth naming as a non-limitation:
   the preimage is written onto the payment prompt as well as onto the payment, so LNURL
   proof-of-payment (LUD-21 `verify`) works for a Flint checkout exactly as it does for any other

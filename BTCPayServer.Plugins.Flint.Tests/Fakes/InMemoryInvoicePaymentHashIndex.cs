@@ -37,6 +37,16 @@ public sealed class InMemoryInvoicePaymentHashIndex : IInvoicePaymentHashIndex
         CancellationToken cancellationToken = default) =>
         Task.FromResult(_entries.GetValueOrDefault(paymentHash.ToLowerInvariant()));
 
+    public Task<int> PruneBeforeAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default)
+    {
+        var stale = _entries.Where(pair => pair.Value.FirstSeenAt < cutoff)
+            .Select(pair => pair.Key)
+            .ToList();
+        foreach (var hash in stale)
+            _entries.Remove(hash);
+        return Task.FromResult(stale.Count);
+    }
+
     /// <summary>Seeds an association directly, standing in for a row written before this instance existed.</summary>
     public void Seed(InvoicePaymentHash entry) => _entries[entry.PaymentHash.ToLowerInvariant()] = entry;
 }

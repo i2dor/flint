@@ -28,6 +28,13 @@ public abstract class InvoicePaymentHashIndexContractTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    // Association rows for the prune fact, distinct from PaymentFixture's so the write-once facts' rows
+    // (never pruned, recorded at roughly "now") cannot overlap this fact's deletes on Postgres.
+    private const string StaleHash =
+        "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789012345678901234567890aa";
+    private const string RecentHash =
+        "b2c3d4e5f60718293a4b5c6d7e8f90123456789012345678901234567890aabb";
+
     private static InvoicePaymentHash Entry(string? hash = null, string? invoiceId = null) => new()
     {
         PaymentHash = hash ?? PaymentFixture.PaymentHash,
@@ -82,6 +89,52 @@ public abstract class InvoicePaymentHashIndexContractTests
         Assert.NotNull(after);
         Assert.Equal(InvoiceId, after.InvoiceId);
         Assert.Equal(original.FirstSeenAt, after.FirstSeenAt);
+    }
+
+    [Fact]
+    public async Task Pruning_deletes_only_associations_first_seen_before_the_cutoff()
+    {
+        // The retention pass (Services.SparkPaymentHashRetentionTask) deletes the stale head of the table on
+        // every run, in the EF implementation as a set DELETE that never sees the rows it removes — which is
+        // exactly why the predicate has to be pinned against the real store, not just the in-memory copy.
+        // Rows older than the credit walk's listing floor must actually leave (that is the whole point of
+        // retention); rows the walk can still consult must not budge. The hashes are literals rather than
+        // PaymentFixture values so this fact cannot collide with the write-once facts' rows on Postgres,
+        // where the table is not truncated between facts.
+        var index = await CreateIndexAsync();
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now
+            - Services.SparkInvoiceCreditor.CreditRetryHorizon
+            - Services.SparkInvoiceCreditor.AbandonedReportingGrace;
+
+        await index.RecordAsync(
+            new InvoicePaymentHash
+            {
+                PaymentHash = StaleHash,
+                InvoiceId = InvoiceId,
+                PaymentMethodId = PaymentMethodId,
+                FirstSeenAt = cutoff - TimeSpan.FromMinutes(1)
+            },
+            Ct);
+        await index.RecordAsync(
+            new InvoicePaymentHash
+            {
+                PaymentHash = RecentHash,
+                InvoiceId = InvoiceId,
+                PaymentMethodId = PaymentMethodId,
+                FirstSeenAt = now
+            },
+            Ct);
+
+        var removed = await index.PruneBeforeAsync(cutoff, Ct);
+
+        Assert.Equal(1, removed);
+        Assert.Null(await index.FindByPaymentHashAsync(StaleHash, Ct));
+        Assert.NotNull(await index.FindByPaymentHashAsync(RecentHash, Ct));
+
+        // Idempotent: a second pass with the same cutoff finds nothing left to do.
+        Assert.Equal(0, await index.PruneBeforeAsync(cutoff, Ct));
+        Assert.NotNull(await index.FindByPaymentHashAsync(RecentHash, Ct));
     }
 }
 

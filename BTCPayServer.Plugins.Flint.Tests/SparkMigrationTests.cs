@@ -176,4 +176,38 @@ public class SparkMigrationTests
         Assert.Equal(operation.Schema, drop.Schema);
         Assert.Equal(operation.Table, drop.Table);
     }
+
+    /// <summary>
+    /// The retention delete gets its range index, changes nothing else, and drops cleanly.
+    /// </summary>
+    /// <remarks>
+    /// <c>SparkPaymentHashRetentionTask</c>'s pass is a <c>DELETE ... WHERE "FirstSeenAt" &lt; cutoff</c> on a
+    /// table that grows with every prompt mint on the server; without this index the retention pass full-
+    /// scans the very table it exists to shrink. No read path touches <c>FirstSeenAt</c>, so dropping the
+    /// index would degrade only the delete, silently, on a real merchant's server. The migration must also
+    /// carry nothing else: the retention work is a schema addition, not a row change, and an unexpected
+    /// column or backfill riding along with an index migration is exactly the surprise this pin exists to
+    /// surface. The <c>Down</c> must drop the same named index in the same schema, or unwinding an upgrade
+    /// strands it.
+    /// </remarks>
+    [Fact]
+    public void The_retention_index_covers_the_delete_column_and_carries_nothing_else()
+    {
+        var operation = Assert.Single(
+            new PaymentHashRetentionIndex().UpOperations.OfType<CreateIndexOperation>());
+
+        Assert.Equal("IX_InvoicePaymentHashes_FirstSeenAt", operation.Name);
+        Assert.Equal("BTCPayServer.Plugins.Flint", operation.Schema);
+        Assert.Equal("InvoicePaymentHashes", operation.Table);
+        Assert.Equal(new[] { nameof(InvoicePaymentHash.FirstSeenAt) }, operation.Columns);
+
+        // Index only — no column, data, or other-table operations ride along.
+        Assert.Single(new PaymentHashRetentionIndex().UpOperations);
+
+        var drop = Assert.Single(
+            new PaymentHashRetentionIndex().DownOperations.OfType<DropIndexOperation>());
+        Assert.Equal(operation.Name, drop.Name);
+        Assert.Equal(operation.Schema, drop.Schema);
+        Assert.Equal(operation.Table, drop.Table);
+    }
 }

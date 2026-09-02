@@ -273,6 +273,13 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // SyncWallet plus one GetInfo per configured store per pass. See SweepTask for the full argument.
         services.AddScheduledTask<SweepTask>(Constants.SweepInterval);
 
+        // Payment-hash retention. The indexer's write gate stops this plugin recording prompts on a server
+        // with no Flint store; this pass retires rows — on any server — older than the credit walk's own
+        // 14-day listing floor, which is the last moment any reader can still consult them. Hourly, because
+        // the pass is one indexed DELETE and the freshest a row can die is bounded by this interval; see
+        // SparkPaymentHashRetentionTask for why it is its own task and not a line in the reconciliation pass.
+        services.AddScheduledTask<SparkPaymentHashRetentionTask>(Constants.PaymentHashRetentionInterval);
+
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");
         services.AddUIExtension("ln-payment-method-setup-tab", "Spark/LNPaymentMethodSetupTab");
