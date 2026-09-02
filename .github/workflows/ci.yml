@@ -47,17 +47,19 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      # setup-dotnet's own `cache: true` input keys on packages.lock.json; this repo now commits
-      # lock files, but the caching here stays a direct global-packages cache keyed on the csproj
-      # files so all jobs share one mechanism and one key. The locks are enforced separately by
-      # the locked-mode restore step below.
+      # What the locked-mode restore below actually guarantees is the *shape* of the graph: it
+      # fails if the csproj PackageReferences and the committed packages.lock.json disagree. It
+      # does not re-download or re-hash packages already sitting in the local cache — NuGet
+      # trusts the bytes a pre-populated cache hands it — so the cache is part of what gets
+      # built, and this key is exact on the csproj hashes with deliberately NO `restore-keys`
+      # prefix fallback: a warm cache from a different dependency set must never be adopted.
+      # setup-dotnet's `cache: true` input keys on the lock files instead; this repo keeps the
+      # direct global-packages cache so all jobs share one mechanism and one key.
       - name: Cache NuGet packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
 
       # The committed packages.lock.json files pin the full resolved graph. A restore in locked
       # mode fails right here if any PackageReference drifts from the locks, instead of the build
@@ -79,7 +81,9 @@ jobs:
         # documented for local fresh-worktree builds. Serialising the scheduler removes the collision at
         # the cost of wall-clock; if that cost ever matters, the real fix is unifying the global
         # properties, not removing this flag and hoping the timing holds.
-        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release -m:1
+        # --no-restore: the locked-mode restore above already populated every project in this
+        # solution's graph; re-restoring here would be an unlocked implicit restore over top.
+        run: dotnet build BTCPayServer.Plugins.Flint.slnx --configuration Release -m:1 --no-restore
 
       # The Postgres and live-regtest suites skip themselves when their environment variables are
       # unset, so this run covers the in-process tests only. The other two jobs cover the rest.
@@ -128,8 +132,6 @@ jobs:
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
 
       - name: Build (plugin + tests)
         # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
@@ -191,8 +193,6 @@ jobs:
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
 
       - name: Build (plugin + tests)
         # -m:1 serialises MSBuild project scheduling. Not for speed obviously, but for correctness:
@@ -285,8 +285,6 @@ jobs:
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
 
       - name: Build (plugin + tests)
         if: steps.gate.outputs.funded == 'true'

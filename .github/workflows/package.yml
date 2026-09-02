@@ -121,8 +121,10 @@ jobs:
         id: build-dir
         run: |
           set -euo pipefail
+          # --no-restore: the locked-mode restore above is the only restore this job performs;
+          # an implicit one here would be unlocked and could re-resolve over the pinned graph.
           target_dir="$(dotnet build "$PROJECT_PATH" \
-            --configuration Release -t:Build -getProperty:TargetDir)"
+            --configuration Release --no-restore -t:Build -getProperty:TargetDir)"
           if [ ! -f "$target_dir/$PLUGIN_NAME.dll" ]; then
             echo "error: $target_dir/$PLUGIN_NAME.dll was not produced by the build" >&2
             exit 1
