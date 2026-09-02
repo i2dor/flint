@@ -1020,10 +1020,22 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// The connection string a store's Lightning payment method should hold. Null when the store has no
     /// payment key yet.
     /// </summary>
-    public async Task<string?> GetConnectionString(string storeId)
+    /// <remarks>
+    /// <para>
+    /// Caller contract: <paramref name="authorisedStoreId"/> must be the store that was security-authorised
+    /// for this request — for an HTTP request, <c>HttpContext.GetStoreDataOrNull()?.Id</c> — never an id
+    /// bound from a form or query string. This returns the store's bearer spend credential and checks
+    /// nothing itself about who is asking.
+    /// </para>
+    /// <para>
+    /// The only callers are the two setup-tab extension-point partials, and both resolve the authorised
+    /// store from HttpContext and refuse a mismatch before calling this.
+    /// </para>
+    /// </remarks>
+    public async Task<string?> GetConnectionString(string authorisedStoreId)
     {
-        var settings = await Get(storeId).ConfigureAwait(false);
-        return settings?.PaymentKey is { } key ? SparkConnectionString.Format(storeId, key) : null;
+        var settings = await Get(authorisedStoreId).ConfigureAwait(false);
+        return settings?.PaymentKey is { } key ? SparkConnectionString.Format(authorisedStoreId, key) : null;
     }
 
     /// <inheritdoc />

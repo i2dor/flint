@@ -1,3 +1,4 @@
+@using BTCPayServer
 @using BTCPayServer.Client
 @using BTCPayServer.Plugins.Flint.Services
 @using Microsoft.AspNetCore.Mvc.TagHelpers
@@ -13,10 +14,17 @@
     and fills core's connection-string field in, so pressing Save on core's own screen keeps working and
     writes exactly the configuration the plugin would write itself.
 
-    On rendering the connection string, which embeds the store's payment key: this extension point is only
-    ever rendered inside core's SetupLightningNode page, and both its GET and its POST require
-    CanModifyStoreSettings. Core itself puts the store's existing connection string in the textarea on that
-    same page. A view-only user never reaches here.
+    On rendering the connection string, which embeds the store's payment key: the only store this partial
+    may read from is the store authorised for the request, resolved from HttpContext — never Model.StoreId.
+    Core authorises both the GET and the POST of its SetupLightningNode page with CanModifyStoreSettings;
+    when a store-scoped authorisation succeeds, BuiltInPermissionHandler records the store in
+    HttpContext.Items, and core's global SetContextFilter (registered in Hosting/Startup.cs) promotes it
+    with SetStoreData — which is what HttpContext.GetStoreDataOrNull() reads on both verbs. Model.StoreId,
+    by contrast, is form-bound: LightningNodeViewModel.StoreId is an ordinary settable property, the GET
+    fills it from the route, and the POST never reassigns it before re-rendering this view — so on a POST
+    re-render it can name any store. The partial therefore resolves the authorised id first and refuses to
+    look anything up unless it equals Model.StoreId. A view-only user still never reaches here; what is
+    additionally closed is a forged form-bound id reaching another store's connection string.
 
     The @using and @inject lines are repeated even though Views/_ViewImports.cshtml declares them: an
     extension-point partial is rendered from a core view's context, and relying on the plugin's imports
@@ -27,12 +35,20 @@
     return;
 }
 @{
+    // The authorised store comes from the request, not the form: see the note above. Refuse before any
+    // lookup when it is missing (fail-closed) or disagrees with what the form claims.
+    var authorisedStoreId = Context.GetStoreDataOrNull()?.Id;
+    if (authorisedStoreId is null ||
+        !string.Equals(authorisedStoreId, Model.StoreId, StringComparison.Ordinal))
+    {
+        return;
+    }
     // Awaited rather than blocked on: the service's startup gate is a Task and a Razor view is already async.
-    var connectionString = await SparkService.GetConnectionString(Model.StoreId);
+    var connectionString = await SparkService.GetConnectionString(authorisedStoreId);
 }
 @if (connectionString is null)
 {
-    <a asp-controller="Spark" asp-action="Setup" asp-route-storeId="@Model.StoreId"
+    <a asp-controller="Spark" asp-action="Setup" asp-route-storeId="@authorisedStoreId"
        permission="@Policies.CanModifyStoreSettings" role="tab" aria-selected="false">
         <label for="LightningNodeType-Spark">Set up Flint</label>
     </a>
