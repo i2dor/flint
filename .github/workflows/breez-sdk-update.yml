@@ -85,12 +85,16 @@ jobs:
       - name: Bump Breez.Sdk.Spark to ${{ needs.check.outputs.latest }}
         run: |
           set -euo pipefail
+          # The pin is an exact-version bracket pin (Version="[0.23.0]"): the sed keeps the
+          # brackets on the way out, and \[?[0-9][0-9.]*\]? also survives a future unbracketed
+          # pin. The guard greps fixed-string, since a literal "[0.24.0]" would otherwise be a
+          # character class to grep.
           sed -i -E \
-            "s|(<PackageReference Include=\"Breez.Sdk.Spark\" Version=\")[0-9][0-9.]*(\")|\1$LATEST\2|" \
+            "s|(<PackageReference Include=\"Breez.Sdk.Spark\" Version=\")\[?[0-9][0-9.]*\]?(\")|\1[$LATEST]\2|" \
             BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj
-          if ! grep -q "Include=\"Breez.Sdk.Spark\" Version=\"$LATEST\"" \
+          if ! grep -qF "Include=\"Breez.Sdk.Spark\" Version=\"[$LATEST]\"" \
             BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj; then
-            echo "error: the PackageReference did not end up at $LATEST; refusing to open a PR" >&2
+            echo "error: the PackageReference did not end up at [$LATEST]; refusing to open a PR" >&2
             exit 1
           fi
           git add BTCPayServer.Plugins.Flint/BTCPayServer.Plugins.Flint.csproj

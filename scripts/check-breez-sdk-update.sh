@@ -28,7 +28,7 @@ if [ ! -f "$CSPROJ" ]; then
   exit 1
 fi
 
-current="$(grep -oE '<PackageReference Include="Breez.Sdk.Spark" Version="[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?"' "$CSPROJ" \
+current="$(grep -oE '<PackageReference Include="Breez.Sdk.Spark" Version="\[?[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?\]?' "$CSPROJ" \
   | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
 
 if [ -z "$current" ]; then
