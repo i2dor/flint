@@ -62,6 +62,12 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// for sweeping. What is left in this class is rendering and redirecting.
 /// </para>
 /// </remarks>
+// The setup page deliberately re-renders a rejected import with the recovery phrase the person
+// just typed (see BuildSetupViewModel's remarks) — right behaviour for the page, but a cached
+// response would then keep a mnemonic on browser or proxy machinery outside the session that
+// typed it. Every page here is authorised, per-user, and followed by POSTs, so none of it is
+// cacheable in principle and the refusal is stated once for the controller rather than per action.
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [Route("plugins/{storeId}/spark")]
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
 // Stated rather than inherited. Every POST here changes money-handling configuration, and CSRF protection

@@ -609,4 +609,29 @@ public class SparkControllerStoreScopeTests
                 + "never authorised for.");
         }
     }
+
+    /// <summary>
+    /// The controller-level response-cache refusal is load-bearing, and nothing but this test notices
+    /// when it is dropped.
+    /// </summary>
+    /// <remarks>
+    /// The setup page deliberately re-renders a rejected import with the recovery phrase just typed, so a
+    /// cached page would park a mnemonic on browser or proxy machinery outside the session that typed it.
+    /// MVC does not fail if the attribute disappears — every page keeps working — so the only thing
+    /// between a future refactor and that leak is this assertion. It checks the class, not the actions:
+    /// the attribute is stated once for the controller, which is also how it outlives per-action churn.
+    /// </remarks>
+    [Fact]
+    public void The_controller_refuses_response_caching_at_the_class_level()
+    {
+        var cache = typeof(SparkController)
+            .GetCustomAttributes(typeof(ResponseCacheAttribute), inherit: false)
+            .Single();
+
+        Assert.True(
+            cache is ResponseCacheAttribute { NoStore: true, Location: ResponseCacheLocation.None },
+            "SparkController must carry [ResponseCache(NoStore = true, Location = None)] at class "
+            + "level: the setup page re-renders a rejected import with the phrase just typed, and a "
+            + "cached response would keep that mnemonic outside the session that typed it.");
+    }
 }

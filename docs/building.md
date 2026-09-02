@@ -6,6 +6,7 @@ For development you additionally need:
 
 - .NET SDK 10.0 or later
 - Git with submodule support
+- `jq` (used by `plugin-register.sh` to write the dev settings file)
 - PostgreSQL and the other BTCPay development dependencies (via Docker) for running BTCPay locally
 
 Clone with submodules, or initialise them after the fact:

@@ -244,6 +244,9 @@ strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + expl
   if [ -n "$tool" ] && command -v python3 >/dev/null 2>&1; then
     # Strip a copy, verify the copy, only then replace the original: a strip
     # that invalidates the signature must degrade to "skipped", never ship.
+    # Known wart: a $tool that resolves but fails at exec (a broken llvm package,
+    # a 127) is blamed on signature verification by the warn below — the container
+    # path does not share it, its apt install guarantees llvm-18 is present.
     out="$(mktemp "${TMPDIR:-/tmp}/flint-macho.XXXXXX")"
     if cp "$f" "$out" && "$tool" -x "$out" 2>/dev/null && python3 "$MACHO_PY" verify "$out"; then
       if [ "$(fsize "$out")" = "$before" ]; then
@@ -272,6 +275,11 @@ strip_macho_llvm() { # $1 = path to .dylib — non-macOS host: llvm-strip + expl
       mode="$(python3 /macho_sig.py flags "/src/$1")"
       case "$mode" in unsigned|adhoc) ;; *) echo "signature state: $mode" >&2; exit 3 ;; esac
       cp "/src/$1" /out/stripped.dylib
+      # The actual strip. The llvm-18 package names its binary llvm-strip-18; probe the
+      # unversioned name as a fallback, mirroring the host path above. Until this line
+      # existed the container only copied and verified, so the docker fallback reported
+      # every dylib as a no-op ("already stripped") and shipped it unstripped.
+      "$(command -v llvm-strip-18 || command -v llvm-strip)" -x /out/stripped.dylib
       python3 /macho_sig.py verify /out/stripped.dylib
       chmod --reference "/src/$1" /out/stripped.dylib
     ' macho "$(basename "$f")"; then

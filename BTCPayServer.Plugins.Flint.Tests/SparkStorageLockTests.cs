@@ -52,6 +52,62 @@ public class SparkStorageLockTests
         first!.Dispose();
     }
 
+    /// <summary>
+    /// A claim the platform itself refuses says what is wrong without saying where on the disk.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A permission refusal surfaces as an <c>UnauthorizedAccessException</c> whose own message
+    /// embeds the absolute path of the denied file, and the reason returned here is relayed to
+    /// whoever saves the store's settings — a store manager on a <c>CanViewStoreSettings</c>
+    /// route, not necessarily a server operator. The host's filesystem layout is a fact about the
+    /// server, and it belongs in the operator's log (which names the directory deliberately),
+    /// not in the banner.
+    /// </para>
+    /// <para>
+    /// Triggered honestly rather than by mocking: a read-only lock file cannot be opened
+    /// <c>ReadWrite</c> on either platform, which is the exact throw. The pre-check skips the
+    /// test where the environment does not enforce that anyway — running as root, where the
+    /// open would succeed and there is nothing to route.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void A_claim_the_platform_refuses_names_no_path_to_the_merchant()
+    {
+        using var dir = new TempDirectory();
+        var lockFile = Path.Combine(dir.Path, SparkStorageLock.FileName);
+        File.WriteAllText(lockFile, "held elsewhere\n");
+        File.SetAttributes(lockFile, FileAttributes.ReadOnly);
+        try
+        {
+            var openSucceeded = false;
+            try
+            {
+                new FileStream(lockFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
+                openSucceeded = true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+
+            Assert.SkipUnless(
+                !openSucceeded, "the platform let a read-only file be opened for writing (root?), so the refusal never happens");
+
+            var claimed = SparkStorageLock.TryAcquire(dir.Path, out var reason);
+
+            Assert.Null(claimed);
+            Assert.NotNull(reason);
+            Assert.Contains("could not be claimed", reason);
+            Assert.DoesNotContain(dir.Path, reason);
+            Assert.DoesNotContain(SparkStorageLock.FileName, reason);
+        }
+        finally
+        {
+            // Restored so TempDirectory can clean the whole thing up.
+            File.SetAttributes(lockFile, FileAttributes.Normal);
+        }
+    }
+
     [Fact]
     public void Releasing_a_claim_lets_the_next_one_take_it()
     {
@@ -131,7 +187,7 @@ public class SparkStorageLockTests
         // the file, not to close one afterwards.
         Assert.DoesNotContain("contended", h.Sdk.Connects);
 
-        Assert.Contains("another process holds the lock", h.Log.AllText);
+        Assert.Contains("Another process is already using", h.Log.AllText);
 
         other!.Dispose();
     }

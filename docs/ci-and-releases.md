@@ -42,7 +42,10 @@
     sha256 each strip prints) is argued in the script's header, which is also the local pre-release
     recipe: run `dotnet build -c Release`, run the script against the output directory, then
     `PluginPacker` by hand. The step is idempotent and fails the package loudly if an ELF cannot be
-    stripped; the Windows DLLs are not touched at all, because they carry no strippable debug data.
+    stripped; the Windows DLLs are not touched at all, because they carry no strippable debug
+    data. The 32-bit `win-x86` payload is instead pruned at packaging by the step that follows,
+    whose RID-set assertion pins the shipped set to `linux-x64`, `linux-arm64`, `osx-arm64`,
+    `osx-x64` and `win-x64` only.
   - **Artifacts are signed with keyless Sigstore build provenance**
     (`actions/attest-build-provenance`), not a maintainer GPG key: there is no long-lived key for
     anyone to generate, store, lose or leak, and the attestation binds the artifact's digest to this

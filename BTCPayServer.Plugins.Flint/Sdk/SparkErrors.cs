@@ -23,7 +23,17 @@ public static class SparkErrors
     public static string Describe(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
-        return exception switch
+        // Scrubbed at the choke point. What leaves this method is free text from the SDK and its
+        // service providers, and every one of its sinks is merchant-facing — TempData banners,
+        // Greenfield validation bodies, stored `SweepRecord.Error`s, claim outcome messages —
+        // none of them standing behind the log bridge's scrubbing. The rules that cover the
+        // operator's log cover the merchant's error by standing here; scrubbing at each call
+        // site instead would be forty chances to forget one.
+        // Two trades taken knowingly: the scrubber's HeaderCredential pattern eats to end-of-line
+        // on an authorization/bearer/cookie word (fail-closed — a truncated sentence beats a leaked
+        // token), and RedactPhrases may run the Bip39English static ctor inside a catch handler
+        // (low risk: it only loads an embedded wordlist).
+        var merchantFacing = exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
             SdkException.SparkException spark => Strip(spark.v1),
@@ -41,6 +51,9 @@ public static class SparkErrors
             ObjectDisposedException => "The Spark wallet for this store is no longer running.",
             _ => Strip(exception.Message)
         };
+        // The total-redaction fallback is this sink's own sentence, not the log bridge's: a banner
+        // quoting a failed request should not gain a stray clause about SDK log lines.
+        return SparkLogScrubber.Scrub(merchantFacing, "Spark reported an error that could not be shown safely.");
     }
 
     /// <summary>

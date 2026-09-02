@@ -151,6 +151,35 @@ jobs:
               bash scripts/strip-native-payloads.sh "$TARGET_DIR"
             '
 
+      # Prune the one native RID no BTCPay Server deployment can load. Measured on
+      # Breez.Sdk.Spark 0.23.0 before this step: linux-x64 60 MB, linux-arm64 60 MB,
+      # osx-arm64 25 MB, osx-x64 26 MB, win-x64 17 MB, win-x86 15 MB. A 32-bit Windows
+      # process is not a BTCPay Server deployment target, and unlike the ELF/Mach-O
+      # payloads the PE cannot be stripped (the script header says why: its debug
+      # directory is a tens-of-bytes CodeView pointer — all payload, no DWARF), so
+      # removal is the only reduction available for it. The assertion that follows is
+      # what makes the prune safe in both directions: a RID set that gains an entry is
+      # Breez shipping a platform nobody here has verified, and one that loses an entry
+      # is this plugin about to fail loading for somebody. Neither should ship silently
+      # just because win-x86 stopped being there.
+      - name: Prune the win-x86 native payload
+        env:
+          TARGET_DIR: ${{ steps.build-dir.outputs.path }}
+        run: |
+          set -euo pipefail
+          rm -rf "$TARGET_DIR/runtimes/win-x86"
+          rids="$(cd "$TARGET_DIR/runtimes" \
+            && LC_ALL=C find . -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+            | LC_ALL=C sort | tr '\n' ' ')"
+          expected="linux-arm64 linux-x64 osx-arm64 osx-x64 win-x64 "
+          if [ "$rids" != "$expected" ]; then
+            echo "error: after pruning win-x86 the shipped RID set is not the expected one." >&2
+            echo "  expected: linux-arm64 linux-x64 osx-arm64 osx-x64 win-x64" >&2
+            echo "  actual:   $rids" >&2
+            exit 1
+          fi
+          echo "Native payloads ship for: $rids"
+
       - name: Run PluginPacker
         env:
           PLUGIN_DIR: ${{ steps.build-dir.outputs.path }}
