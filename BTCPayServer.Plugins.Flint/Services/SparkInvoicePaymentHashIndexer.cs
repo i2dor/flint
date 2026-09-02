@@ -32,6 +32,14 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// that gives a prompt its hash) are skipped; the mint event that follows carries the hash.
 /// </para>
 /// <para>
+/// <b>Gated on the plugin actually serving anyone.</b> The event carries no store id (core's
+/// <c>InvoiceNewPaymentDetailsEvent</c> is invoice + details + payment method), and the association this index
+/// exists to restore only matters for a store this plugin has provisioned — for every other store core's own
+/// <c>AddressInvoices</c> is complete and the write is noise on a server-wide hot path. The gate is therefore
+/// the any-store question, read live from <see cref="SparkService"/> on every event: true from the moment the
+/// first Flint store is provisioned, without a restart.
+/// </para>
+/// <para>
 /// <b>Best-effort, and why that is the right bound.</b> A failed write is logged and swallowed — it must
 /// not unwind the event-aggregator loop. This index is a fallback over core's own table, not the primary
 /// authority: for a store with LUD-21 on (which this plugin forces when it provisions a store), core's
@@ -44,14 +52,17 @@ namespace BTCPayServer.Plugins.Flint.Services;
 public class SparkInvoicePaymentHashIndexer : EventHostedServiceBase
 {
     private readonly IInvoicePaymentHashIndex _index;
+    private readonly SparkService _sparkService;
     private readonly ILogger<SparkInvoicePaymentHashIndexer> _logger;
 
     public SparkInvoicePaymentHashIndexer(
         EventAggregator eventAggregator,
         IInvoicePaymentHashIndex index,
+        SparkService sparkService,
         ILogger<SparkInvoicePaymentHashIndexer> logger) : base(eventAggregator, logger)
     {
         _index = index;
+        _sparkService = sparkService;
         _logger = logger;
     }
 
@@ -92,6 +103,15 @@ public class SparkInvoicePaymentHashIndexer : EventHostedServiceBase
             // that follows does.
             if (!BTCPayInvoiceCreditGateway.CreditablePaymentMethods.Contains(prompt.PaymentMethodId)
                 || prompt.Details is not LigthningPaymentPromptDetails { PaymentHash: not null } details)
+            {
+                return;
+            }
+
+            // The any-store gate, re-read per event rather than cached: provisioning is rare and the settings
+            // cache offers no invalidation hook to hang a flag on, while a stale false would silently stop
+            // recording associations for a store provisioned since startup. Placed after the payment-method
+            // filter so the common skip — a prompt this plugin could never credit — costs no dictionary read.
+            if (!await _sparkService.HasAnyStoreProvisioned().ConfigureAwait(false))
             {
                 return;
             }
