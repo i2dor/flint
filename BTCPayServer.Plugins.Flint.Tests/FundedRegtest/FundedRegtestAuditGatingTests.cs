@@ -10,18 +10,21 @@ namespace BTCPayServer.Plugins.Flint.Tests.FundedRegtest;
 /// <remarks>
 /// <para>
 /// The funded suite withholds <c>forwarded.log</c> and <c>sdk.log</c> from the run artefacts when they carry
-/// secret material, and prints fingerprints instead of values in <c>preimage-audit.md</c> where a withheld
-/// source is what carries them. Those decisions are pure functions on the fixture
+/// secret material, and <c>preimage-audit.md</c> prints fingerprints instead of values — for preimage-kind
+/// rows always, and for any row whose source file was withheld. Those decisions are pure functions on the
+/// fixture
 /// (<see cref="FundedRegtestWallet.AuditValue"/>, <c>AuditContext</c>, <c>AuditCell</c>, <c>HexRunRow</c>,
-/// <c>ValueIsWithheld</c>) so they can be settled here, deterministically, without a wallet — the funded
-/// collection itself stays gated on <c>SPARK_REGTEST_SEED</c> and money.
+/// <c>ValueIsWithheld</c>, <c>SecretMaterialIn</c>) so they can be settled here, deterministically, without
+/// a wallet — the funded collection itself stays gated on <c>SPARK_REGTEST_SEED</c> and money.
 /// </para>
 /// <para>
 /// What each fact defends: a withheld source must never publish its raw values or context; a source that is
 /// attached must keep publishing them verbatim (the artefact is evidence, not just an exclusion device); the
 /// fingerprint must be the same one-way SHA-256 prefix the seed fingerprint uses, so a value fingerprint and
-/// a verdict can be matched by hand; and only preimage-kind values are treated as secret material — payment
-/// hashes and txids are public by design and redacting them would gut the table.
+/// a verdict can be matched by hand; preimage-kind values are secret on sight — the fingerprint plus the
+/// row's counts proves exactly what the value proved, so their rows print it whatever the sources hold —
+/// while payment hashes and txids are public by design and redacting them would gut the table; and the
+/// secret detectors must name seed-, preimage- and token-shaped text without a live wallet.
 /// </para>
 /// </remarks>
 public class FundedRegtestAuditGatingTests
@@ -77,22 +80,20 @@ public class FundedRegtestAuditGatingTests
     }
 
     [Fact]
-    public void Only_a_preimage_carried_by_a_withheld_source_is_fingerprinted()
+    public void Preimage_kind_values_are_fingerprinted_on_sight_and_public_identifiers_are_not()
     {
-        // A recorded preimage present in the withheld raw log: fingerprint it.
-        Assert.True(FundedRegtestWallet.ValueIsWithheld("preimage", rawWithheld: true, 1, false, 0));
-        // Present in the withheld forwarded log instead: same answer.
-        Assert.True(FundedRegtestWallet.ValueIsWithheld("preimage", false, 0, forwardedWithheld: true, 2));
-        // A preimage neither withheld file carries — the clean case the tests aim for — still prints its
-        // value: nothing is being withheld for it, and the value is what proves the count columns mean
-        // something.
-        Assert.False(FundedRegtestWallet.ValueIsWithheld("preimage", rawWithheld: true, 0, false, 0));
-        // Payment hashes and txids are public identifiers: withholding a file that mentions them says nothing
-        // about printing the hash in the table.
-        Assert.False(FundedRegtestWallet.ValueIsWithheld("payment hash", rawWithheld: true, 5, false, 0));
-        Assert.False(FundedRegtestWallet.ValueIsWithheld("txid", false, 0, forwardedWithheld: true, 1));
-        // A raw log that is attached may carry the preimage's hash with no fingerprinting.
-        Assert.False(FundedRegtestWallet.ValueIsWithheld("preimage", rawWithheld: false, 0, false, 0));
+        // A recorded preimage is fingerprinted on its row whatever the state of the log sources: the
+        // fingerprint plus the row's occurrence counts proves the same evidence property the verbatim value
+        // would, so there is no source configuration under which publishing it buys the artefact anything
+        // the withheld-risk does not outweigh.
+        Assert.True(FundedRegtestWallet.ValueIsWithheld("preimage"));
+        Assert.True(FundedRegtestWallet.ValueIsWithheld("Recovery preimage"));
+        // Payment hashes, txids and idempotency keys are public identifiers: their rows print the value,
+        // which is what lets a reader match the artefact against an invoice or a block explorer, and
+        // withholding a file that happens to mention them says nothing about publishing them.
+        Assert.False(FundedRegtestWallet.ValueIsWithheld("payment hash"));
+        Assert.False(FundedRegtestWallet.ValueIsWithheld("sweep txid"));
+        Assert.False(FundedRegtestWallet.ValueIsWithheld("sweep idempotency key"));
     }
 
     [Fact]
@@ -113,5 +114,59 @@ public class FundedRegtestAuditGatingTests
         Assert.Equal(
             "*(redacted — source withheld)*",
             FundedRegtestWallet.AuditContext(true, "pay | invoice `123"));
+    }
+
+    // A deterministic fake seed phrase: twelve real BIP39 words, no more of a secret than the fake preimage.
+    private const string FakeMnemonic =
+        "abandon ability able about above absent absorb abstract absurd abuse access accident";
+
+    [Fact]
+    public void SecretMaterialIn_names_seed_shaped_preimage_shaped_and_token_shaped_text()
+    {
+        // Six or more consecutive mnemonic words is a seed leak even when the line is truncated.
+        Assert.Equal(
+            "the wallet seed",
+            FundedRegtestWallet.SecretMaterialIn(
+                "restoring wallet from word list: absent absorb abstract absurd abuse access accident",
+                FakeMnemonic,
+                []));
+
+        // A recorded preimage value appearing anywhere in the text — no key name beside it required.
+        Assert.Equal(
+            "a payment preimage",
+            FundedRegtestWallet.SecretMaterialIn(
+                $"payment completed, opaque blob {FakePreimage} in payload",
+                FakeMnemonic,
+                [new FundedRegtestWallet.KnownIdentifier("preimage", FakePreimage)]));
+
+        // The session_token name next to a value — the shape SparkLogScrubber redacts on.
+        Assert.Equal(
+            "the service provider's session token",
+            FundedRegtestWallet.SecretMaterialIn(
+                """{"data":{"session_token":"s3cr3t-session-value"}}""",
+                FakeMnemonic,
+                []));
+
+        // The same hex and a txid as PUBLIC identifiers do not trip the gate.
+        Assert.Null(
+            FundedRegtestWallet.SecretMaterialIn(
+                $"invoice paid hash={FakePreimage} txid=01020304050607080910",
+                FakeMnemonic,
+                [
+                    new FundedRegtestWallet.KnownIdentifier("payment hash", FakePreimage),
+                    new FundedRegtestWallet.KnownIdentifier("sweep txid", "01020304050607080910")
+                ]));
+    }
+
+    [Fact]
+    public void Secret_detectors_pass_null_empty_and_clean_text_through()
+    {
+        Assert.Null(FundedRegtestWallet.SecretMaterialIn(null, FakeMnemonic, []));
+        Assert.Null(FundedRegtestWallet.SecretMaterialIn("", FakeMnemonic, []));
+        Assert.Null(FundedRegtestWallet.SecretMaterialIn("a perfectly ordinary debug line", FakeMnemonic, []));
+        Assert.False(FundedRegtestWallet.SeedAppearsIn("", FakeMnemonic));
+        Assert.False(FundedRegtestWallet.SeedAppearsIn("a perfectly ordinary debug line", FakeMnemonic));
+        Assert.False(FundedRegtestWallet.SessionTokenAppearsIn(""));
+        Assert.False(FundedRegtestWallet.SessionTokenAppearsIn("session_timeout reached, nothing to redact"));
     }
 }
