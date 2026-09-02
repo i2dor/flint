@@ -21,10 +21,14 @@
     HttpContext.Items, and core's global SetContextFilter (registered in Hosting/Startup.cs) promotes it
     with SetStoreData — which is what HttpContext.GetStoreDataOrNull() reads on both verbs. Model.StoreId,
     by contrast, is form-bound: LightningNodeViewModel.StoreId is an ordinary settable property, the GET
-    fills it from the route, and the POST never reassigns it before re-rendering this view — so on a POST
-    re-render it can name any store. The partial therefore resolves the authorised id first and refuses to
-    look anything up unless it equals Model.StoreId. A view-only user still never reaches here; what is
-    additionally closed is a forged form-bound id reaching another store's connection string.
+    fills it from the route, and the POST never reassigns it before re-rendering this view — so on any
+    path it can name any store, and the form value is never trusted on any path. The partial resolves the
+    authorised id first, refuses only when it is missing (fail-closed), and every lookup and link below
+    keys off authorisedStoreId alone — nothing reads Model.StoreId after the guard. An earlier revision
+    also refused when the two ids disagreed; that comparison was dropped because it turned benign
+    mismatch re-renders into silent suppression and added no security, the form id feeding no lookup
+    either way. A view-only user still never reaches here; what is closed is a forged form-bound id
+    reaching another store's connection string.
 
     The @using and @inject lines are repeated even though Views/_ViewImports.cshtml declares them: an
     extension-point partial is rendered from a core view's context, and relying on the plugin's imports
@@ -35,11 +39,11 @@
     return;
 }
 @{
-    // The authorised store comes from the request, not the form: see the note above. Refuse before any
-    // lookup when it is missing (fail-closed) or disagrees with what the form claims.
+    // The authorised store comes from the request, not the form: see the note above. The form-bound
+    // Model.StoreId is never trusted on any path — nothing below reads it — so the only refusal here is
+    // a missing authorisation, which fails closed before any lookup.
     var authorisedStoreId = Context.GetStoreDataOrNull()?.Id;
-    if (authorisedStoreId is null ||
-        !string.Equals(authorisedStoreId, Model.StoreId, StringComparison.Ordinal))
+    if (authorisedStoreId is null)
     {
         return;
     }
