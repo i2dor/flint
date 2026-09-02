@@ -426,18 +426,20 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         // in-memory dictionary and therefore per process: two BTCPay instances sharing one data directory each
         // pass it and each connect an SDK instance to the same non-WAL SQLite file. See SparkStorageLock for
         // why that is a corruption hazard rather than merely a duplicate-sweep one.
-        var storageLock = SparkStorageLock.TryAcquire(GetWorkDir(storeId), out var lockReason);
+        var storageLock = SparkStorageLock.TryAcquire(GetWorkDir(storeId), out var lockReason, out var lockDetail);
         if (storageLock is null)
         {
             // The reason is logged as well as returned: an instance holding the claim and a
             // permission refusal arrive here through different exceptions and call for
             // different fixes, and a log line that pre-decided which one it was would
-            // misdirect the operator on half of them.
+            // misdirect the operator on half of them. The OS's own words ride along as a
+            // structured field — this line is the operator's log, the one place the denied
+            // path belongs; the returned reason stays merchant-safe.
             _logger.LogError(
                 "Store {StoreId}: refusing to start its Spark wallet. {LockReason} The storage "
                 + "directory is {StorageDir}; run a single BTCPay instance against this data "
-                + "directory.",
-                storeId, lockReason, GetWorkDir(storeId));
+                + "directory. OS detail: {LockDetail}",
+                storeId, lockReason, GetWorkDir(storeId), lockDetail ?? "none");
             return lockReason;
         }
 

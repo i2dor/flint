@@ -29,7 +29,11 @@ public static class SparkErrors
         // none of them standing behind the log bridge's scrubbing. The rules that cover the
         // operator's log cover the merchant's error by standing here; scrubbing at each call
         // site instead would be forty chances to forget one.
-        return SparkLogScrubber.Scrub(exception switch
+        // Two trades taken knowingly: the scrubber's HeaderCredential pattern eats to end-of-line
+        // on an authorization/bearer/cookie word (fail-closed — a truncated sentence beats a leaked
+        // token), and RedactPhrases may run the Bip39English static ctor inside a catch handler
+        // (low risk: it only loads an embedded wordlist).
+        var merchantFacing = exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
             SdkException.SparkException spark => Strip(spark.v1),
@@ -46,7 +50,10 @@ public static class SparkErrors
             SdkException => Strip(exception.Message),
             ObjectDisposedException => "The Spark wallet for this store is no longer running.",
             _ => Strip(exception.Message)
-        });
+        };
+        // The total-redaction fallback is this sink's own sentence, not the log bridge's: a banner
+        // quoting a failed request should not gain a stray clause about SDK log lines.
+        return SparkLogScrubber.Scrub(merchantFacing, "Spark reported an error that could not be shown safely.");
     }
 
     /// <summary>

@@ -200,7 +200,19 @@ internal static class SparkLogScrubber
     /// the process deadlocks — so a regex timeout, or anything else, yields a wholly redacted line rather than
     /// a partially scrubbed one. Losing a log line is always cheaper than leaking one.
     /// </remarks>
-    internal static string Scrub(string? line)
+    internal static string Scrub(string? line) =>
+        Scrub(line, $"{Redacted} (a Spark SDK log line could not be scrubbed and was dropped)");
+
+    /// <summary>
+    /// The same, with the caller's own sentence for the total-redaction case.
+    /// </summary>
+    /// <remarks>
+    /// Not every caller writes to the operator's log. <c>SparkErrors.Describe</c> scrubs text that lands in
+    /// merchant-facing banners and stored records, where "a Spark SDK log line could not be scrubbed" is both
+    /// the wrong noun and a second sentence nobody asked for next to the failure it accompanies — so the sink
+    /// supplies its own fallback instead of inheriting the log bridge's.
+    /// </remarks>
+    internal static string Scrub(string? line, string fallback)
     {
         if (string.IsNullOrEmpty(line))
             return string.Empty;
@@ -216,7 +228,7 @@ internal static class SparkLogScrubber
         }
         catch (Exception)
         {
-            return $"{Redacted} (a Spark SDK log line could not be scrubbed and was dropped)";
+            return fallback;
         }
     }
 

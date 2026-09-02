@@ -66,11 +66,24 @@ internal sealed class SparkStorageLock : IDisposable
     /// </param>
     /// <returns>The held lock, or null when another process holds it or it could not be taken.</returns>
     public static SparkStorageLock? TryAcquire(string directory, out string? reason)
+        => TryAcquire(directory, out reason, out _);
+
+    /// <summary>
+    /// The same, with the OS's own refusal words surfaced for the operator's log.
+    /// </summary>
+    /// <param name="osDetail">
+    /// The exception type and message from a permission-grounded refusal, for the operator's log only:
+    /// .NET embeds the denied file's absolute path in that message, which is exactly what an operator
+    /// needs to fix ownership and exactly what must never reach the merchant-facing
+    /// <paramref name="reason"/>. Null in every other outcome.
+    /// </param>
+    public static SparkStorageLock? TryAcquire(string directory, out string? reason, out string? osDetail)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
 
         var path = System.IO.Path.Combine(directory, FileName);
         reason = null;
+        osDetail = null;
         try
         {
             // Owner-only at creation, matching the storage provider that hardens this same directory: the lock
@@ -122,14 +135,16 @@ internal sealed class SparkStorageLock : IDisposable
                 + "own.";
             return null;
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException ex)
         {
             // The platform refused the open on permission grounds. .NET embeds the absolute path
             // of the denied file in this exception's message, and this reason is relayed to
             // whoever is saving the store's settings — a store manager, not necessarily a server
             // operator — so no exception text goes into it, exactly as the IOException branch
-            // above. The caller that logs the refusal logs the storage directory alongside the
-            // reason, which is where that detail belongs.
+            // above. The OS's own words travel separately in osDetail, which the caller logging
+            // the refusal takes with the storage directory: that log is the operator's, and the
+            // denied path plus the exception name are exactly the detail missing from it.
+            osDetail = $"{ex.GetType().Name}: {ex.Message}";
             reason =
                 "This store's Spark wallet storage could not be claimed, so the wallet was not "
                 + "started. The server process cannot open its storage directory for writing; a "

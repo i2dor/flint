@@ -9,6 +9,11 @@ cd "$(dirname "$0")"
 
 source plugin-env.sh
 
+# Guarded before anything is written: the redirect below truncates its target
+# before jq would fail, and a half-written appsettings.dev.json breaks BTCPay's
+# dev host with an error that does not name this file.
+command -v jq >/dev/null || { echo 'error: plugin-register.sh needs jq (brew install jq / apt install jq)' >&2; exit 1; }
+
 TARGET_PATH="$(dotnet build "$PROJECT/$PROJECT.csproj" -p:Configuration=Debug -getProperty:TargetPath)"
 
 # jq rather than a printf: the target path is arbitrary filesystem text, and a path
