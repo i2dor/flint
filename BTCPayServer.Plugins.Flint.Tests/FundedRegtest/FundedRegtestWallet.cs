@@ -293,10 +293,15 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
     /// the preimage, payment hash and txid the tests recorded, with the words on either side of it.
     /// </para>
     /// <para>
-    /// <b>The raw file is withheld if the seed, a payment preimage, or the service provider's
-    /// <c>session_token</c> would be in it.</b> These artefacts are downloadable by anyone who can see the
+    /// <b>Both log files are withheld if the seed, a payment preimage, or the service provider's
+    /// <c>session_token</c> would be in them</b>, each leaving a <c>&lt;name&gt;.WITHHELD.txt</c> marker
+    /// naming the reason in the file's place. These artefacts are downloadable by anyone who can see the
     /// repository, and the seed is a CI secret. A leak would be a finding worth failing on — the tests assert
-    /// against it — but it must not also be a publication.
+    /// against it — but it must not also be a publication. In <c>preimage-audit.md</c> the known-value rows
+    /// for preimages print a one-way fingerprint rather than the value whatever the sources hold — a
+    /// fingerprint plus the occurrence counts proves the same property — rows sourced from a withheld file
+    /// print a fingerprint and a redaction marker in place of value and context, and a withheld source's
+    /// count columns read <em>withheld</em> rather than numbers.
     /// </para>
     /// </remarks>
     /// <returns>
@@ -312,21 +317,45 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         Directory.CreateDirectory(directory);
 
         var forwarded = ForwardedLog.Lines;
-        File.WriteAllLines(Path.Combine(directory, "forwarded.log"), forwarded);
+        var forwardedText = string.Join('\n', forwarded);
+        // The forwarded log passes the same gate as the raw one — same artefact bundle, same download
+        // permissions, same retention window. What differs is what passing through the scrubber was supposed
+        // to mean: secret material in *this* file is a scrubber hole rather than an unreachable gap,
+        // which is what the header line and the verdict below both say. Withheld means deleted-on-sight too:
+        // a file an earlier, cleaner run wrote into the artefact directory would otherwise survive the gate.
+        var forwardedSecret = SecretMaterialIn(forwardedText);
+        var forwardedWithheld = forwardedSecret is not null;
+        var forwardedCarriesSeed = SeedAppearsIn(forwardedText, _mnemonic!);
+        var forwardedPath = Path.Combine(directory, "forwarded.log");
+        if (forwardedWithheld)
+            WithholdArtifact(forwardedPath, $"it carries {forwardedSecret} in post-scrub output");
+        else
+            File.WriteAllLines(forwardedPath, forwarded);
 
         var raw = ReadRawSdkLog();
         var rawSecret = raw is null ? null : SecretMaterialIn(raw);
         var rawWithheld = rawSecret is not null;
         var rawCarriesSeed = raw is not null && SeedAppearsIn(raw, _mnemonic!);
-        if (raw is not null && !rawWithheld)
-            File.WriteAllText(Path.Combine(directory, "sdk.log"), raw);
+        if (raw is not null)
+        {
+            var rawPath = Path.Combine(directory, "sdk.log");
+            if (rawWithheld)
+                WithholdArtifact(rawPath, $"it carries {rawSecret}");
+            else
+                File.WriteAllText(rawPath, raw);
+        }
 
         var report = new StringBuilder();
         report.AppendLine("# Spark SDK log audit — funded regtest run");
         report.AppendLine();
         report.AppendLine($"- Wallet seed fingerprint: `{SeedFingerprint}` (SHA-256 prefix; not reversible)");
         report.AppendLine($"- SDK log filter: `debug` (installed: {_loggingInstalled})");
-        report.AppendLine($"- Forwarded lines (post-scrub, what BTCPay's logger saw): **{forwarded.Count}**");
+        report.AppendLine(forwardedWithheld
+            ? $"- Forwarded lines (post-scrub, what BTCPay's logger saw): **{forwarded.Count}**, "
+              + $"**`forwarded.log` WITHHELD from this artefact because {forwardedSecret} appears in it** — "
+              + "this file is post-scrub output, so the scrubber has a hole."
+            : $"- Forwarded lines (post-scrub, what BTCPay's logger saw): **{forwarded.Count}**, "
+              + "attached as `forwarded.log`");
         report.AppendLine(raw is null
             ? "- Raw `sdk.log`: **not found** — the Rust subscriber wrote nothing to the log directory."
             : $"- Raw `sdk.log`: **{raw.Split('\n').Length}** lines, "
@@ -363,19 +392,27 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
 
         report.AppendLine("## Known values from this run");
         report.AppendLine();
+        report.AppendLine(
+            "Preimage values print as one-way SHA-256 fingerprints, not values: the fingerprint plus the "
+            + "counts proves the same thing, and the value is exactly the secret this artefact exists to "
+            + "keep out. Payment hashes, txids and idempotency keys are public identifiers and print "
+            + "verbatim.");
+        report.AppendLine();
         report.AppendLine("| kind | value | occurrences in forwarded (scrubbed) | occurrences in raw sdk.log |");
         report.AppendLine("|---|---|---|---|");
-        var forwardedText = string.Join('\n', forwarded);
         foreach (var identifier in Snapshot())
         {
             var inForwarded = CountOccurrences(forwardedText, identifier.Value);
-            var inRaw = raw is null ? "n/a" : CountOccurrences(raw, identifier.Value).ToString();
-            report.AppendLine($"| {identifier.Kind} | `{identifier.Value}` | {inForwarded} | {inRaw} |");
+            var inRaw = raw is null ? (int?)null : CountOccurrences(raw, identifier.Value);
+            report.AppendLine(
+                $"| {identifier.Kind} "
+                + $"| {AuditValue(ValueIsWithheld(identifier.Kind), identifier.Value)} "
+                + $"| {AuditCell(forwardedWithheld, inForwarded.ToString())} "
+                + $"| {(inRaw is null ? "n/a" : inRaw.ToString())} |");
         }
 
-        var forwardedCarriesSeed = SeedAppearsIn(forwardedText, _mnemonic!);
         report.AppendLine("| wallet seed | *(not printed)* | "
-            + $"{(forwardedCarriesSeed ? "**PRESENT — this is a leak**" : "0")} | "
+            + $"{(forwardedCarriesSeed ? "**PRESENT — this is a leak**" : AuditCell(forwardedWithheld, "0"))} | "
             + $"{(raw is null ? "n/a" : rawCarriesSeed ? "**PRESENT — this is a leak**" : "0")} |");
         report.AppendLine();
 
@@ -384,19 +421,25 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         report.AppendLine(
             "A preimage, a payment hash, a txid and half a public key are all 32 bytes of hex, which is why "
             + "`SparkLogScrubber` refuses to redact on shape. The classification column is the part that "
-            + "matters: an `UNKNOWN` run that turns out to be a preimage is the finding.");
+            + "matters: an `UNKNOWN` run that turns out to be a preimage is the finding. Rows sourced from a "
+            + "withheld file keep their classification and print a one-way SHA-256 fingerprint in place of the "
+            + "value and a redaction marker in place of the context — enough to match a fingerprint quoted by "
+            + "a verdict or a known-value row, never enough to publish.");
         report.AppendLine();
         report.AppendLine("| source | classification | value | context |");
         report.AppendLine("|---|---|---|---|");
         var rows = 0;
-        foreach (var (source, text) in new[] { ("forwarded", forwardedText), ("sdk.log", raw ?? "") })
+        foreach (var (source, text, withheld) in new[]
+                 {
+                     ("forwarded", forwardedText, forwardedWithheld),
+                     ("sdk.log", raw ?? string.Empty, rawWithheld),
+                 })
         {
             foreach (var run in DistinctHexRuns(text))
             {
                 if (rows++ >= 200)
                     break;
-                report.AppendLine(
-                    $"| {source} | {Classify(run.Value)} | `{run.Value}` | `{Escape(run.Context)}` |");
+                report.AppendLine(HexRunRow(source, Classify(run.Value), run, withheld));
             }
         }
 
@@ -408,7 +451,9 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
         report.AppendLine();
         report.AppendLine(
             "1. The **preimage** row must show `0` occurrences in the forwarded column. The tests assert that; "
-            + "if it is not zero the run is red and the scrubber has a hole.");
+            + "if it is not zero the run is red and the scrubber has a hole. A forwarded column reading "
+            + "*withheld* instead of a number is the same finding by another route: `forwarded.log` itself "
+            + "was withheld because secret material appeared in the post-scrub output.");
         report.AppendLine(
             "2. Look at the `sdk.log` rows classified `PREIMAGE`. If there are none, the SDK does not write a "
             + "preimage to disk at `debug` and §8.6's gap closes as \"measured, nothing there\" — **but only if "
@@ -521,26 +566,33 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
     }
 
     /// <summary>
-    /// The secret material the raw log would publish — the wallet seed, a payment preimage this run recorded,
-    /// or the service provider's session token — or null when the log carries none of it.
+    /// The secret material a log would publish — the wallet seed, a preimage this run recorded, or the
+    /// service provider's session token — or null when the text carries none of it.
     /// </summary>
-    private string? SecretMaterialIn(string text)
+    internal static string? SecretMaterialIn(
+        string? text, string mnemonic, IReadOnlyList<KnownIdentifier> identifiers)
     {
-        if (string.IsNullOrEmpty(text))
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(mnemonic))
             return null;
 
-        if (SeedAppearsIn(text, _mnemonic!))
+        if (SeedAppearsIn(text, mnemonic))
             return "the wallet seed";
 
-        foreach (var identifier in Snapshot())
+        foreach (var identifier in identifiers)
         {
-            if (identifier.Kind.Contains("preimage", StringComparison.OrdinalIgnoreCase)
+            if (IsPreimageKind(identifier.Kind)
                 && CountOccurrences(text, identifier.Value) > 0)
                 return "a payment preimage";
         }
 
         return SessionTokenAppearsIn(text) ? "the service provider's session token" : null;
     }
+
+    /// <summary>
+    /// <see cref="SecretMaterialIn(string, string, IReadOnlyList{KnownIdentifier})"/> against this run's
+    /// seed and recorded identifiers.
+    /// </summary>
+    private string? SecretMaterialIn(string text) => SecretMaterialIn(text, _mnemonic!, Snapshot());
 
     /// <summary>
     /// True when the text carries the service provider's GraphQL <c>session_token</c> name next to a value —
@@ -602,8 +654,87 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
 
     private static string Escape(string value) => value.Replace("|", "\\|").Replace("`", "'");
 
-    private static string Fingerprint(string value) =>
+    internal static string Fingerprint(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..12].ToLowerInvariant();
+
+    /// <summary>
+    /// Withholds one log artefact from the bundle: deletes whatever an earlier run left at
+    /// <paramref name="path"/> — so withholding cannot be undone by a previous, cleaner copy of the file —
+    /// and writes a marker beside it naming the file and the reason.
+    /// </summary>
+    /// <remarks>
+    /// Marker naming: <c>&lt;artefact&gt;.WITHHELD.txt</c>, one per withheld artefact
+    /// (<c>forwarded.log.WITHHELD.txt</c>, <c>sdk.log.WITHHELD.txt</c>), so the bundle explains which file
+    /// is missing and why without opening the audit markdown — including when the file was never written at
+    /// all because this run skipped it at the gate. A failed delete is swallowed and recorded in the marker
+    /// rather than thrown: the verdict on the run comes from the assertions, not from this bookkeeping.
+    /// </remarks>
+    private static void WithholdArtifact(string path, string reason)
+    {
+        var deleteFailed = false;
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            deleteFailed = true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            deleteFailed = true;
+        }
+
+        // One write; its own IO errors are swallowed too. When the delete failed the marker says so,
+        // because then the old copy may still be sitting in the directory and the reader must know.
+        try
+        {
+            File.WriteAllText(
+                $"{path}.WITHHELD.txt",
+                $"{Path.GetFileName(path)} was withheld from this artefact bundle: {reason}.\n"
+                + (deleteFailed
+                    ? "Deleting the copy an earlier run left here FAILED — the file may still be in this "
+                      + "directory; remove it manually before publishing the bundle.\n"
+                    : "This run wrote no copy, and any copy an earlier run left here was removed.\n"));
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>Whether an identifier kind names a payment preimage, i.e. carries secret material.</summary>
+    internal static bool IsPreimageKind(string kind) =>
+        kind.Contains("preimage", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether a known-value row must print a fingerprint instead of the value: every preimage-kind value
+    /// does, unconditionally. A fingerprint plus the row's occurrence counts proves the same evidence
+    /// property the verbatim value would — this exact preimage appeared this many times — so publishing the
+    /// value itself is never what the row is for, whatever state the log sources are in. Payment hashes,
+    /// txids and idempotency keys are public identifiers and print verbatim; the gate judges the sources
+    /// that carried them, not the identifiers.
+    /// </summary>
+    internal static bool ValueIsWithheld(string kind) => IsPreimageKind(kind);
+
+    /// <summary>A table value cell: the value, or its one-way fingerprint when the source is withheld.</summary>
+    internal static string AuditValue(bool withheld, string value) =>
+        withheld ? $"`{Fingerprint(value)}`" : $"`{value}`";
+
+    /// <summary>A table context cell: the escaped context, or a redaction marker when withheld.</summary>
+    internal static string AuditContext(bool withheld, string context) =>
+        withheld ? "*(redacted — source withheld)*" : $"`{Escape(context)}`";
+
+    /// <summary>A table count cell: the count, or the word <em>withheld</em> instead of numbers.</summary>
+    internal static string AuditCell(bool withheld, string value) =>
+        withheld ? "*(withheld)*" : value;
+
+    /// <summary>One row of the 64-hex classification table, redacted when its source is withheld.</summary>
+    internal static string HexRunRow(string source, string classification, HexRun run, bool sourceWithheld) =>
+        $"| {source} | {classification} | {AuditValue(sourceWithheld, run.Value)} "
+        + $"| {AuditContext(sourceWithheld, run.Context)} |";
 
     private void TryDeleteStorage()
     {

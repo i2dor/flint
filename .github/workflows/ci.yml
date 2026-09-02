@@ -311,9 +311,10 @@ jobs:
       # the artefact from DisposeAsync, so it exists even when an assertion failed — and the preimage assertion
       # failing is the case where a human most needs the surrounding lines.
       #
-      # The fixture withholds the raw sdk.log if the wallet's mnemonic, a payment preimage, or the service
-      # provider's session token would appear in it: these artefacts are downloadable by anyone with read access
-      # to the repository, and a leak must not also be a publication.
+      # The fixture withholds either log artefact — sdk.log or forwarded.log — whose contents would carry the
+      # wallet's mnemonic, a payment preimage, or the service provider's session token, leaving a
+      # <name>.WITHHELD.txt marker naming the reason in its place: these artefacts are downloadable by anyone
+      # with read access to the repository, and a leak must not also be a publication.
       - name: Upload the SDK log audit
         if: always() && steps.gate.outputs.funded == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

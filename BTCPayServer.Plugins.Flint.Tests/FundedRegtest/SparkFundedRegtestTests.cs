@@ -178,8 +178,11 @@ public class SparkFundedRegtestTests
         // preimage this payment produced, searched for in what the bridge actually forwarded.
         Assert.False(
             FundedRegtestWallet.CountOccurrences(forwarded, record.Preimage!) > 0,
-            $"the payment preimage reached BTCPay's logger through SparkLogBridge. SparkLogScrubber did not "
-            + $"redact it. Preimage: {record.Preimage}. See the preimage-audit.md artefact for the line.");
+            "the payment preimage reached BTCPay's logger through SparkLogBridge. SparkLogScrubber did not "
+            + "redact it. Preimage fingerprint: "
+            + $"`{FundedRegtestWallet.Fingerprint(record.Preimage!)}` (SHA-256 prefix; not reversible) — "
+            + "this assertion lands in the public job log, so it names the fingerprint matching the "
+            + "preimage row of the preimage-audit.md artefact rather than the preimage itself.");
 
         Assert.False(
             FundedRegtestWallet.SeedAppearsIn(forwarded, _wallet.Mnemonic),
