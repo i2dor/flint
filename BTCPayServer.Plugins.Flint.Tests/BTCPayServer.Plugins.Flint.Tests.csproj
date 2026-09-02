@@ -37,9 +37,11 @@
     <!--
       NuGet dependency locking, same contract as the plugin project: packages.lock.json (committed
       next to this file) is the pinned graph, CI restores it in locked mode, and after changing
-      any PackageReference both files are regenerated and committed together.
+      any PackageReference both files are regenerated and committed together. The EfMigrations
+      condition mirrors the plugin project's for symmetry (see that file's comment on what it
+      does and does not guard); this project never sets the flag, so here it is always true.
     -->
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestorePackagesWithLockFile Condition="'$(EfMigrations)' != 'true'">true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <!--

@@ -50,5 +50,18 @@ The final clean matters: the `EfMigrations=true` build leaves BTCPay's assemblie
 loading a plugin folder that contains its own copy of `BTCPayServer.dll` causes assembly-identity
 conflicts.
 
+The `dotnet build` above runs a restore, and the repository commits NuGet lock files
+(`packages.lock.json` next to each csproj — the pinned dependency graphs that CI restores in
+locked mode; see the comment in the csproj files). The design-time restore puts EF design
+packages into the plugin's graph, and NuGet updates an existing lock file even with the
+`RestorePackagesWithLockFile` property conditioned off — so after authoring a migration, the
+lock files will very likely show a diff. That design-time graph must never be committed:
+restore the locked files alongside the obj/bin cleanup above (if `git status` shows them clean,
+the restore simply did not touch them and there is nothing to undo):
+
+```bash
+git checkout -- BTCPayServer.Plugins.Flint/packages.lock.json BTCPayServer.Plugins.Flint.Tests/packages.lock.json
+```
+
 No database connection is needed to author a migration — the design-time factory only has to build
 a model.

@@ -24,8 +24,17 @@
       lock fails the build instead of silently re-resolving. After changing any PackageReference,
       regenerate the lock with `dotnet restore` and commit both files together. (No double hyphen
       anywhere in this comment: see the note on AssemblyName above.)
+
+      The condition turns the property off for the EfMigrations=true design-time build (see the
+      ItemGroup near the end of this file), which restores EF design packages *into this project*.
+      It is a half-guard, and deliberately documented as one: once a packages.lock.json exists on
+      disk, NuGet keeps updating it even with this property off (verified on SDK 10.0.400), so
+      that build still rewrites the lock with its design-time graph. The condition is what stops
+      a deleted lock being re-created mid-design-build and states the intent; the real guard is
+      the `git checkout` restoration step for the lock files in docs/development.md's migration
+      flow. Never commit a lock containing the design-time graph.
     -->
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestorePackagesWithLockFile Condition="'$(EfMigrations)' != 'true'">true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <!--
