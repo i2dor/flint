@@ -989,9 +989,13 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// <para>
     /// The any-store form of <see cref="Get"/>, for the rare reader whose question is not about one store but
     /// about whether the plugin has anything to serve at all — today only the prompt-mint indexer, which gates
-    /// its writes on it (see <see cref="SparkInvoicePaymentHashIndexer"/>). Like every other cache read it
-    /// waits on the startup gate: an empty cache before the load is not evidence that no store is configured,
-    /// and a reader that concluded so during startup would skip work on a fiction.
+    /// its writes on it (see <see cref="SparkInvoicePaymentHashIndexer"/>). An empty cache before the load is
+    /// not evidence that no store is configured, so the read waits on the startup gate — but on the bounded
+    /// wait of <see cref="Resolve"/> (<see cref="StartupWaitTimeout"/>), not unboundedly: this runs on the
+    /// indexer's server-wide event-loop path, and a hung SDK call at startup must not stall its ProcessEvents
+    /// loop with an unbounded event channel. A wait that expires fails open — the caller proceeds as though a
+    /// store existed and records — because a wrong "no" silently drops a row the reconciliation story cannot
+    /// recover, while a wrong "yes" only costs a row retention will retire.
     /// </para>
     /// <para>
     /// A snapshot, not a lease: a store provisioned concurrently with the read may or may not be counted,
@@ -1000,7 +1004,17 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     public async Task<bool> HasAnyStoreProvisioned()
     {
-        await _startupGate.Task.ConfigureAwait(false);
+        if (!_startupGate.Task.IsCompleted)
+        {
+            try
+            {
+                await _startupGate.Task.WaitAsync(StartupWaitTimeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                return true;
+            }
+        }
         return !_settings.IsEmpty;
     }
 

@@ -8,7 +8,7 @@ using Microsoft.Extensions.Logging;
 namespace BTCPayServer.Plugins.Flint.Services;
 
 /// <summary>
-/// Periodically deletes payment-hash associations the credit walk can no longer consult.
+/// Periodically deletes payment-hash associations the credit walk can no longer plausibly consult.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,19 +24,23 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// reader of this table is the credit gateway's fallback lookup, reached only for settlements the credit walk
 /// still lists, and the walk lists nothing older than <c>now − 14 days</c> (<see
 /// cref="SparkInvoiceCreditor.CreditRetryHorizon"/> plus <see
-/// cref="SparkInvoiceCreditor.AbandonedReportingGrace"/>). An association first seen before that boundary can
-/// therefore never be consulted again, and keeping it buys nothing. The bound is deliberately the walk's own
-/// constant rather than a copy: widen the walk's horizons and retention follows automatically. The bound this
-/// does buy back is stated honestly in the limitations doc: a payment that arrives more than fourteen days
-/// after its prompt was <em>minted</em> reaches a row this task may already have deleted, and is reported
-/// unattributable — the same outcome the outage paragraph already accepts for older-than-the-walk payments.
+/// cref="SparkInvoiceCreditor.AbandonedReportingGrace"/>). One edge keeps the claim short of absolute: the
+/// cut deletes by mint time (<c>FirstSeenAt</c>) while the walk lists by settle time, and
+/// <c>FirstSeenAt &lt;= SettledAt</c>, so a row deleted at the mint-window floor can still have a settlement
+/// that is listable by settle time. That needs a mint-to-settle gap wider than the whole window, is closed
+/// in practice by BOLT11 expiry, and is stated in the limitations doc: a payment that arrives more than
+/// fourteen days after its prompt was <em>minted</em> reaches a row this task may already have deleted, and
+/// is reported unattributable — the same outcome the outage paragraph already accepts for older-than-the-walk
+/// payments. Beyond that edge, an association first seen before the boundary buys the walk nothing. The bound
+/// is deliberately the walk's own constant rather than a copy: widen the walk's horizons and retention follows
+/// automatically.
 /// </para>
 /// <para>
 /// Registered through BTCPay's <c>AddScheduledTask</c> on <see
 /// cref="Constants.PaymentHashRetentionInterval"/> — its own task rather than a line appended to
 /// <see cref="SparkReconciliationTask"/>, because that pass runs every minute over live wallets and this one
-/// is a single indexed <c>DELETE</c> whose useful cadence is daily; sharing the task would tie a
-/// once-a-day-and-done statement to the settlement guarantee's hot loop. <c>AddScheduledTask</c> logs rather
+/// is a single indexed <c>DELETE</c> that runs hourly at negligible cost; sharing the task would tie a
+/// background janitor to the settlement guarantee's hot loop. <c>AddScheduledTask</c> logs rather
 /// than rethrows, so a database outage delays pruning to the next pass instead of faulting anything.
 /// </para>
 /// </remarks>
