@@ -97,13 +97,19 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Cache NuGet packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
+      # Deliberately no NuGet cache step here (there was one until the 2026-08 hardening pass):
+      # a release build restores cold, downloads exactly what the committed locks name, and
+      # verifies each package's contentHash in the process. A cache on a one-shot release job
+      # saved little and widened the window where a poisoned cached package becomes what ships.
+      #
+      # The packages.lock.json files next to both csproj pin the full resolved graph. Restoring
+      # in locked mode fails the build if any PackageReference drifts from the committed locks,
+      # instead of letting the build step's implicit restore silently re-resolve it.
+      - name: Restore (locked mode)
+        run: |
+          set -euo pipefail
+          dotnet restore --locked-mode "$PROJECT_PATH"
+          dotnet restore --locked-mode BTCPayServer.Plugins.Flint.Tests/BTCPayServer.Plugins.Flint.Tests.csproj
 
       # A single build that also captures TargetDir (same pattern as plugin-register.sh's
       # `-getProperty:TargetPath`), so the plugin isn't built twice.
@@ -115,8 +121,10 @@ jobs:
         id: build-dir
         run: |
           set -euo pipefail
+          # --no-restore: the locked-mode restore above is the only restore this job performs;
+          # an implicit one here would be unlocked and could re-resolve over the pinned graph.
           target_dir="$(dotnet build "$PROJECT_PATH" \
-            --configuration Release -t:Build -getProperty:TargetDir)"
+            --configuration Release --no-restore -t:Build -getProperty:TargetDir)"
           if [ ! -f "$target_dir/$PLUGIN_NAME.dll" ]; then
             echo "error: $target_dir/$PLUGIN_NAME.dll was not produced by the build" >&2
             exit 1
@@ -218,7 +226,7 @@ jobs:
           set -euo pipefail
           btcpay_file="$(find "$ARTIFACT_DIR" -name '*.btcpay' -print -quit)"
           for required in NOTICE LICENSE; do
-            if ! python3 -c "import sys, zipfile; sys.exit(0 if '$required' in zipfile.ZipFile('$btcpay_file').namelist() else 1)"; then
+            if ! python3 -c "import sys, zipfile; f=sys.argv[1]; required=sys.argv[2]; sys.exit(0 if required in zipfile.ZipFile(f).namelist() else 1)" "$btcpay_file" "$required"; then
               echo "error: $required is not inside $btcpay_file; the packaged plugin redistributes" \
                    "Breez's MIT-licensed binaries and must carry their notices" >&2
               exit 1
