@@ -1,3 +1,4 @@
+@using BTCPayServer
 @using BTCPayServer.Client
 @using BTCPayServer.Plugins.Flint.Services
 @using Microsoft.AspNetCore.Mvc.TagHelpers
@@ -16,16 +17,29 @@
     return;
 }
 @{
+    // The store this pane resolves is the one authorised for this request, never the form-bound
+    // Model.StoreId: core's POST re-renders this view without ever reassigning it, so on any path it can
+    // name any store, and it is never trusted on any path. The only refusal here is a missing
+    // authorisation, which fails closed before any lookup; every lookup and link below keys off
+    // authorisedStoreId alone — nothing reads Model.StoreId after the guard. An earlier revision also
+    // refused when the two ids disagreed; that comparison was dropped as a silent-suppression hazard
+    // that added no security. See the longer note in LNPaymentMethodSetupTabhead.cshtml, which fills
+    // core's field in and carries the credential itself.
+    var authorisedStoreId = Context.GetStoreDataOrNull()?.Id;
+    if (authorisedStoreId is null)
+    {
+        return;
+    }
     // Awaited, not blocked on: the service's startup gate is a Task, and a Razor view is already async.
-    var running = await SparkService.GetClient(Model.StoreId) is not null;
-    var configured = await SparkService.GetConnectionString(Model.StoreId) is not null;
+    var running = await SparkService.GetClient(authorisedStoreId) is not null;
+    var configured = await SparkService.GetConnectionString(authorisedStoreId) is not null;
 }
 <div id="SparkSetup" class="pt-3 tab-pane fade" role="tabpanel" aria-labelledby="LightningNodeType-Spark">
     @if (!configured)
     {
         <p class="text-secondary">
             This store has no Spark wallet yet.
-            <a asp-controller="Spark" asp-action="Setup" asp-route-storeId="@Model.StoreId"
+            <a asp-controller="Spark" asp-action="Setup" asp-route-storeId="@authorisedStoreId"
                permission="@Policies.CanModifyStoreSettings">Set one up</a>
             and BTCPay's Lightning configuration is written for you — there is no connection string to copy.
         </p>
@@ -41,13 +55,13 @@
             <p class="text-danger">
                 This store's Spark wallet is not running at the moment, so saving now would leave Lightning
                 payments failing.
-                <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@Model.StoreId"
+                <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@authorisedStoreId"
                    permission="@Policies.CanViewStoreSettings">Check its status</a>.
             </p>
         }
         <p class="text-secondary mb-0">
             Balance, network health and removal live on the store's
-            <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@Model.StoreId"
+            <a asp-controller="Spark" asp-action="Status" asp-route-storeId="@authorisedStoreId"
                permission="@Policies.CanViewStoreSettings">Flint page</a>.
         </p>
     }
