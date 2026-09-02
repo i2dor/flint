@@ -100,12 +100,6 @@ namespace BTCPayServer.Plugins.Flint.Migrations
 
                     b.HasIndex("StoreId", "CreatedAt");
 
-                    b.HasIndex("StoreId", "ExpiresAt")
-                        .HasDatabaseName("IX_InvoiceRecords_StoreId_ExpiresAt_Settleable")
-                        .HasFilter("\"Status\" <> 1");
-
-                    NpgsqlIndexBuilderExtensions.IncludeProperties(b.HasIndex("StoreId", "ExpiresAt"), new[] { "CreatedAt", "PaymentHash" });
-
                     b.HasIndex("StoreId", "SettledAt")
                         .HasFilter("\"Status\" = 1 AND \"CreditedAt\" IS NULL AND \"CreditAbandonedAt\" IS NULL AND \"SettledAt\" IS NOT NULL");
 
