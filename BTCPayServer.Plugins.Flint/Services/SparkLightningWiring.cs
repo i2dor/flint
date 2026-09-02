@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Data;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.Flint.Services;
@@ -35,8 +36,8 @@ public enum SparkLightningWiringState
     /// The store points at <em>another</em> store's Spark wallet — the one configuration that is broken by
     /// definition, because there is no legitimate reason for one store's Lightning payment method to drive
     /// another store's wallet. It is refused at save time (<c>SparkLightningClient.Validate</c>) and cleared
-    /// by <see cref="SparkLightningConfigSweeper"/> at startup; until then the status page reports it in red
-    /// as the configuration to repair.
+    /// by the <see cref="SparkLightningConfigSweeper"/>'s startup and periodic passes; until then the status
+    /// page reports it in red as the configuration to repair.
     /// </summary>
     OtherStoreSpark
 }
@@ -96,6 +97,24 @@ public sealed class SparkLightningWiring
         return new SparkLightningWiringReport(
             Classify(storeId, paymentKey, config),
             config?.Enabled is true);
+    }
+
+    /// <summary>
+    /// Classifies the Lightning configuration of a store row the caller already has, without refetching it.
+    /// Same answer as <see cref="InspectAsync(string, string?, CancellationToken)"/> for that store.
+    /// </summary>
+    /// <remarks>
+    /// For the configuration sweep: the row carries both JSONB columns the configuration is parsed from, so a
+    /// walk over every store classifies from what it just loaded instead of adding a point query per store.
+    /// </remarks>
+    public SparkLightningWiringReport Inspect(StoreData store, string? paymentKey)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+
+        var config = _configStore.Read(store);
+        return new SparkLightningWiringReport(
+            Classify(store.Id, paymentKey, config),
+            config.Enabled);
     }
 
     /// <summary>

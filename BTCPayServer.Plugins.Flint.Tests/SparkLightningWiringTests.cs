@@ -1,3 +1,4 @@
+using BTCPayServer.Data;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -212,6 +213,21 @@ public class SparkLightningWiringTests
         Assert.Equal(SparkLightningWiringState.StoreNotFound, report.State);
     }
 
+    [Fact]
+    public void Inspect_classifies_a_loaded_store_row_without_an_id_lookup()
+    {
+        // What the sweep now does per store: classify straight off the row it already loaded, with no
+        // per-store FindStore behind it. The store's own id — not the caller's — is what gets compared
+        // against the connection string.
+        var configStore = FakeStoreLightningConfigStore.WithStore(
+            StoreId, SparkConnectionString.Format(StoreId, PaymentKey));
+        var report = Create(configStore).Inspect(new StoreData { Id = StoreId }, PaymentKey);
+
+        Assert.Equal(SparkLightningWiringState.Spark, report.State);
+        Assert.True(report.EnabledForCheckout);
+        Assert.Equal(0, configStore.IdReads);
+    }
+
     /// <summary>
     /// Every state <c>Classify</c> can return, by name.
     /// </summary>
@@ -238,7 +254,7 @@ public class SparkLightningWiringTests
     // Ours, but a key the settings no longer hold.
     [InlineData("", false, "type=flint;store-id=store-1;key=aaaabbbbccccdddd",
         SparkLightningWiringState.StaleSpark)]
-    // Another store's Spark wallet: refused at save time, cleared by the startup sweep.
+    // Another store's Spark wallet: refused at save time, cleared by the configuration sweep.
     [InlineData("", false, "type=flint;store-id=store-2;key=" + PaymentKey,
         SparkLightningWiringState.OtherStoreSpark)]
     public void Classify_maps_every_configuration_to_its_own_state(

@@ -168,8 +168,9 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// (<c>GetStoreDataOrNull</c>). If that store differs from the one this client is bound to, the string
     /// is being saved on the wrong store: refuse with a generic error that names neither store. A missing
     /// context (a background call, a route core has not authorised) means there is nothing to compare, and
-    /// the check passes — the startup sweep (<c>SparkLightningConfigSweeper</c>) is the backstop for
-    /// configurations that predate this check or that were written without one.
+    /// the check passes — the configuration sweep (<c>SparkLightningConfigSweeper</c>), which runs at
+    /// startup and about every half hour thereafter, is the backstop for configurations that predate this
+    /// check or that were written without one.
     /// </para>
     /// <para>
     /// The live check uses the cached, non-syncing <c>GetInfo</c>: it returns in ~0 ms and proves the native

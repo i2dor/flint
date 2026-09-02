@@ -23,9 +23,10 @@ public sealed record SparkLightningConfigSweepResult(int Cleared, int Rotated);
 /// <c>SparkLightningClient.Validate</c>, which runs inside the request with the configured store on the
 /// <c>HttpContext</c>. <c>Validate</c> is skipped when the saved string is unchanged, and a configuration
 /// could in principle land without ever passing it (a string saved by an older version, or written straight
-/// to the database), so this sweep is the second layer: on every startup it walks <em>every</em> store's
-/// Lightning payment-method configuration, and one that embeds another store's id is cleared and its
-/// victim's payment key rotated.
+/// to the database), so this sweep is the second layer: at startup, and every
+/// <see cref="Constants.ConfigSweepInterval"/> thereafter (<see cref="SparkLightningConfigSweepTask"/>), it walks
+/// <em>every</em> store's Lightning payment-method configuration, and one that embeds another store's id is
+/// cleared and its victim's payment key rotated.
 /// </para>
 /// <para>
 /// Clearing removes the hijacking store's Lightning payment method — the configuration itself is the
@@ -40,24 +41,25 @@ public sealed record SparkLightningConfigSweepResult(int Cleared, int Rotated);
 /// <para>
 /// The sweep is idempotent: before it runs, a cross-store configuration both exists and is broken (the
 /// status page marks it <see cref="SparkLightningWiringState.OtherStoreSpark"/>); after it runs, nothing
-/// does, so a repeat pass finds nothing to do. It is a startup action, not a repeating one, because the
-/// save-time layer already blocks new mismatches from every HTTP path.
+/// does, so a repeat pass finds nothing to do. It runs at startup and — as the slower backstop for
+/// configurations written outside HTTP — about every half hour; the save-time layer already blocks new
+/// mismatches from every HTTP path, so the periodic pass only has to be there, not be fast.
 /// </para>
 /// </remarks>
 public sealed class SparkLightningConfigSweeper
 {
-    private readonly ISparkStoreIdSource _storeIds;
+    private readonly ISparkStoreSource _stores;
     private readonly SparkLightningWiring _wiring;
     private readonly ISparkStoreSettingsStore _settingsStore;
     private readonly ILogger<SparkLightningConfigSweeper> _logger;
 
     public SparkLightningConfigSweeper(
-        ISparkStoreIdSource storeIds,
+        ISparkStoreSource stores,
         SparkLightningWiring wiring,
         ISparkStoreSettingsStore settingsStore,
         ILogger<SparkLightningConfigSweeper> logger)
     {
-        _storeIds = storeIds;
+        _stores = stores;
         _wiring = wiring;
         _settingsStore = settingsStore;
         _logger = logger;
@@ -71,20 +73,19 @@ public sealed class SparkLightningConfigSweeper
     public async Task<SparkLightningConfigSweepResult> SweepAsync(
         CancellationToken cancellationToken = default)
     {
-        var storeIds = await _storeIds.GetStoreIdsAsync(cancellationToken).ConfigureAwait(false);
+        var stores = await _stores.GetStoresAsync(cancellationToken).ConfigureAwait(false);
 
         var victims = new List<string>();
         var cleared = 0;
 
-        foreach (var storeId in storeIds)
+        foreach (var store in stores)
         {
+            var storeId = store.Id;
             cancellationToken.ThrowIfCancellationRequested();
 
             try
             {
-                var report = await _wiring
-                    .InspectAsync(storeId, paymentKey: null, cancellationToken)
-                    .ConfigureAwait(false);
+                var report = _wiring.Inspect(store, paymentKey: null);
 
                 if (report.State is not SparkLightningWiringState.OtherStoreSpark)
                     continue;
@@ -93,17 +94,19 @@ public sealed class SparkLightningConfigSweeper
                     is { } victimStoreId)
                 {
                     victims.Add(victimStoreId);
+                    // Only a confirmed clear counts: null here means the cross-store configuration was
+                    // already gone by the time the clear re-read it (deleted mid-pass), so there was
+                    // nothing left to clear.
+                    cleared++;
                 }
-
-                cleared++;
             }
             catch (Exception ex)
             {
                 // One broken store must not stop the walk: the next store's configuration may still be a
-                // hijack, and skipping it would leave the victim exposed another startup.
+                // hijack, and skipping it would leave the victim exposed for another full interval.
                 _logger.LogWarning(ex,
                     "Store {StoreId}: its Lightning configuration could not be swept; it will be retried "
-                    + "on the next startup", storeId);
+                    + "on the next sweep pass", storeId);
             }
         }
 

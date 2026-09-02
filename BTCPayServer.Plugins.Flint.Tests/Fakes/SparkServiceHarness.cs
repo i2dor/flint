@@ -233,7 +233,7 @@ public sealed class SparkServiceHarness : IDisposable
             log);
 
         sweeper = new SparkLightningConfigSweeper(
-            new FakeStoreIdSource(lightning.Stores.Keys.ToArray()),
+            new FakeStoreSource(lightning.Stores.Keys.ToArray()),
             wiring,
             service,
             NullLogger<SparkLightningConfigSweeper>.Instance);

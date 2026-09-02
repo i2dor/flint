@@ -121,7 +121,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // the configured store off the request via IHttpContextAccessor below); this sweep is the backstop
         // for configurations that predate it. Registered as itself and through a deferred Func, because it
         // depends on SparkService (its settings store) and SparkService reaches it back through that Func.
-        services.AddSingleton<ISparkStoreIdSource, BTCPayStoreIdSource>();
+        services.AddSingleton<ISparkStoreSource, BTCPayStoreSource>();
         services.AddSingleton<SparkLightningConfigSweeper>();
         services.TryAddSingleton<Func<SparkLightningConfigSweeper>>(provider =>
             provider.GetRequiredService<SparkLightningConfigSweeper>);
@@ -291,6 +291,13 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // the pass is one indexed DELETE and the freshest a row can die is bounded by this interval; see
         // SparkPaymentHashRetentionTask for why it is its own task and not a line in the reconciliation pass.
         services.AddScheduledTask<SparkPaymentHashRetentionTask>(Constants.PaymentHashRetentionInterval);
+
+        // Cross-store Lightning configuration backstop. Every HTTP path is refused at save time, so this only
+        // has to catch configurations written outside HTTP (a direct database edit, another plugin); half an
+        // hour bounds how long one can survive between restarts for one store-table load per pass. The
+        // launcher fires the first pass immediately at startup, so SparkService deliberately does not run
+        // its own. See SparkLightningConfigSweepTask.
+        services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
 
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");

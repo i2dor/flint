@@ -71,9 +71,16 @@ public sealed class BTCPayStoreLightningConfigStore : IStoreLightningConfigStore
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
         var store = await _storeRepository.FindStore(storeId).ConfigureAwait(false);
-        if (store is null)
-            return null;
+        return store is null ? null : Read(store);
+    }
 
+    /// <inheritdoc />
+    public StoreLightningConfig Read(StoreData store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+
+        // Nothing to await: both columns the configuration lives in (DerivationStrategies, StoreBlob) are
+        // already materialized on the row the caller loaded.
         var config = store.GetPaymentMethodConfig<LightningPaymentMethodConfig>(LightningId, _handlers());
         if (config is null)
             return new StoreLightningConfig(false, null, false);

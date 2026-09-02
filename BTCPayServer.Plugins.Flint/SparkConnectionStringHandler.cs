@@ -51,10 +51,11 @@ namespace BTCPayServer.Plugins.Flint;
 /// closes the cross-store copy is the plugin around this handler. Saving a string on a store it does not
 /// belong to is refused by <see cref="SparkLightningClient.Validate"/>, which runs inside the save request
 /// where core has placed the configured store on the <c>HttpContext</c>; a configuration that predates
-/// that check is cleared by <see cref="Services.SparkLightningConfigSweeper"/> at startup, which also
-/// rotates the victim's payment key so previously leaked copies of the string stop resolving. The
-/// 2026-08-07 audit's "copy store B's whole string onto store A" reproduction now fails validation on
-/// every HTTP save path, and a copy that already exists is swept on the next startup.
+/// that check is cleared by <see cref="Services.SparkLightningConfigSweeper"/>, which runs at startup and
+/// about every half hour thereafter, and which also rotates the victim's payment key so previously leaked
+/// copies of the string stop resolving. The 2026-08-07 audit's "copy store B's whole string onto store A"
+/// reproduction now fails validation on every HTTP save path, and a copy that already exists is swept
+/// within about half an hour.
 /// </para>
 /// <para>
 /// The string remains a <b>bearer spend credential</b> within that bound — exactly like an LND macaroon,

@@ -216,6 +216,16 @@ public static class Constants
     public static readonly TimeSpan PaymentHashRetentionInterval = TimeSpan.FromHours(1);
 
     /// <summary>
+    /// How often <c>SparkLightningConfigSweepTask</c> runs, measured from the end of the previous pass.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately far slower than the reconciliation it used to ride along with: every HTTP path to a
+    /// Lightning configuration is refused at save time, so the sweep only has to catch configurations written
+    /// outside HTTP, and its cost is a whole store-table load per pass. See <c>SparkLightningConfigSweepTask</c>.
+    /// </remarks>
+    public static readonly TimeSpan ConfigSweepInterval = TimeSpan.FromMinutes(30);
+
+    /// <summary>
     /// Wall clock a single reconciliation pass may spend before it stops starting new stores.
     /// </summary>
     /// <remarks>

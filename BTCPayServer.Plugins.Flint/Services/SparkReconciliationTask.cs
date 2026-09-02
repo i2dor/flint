@@ -52,16 +52,13 @@ namespace BTCPayServer.Plugins.Flint.Services;
 public class SparkReconciliationTask : IPeriodicTask
 {
     private readonly SparkService _sparkService;
-    private readonly SparkLightningConfigSweeper _configSweeper;
     private readonly ILogger<SparkReconciliationTask> _logger;
 
     public SparkReconciliationTask(
         SparkService sparkService,
-        SparkLightningConfigSweeper configSweeper,
         ILogger<SparkReconciliationTask> logger)
     {
         _sparkService = sparkService;
-        _configSweeper = configSweeper;
         _logger = logger;
     }
 
@@ -73,11 +70,5 @@ public class SparkReconciliationTask : IPeriodicTask
             _logger.LogInformation(
                 "Spark reconciliation settled {Settled} Lightning invoice(s) across all stores", settled);
         }
-
-        // The same backstop the startup path runs, repeated on the reconciliation cadence so a cross-store
-        // Lightning configuration written outside HTTP (a direct database edit, another plugin) survives at
-        // most one interval rather than until the next restart. Idempotent: once a cross-store configuration
-        // is cleared and its victim's key rotated, later passes find nothing to do.
-        await _configSweeper.SweepAsync(cancellationToken).ConfigureAwait(false);
     }
 }

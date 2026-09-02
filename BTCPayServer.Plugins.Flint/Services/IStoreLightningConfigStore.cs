@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Data;
 
 namespace BTCPayServer.Plugins.Flint.Services;
 
@@ -35,6 +36,17 @@ public interface IStoreLightningConfigStore
     /// The store's current Lightning configuration, or null when there is no such store.
     /// </summary>
     Task<StoreLightningConfig?> GetAsync(string storeId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The Lightning configuration of a store row the caller already has, derived without a database read.
+    /// Same result as <see cref="GetAsync(string, CancellationToken)"/> for that store.
+    /// </summary>
+    /// <remarks>
+    /// For the configuration sweep, which loads every store once and parses the two JSONB columns
+    /// (<c>DerivationStrategies</c> and <c>StoreBlob</c>) the row already carries; going through the id
+    /// overload instead would refetch each row one store at a time.
+    /// </remarks>
+    StoreLightningConfig Read(StoreData store);
 
     /// <summary>
     /// Writes the store's Lightning configuration, or removes it when
