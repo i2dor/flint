@@ -40,6 +40,7 @@ public class SparkServiceStartupTests
     private const string HangingStore = "store-that-hangs";
     private const string HealthyStore = "store-that-works";
     private const string ThrowingStore = "store-that-throws";
+    private const string NeverAdoptedStore = "store-never-adopted";
 
     [Fact]
     public void A_store_whose_SDK_connect_never_returns_does_not_hold_up_the_host()
@@ -229,6 +230,44 @@ public class SparkServiceStartupTests
         Assert.False(
             writer.TryWrite(new Sdk.SparkEventEnvelope(HangingStore, Sdk.SparkEventKind.Synced, null)),
             "a completed writer refuses, which is what makes the listener report the loss rather than hide it");
+    }
+
+    /// <summary>
+    /// A wallet that connected but that no client ever adopted must die with the attempt, not leak.
+    /// </summary>
+    /// <remarks>
+    /// The <c>finally</c> guards a failed adoption on three halves — the storage claim, the SDK handle, and
+    /// the event channel — and the throwing-connect tests above cover only the claim, because that throw
+    /// lands before a handle exists. This reaches the other two: the harness builds the service without the
+    /// BOLT11 parser, so <c>SparkLightningClient</c>'s own argument check throws precisely where a real bad
+    /// dependency would, after a successful connect. No production seam was added for the test; the throw is
+    /// shipped code refusing a shipped-null argument.
+    /// </remarks>
+    [Fact]
+    public async Task A_wallet_that_connected_but_was_never_adopted_is_disposed_and_its_events_refused()
+    {
+        using var h = SparkServiceHarness.Create(failWalletAdoption: true);
+        h.SeedStore(NeverAdoptedStore, SparkServiceHarness.MnemonicFor(4));
+
+        // Startup swallows the adoption throw per-store, exactly as it swallows a connect throw: one broken
+        // store must not stop BTCPay starting.
+        StartWithinTimeout(h);
+        Assert.Contains("could not start its Spark wallet", h.Log.AllText);
+
+        var client = h.Sdk.Clients[NeverAdoptedStore];
+        Assert.True(
+            client.Disposed,
+            "a connected SDK handle that no instance ever adopted must die in the finally next to the claim "
+            + "it was meant to guard");
+
+        // And nothing is left buffering events for a consumer that will never start — the same proof the
+        // abandonment test above makes, now on the finally's own path.
+        Assert.False(
+            h.Sdk.EventWriters[NeverAdoptedStore].TryWrite(
+                new Sdk.SparkEventEnvelope(NeverAdoptedStore, Sdk.SparkEventKind.Synced, null)),
+            "the failed attempt's event writer must be completed, not left open and unreferenced");
+
+        Assert.Null(await h.Service.GetClient(NeverAdoptedStore));
     }
 
     /// <summary>

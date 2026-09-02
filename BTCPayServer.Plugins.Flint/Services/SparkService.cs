@@ -445,6 +445,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         // BTCPay held it.
         var handedOff = false;
         ISparkSdkClient? sdk = null;
+        Channel<SparkEventEnvelope>? events = null;
         try
         {
             var options = new SparkConnectOptions(
@@ -466,7 +467,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
 
             // Created before the SDK because the factory registers the event listener against this writer, and
             // events can arrive the moment it does. The channel buffers until the consumer starts below.
-            var events = Channel.CreateBounded<SparkEventEnvelope>(new BoundedChannelOptions(EventQueueCapacity)
+            events = Channel.CreateBounded<SparkEventEnvelope>(new BoundedChannelOptions(EventQueueCapacity)
             {
                 // Wait, combined with the listener only ever using the non-blocking TryWrite. That pairing is the
                 // one that reports a full queue: TryWrite returns false and the listener logs it. DropOldest and
@@ -502,12 +503,11 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
 
             if (sdk is null)
             {
-                // Ownership of the claim moves with the abandoned connect: releasing it here would let the next
-                // attempt start a second instance on storage the late arrival is still holding.
-                AbandonConnect(storeId, connect, events, storageLock);
-                // From its entry, the abandoned connect's cleanup owns the claim; releasing it here would
-                // let the next attempt connect while the late wallet still holds the storage.
+                // The abandoned connect's cleanup owns the claim from this call's entry: releasing it here
+                // would let the next attempt start a second instance on storage the late wallet is still
+                // holding.
                 handedOff = true;
+                AbandonConnect(storeId, connect, events, storageLock);
                 return "This store's Spark wallet did not finish connecting in time, so it is not running. Check "
                        + "the server logs, then reconfigure the store or restart the server to try again.";
             }
@@ -544,7 +544,11 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             if (!handedOff)
             {
                 // Partial construction: an SDK that connected but that no instance ever adopted belongs to
-                // nobody yet, so it dies here next to the claim it was meant to guard.
+                // nobody yet, so it dies here next to the claim it was meant to guard. Its event channel is
+                // completed for the reason AbandonConnect completes one: no consumer was ever started for it,
+                // so an open writer would only buffer envelopes silently, while a completed one makes the
+                // listener's TryWrite report the refusal.
+                events?.Writer.TryComplete();
                 sdk?.Dispose();
                 storageLock.Dispose();
             }
