@@ -46,6 +46,12 @@ public class SparkErrorsTests
         }
     }
 
+    /// <summary>A disposed SDK instance is described in plain words, not with the SDK's own text.</summary>
+    /// <remarks>
+    /// This once failed now and then in a full parallel run, with "Spark reported an error that could not be shown
+    /// safely." in place of the message: the scrubber's patterns carried a wall-clock match timeout, and a busy
+    /// machine tripped it. <c>SparkLogScrubberTests</c> is where that regression is reproduced and pinned.
+    /// </remarks>
     [Fact]
     public void Describe_gives_a_plain_message_for_a_disposed_instance()
     {

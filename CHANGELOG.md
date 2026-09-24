@@ -5,6 +5,26 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Fixed
+
+- **A busy server no longer swaps a merchant's error for "could not be shown safely", or drops SDK log
+  lines.** Every pattern the scrubber runs over merchant-facing error text and forwarded SDK log lines
+  carried a 50 ms match timeout, and .NET measures that in elapsed time rather than work: a thread
+  descheduled or paused for a garbage collection in the middle of a microsecond match timed out anyway, and
+  the fail-closed catch replaced the whole text with its fallback — about one call in two hundred thousand
+  with six runnable threads per core, never without contention. The patterns are now bounded by their
+  engine instead of a clock. Four are linear on the backtracking engine as written and simply lost the
+  timeout; the `Authorization`/`Cookie` pattern, quadratic on that engine for multi-line text (which is why
+  its timeout was doing real work), runs on `NonBacktracking`, checked match for match against the old
+  engine over some sixteen million inputs. That engine is not used everywhere because on .NET 10 it returns
+  a late match for the name-and-value pattern, which would leave the start of a secret in place. Redaction
+  is otherwise unchanged — a million random lines scrubbed identically before and after — and still fails
+  closed on anything unexpected; a line built to backtrack quadratically is now scrubbed instead of dropped.
+  The unit test that flaked on this is backed by a new contention test that failed ten runs out of ten
+  before the change.
+
 ## [1.1.0] — 2026-09-07
 
 A compatibility and CI-hardening release. No plugin source changed between 1.0.4 and this: the

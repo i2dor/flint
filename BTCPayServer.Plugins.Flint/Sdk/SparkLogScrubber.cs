@@ -78,6 +78,34 @@ namespace BTCPayServer.Plugins.Flint.Sdk;
 /// survives. Both patterns draw their names from <see cref="SensitiveNames"/> so neither can quietly fall
 /// behind the other.
 /// </para>
+/// <para>
+/// <b>Every pattern is bounded by the work it does, never by a clock.</b> Each one used to carry a 50 ms match
+/// timeout as its guard against catastrophic backtracking, with <see cref="Scrub(string?, string)"/> turning a
+/// timeout into total redaction. That guard measured the wrong thing: .NET times a match in elapsed time, not in
+/// work, so a thread descheduled — or suspended for a garbage collection — in the middle of a match that needed
+/// microseconds lost the race just the same. With six runnable threads per core, about one call in two hundred
+/// thousand on the text of an ordinary <c>ObjectDisposedException</c> came back as the fallback, every one of them a
+/// <see cref="SensitiveValue"/> timeout on a sentence with nothing in it to redact; without the contention, none
+/// did in two million. So a merchant was now and then told that an ordinary error "could not be shown safely", an
+/// operator's log lost lines for no reason, and a unit test flaked.
+/// </para>
+/// <para>
+/// So the bound moved from the clock to the engine. Four of the patterns are linear on the backtracking engine as
+/// written — each one says why — and simply lost the timeout. <see cref="HeaderCredential"/> is not linear there,
+/// and runs on <c>NonBacktracking</c>, which is linear by construction. The catch in <c>Scrub</c> is unchanged and
+/// still turns anything unexpected into total redaction; what it no longer sees is a busy machine.
+/// <c>SparkLogScrubberTests</c> finds every pattern this class holds by reflection and refuses a timeout on any.
+/// </para>
+/// <para>
+/// <b>Why not <c>NonBacktracking</c> for everything.</b> It would be the tidier rule, and on the runtime this was
+/// measured on (.NET 10.0.11) it is the wrong one: that engine does not always return the leftmost match. On
+/// <see cref="SensitiveValue"/>'s pattern it matches <c>"]privkey:apikey: "</c> from <c>apikey</c> rather than from
+/// <c>privkey</c>, which leaves <c>privkey</c>'s value in the line; reduced to <c>"?[ab]:\s*(?:"[^"]*"|\S+)</c>, it
+/// matches <c>"]a:b: "</c> at index 4 where the backtracking engine, correctly, matches at 2. A redactor that
+/// sometimes starts late is one that sometimes leaks, so the engine is used only where the backtracking one cannot
+/// be bounded, and only after a differential check against it — a sample of which <c>SparkLogScrubberTests</c>
+/// keeps running, because whether the two engines agree is a property of the runtime, not of this file.
+/// </para>
 /// </remarks>
 internal static class SparkLogScrubber
 {
@@ -115,6 +143,13 @@ internal static class SparkLogScrubber
     /// stops at a closing bracket so a Rust <c>Some("…")</c> wrapper loses its contents rather than its
     /// terminator — the point is that the secret is gone, not that the line stays pretty.
     /// </para>
+    /// <para>
+    /// Linear on the backtracking engine, which is why it needs no timeout. Every loop in it is followed by
+    /// something the loop cannot match, so the engine never hands characters back to one; and the only text an
+    /// attempt scans beyond what it keeps is a quoted value that turns out to be unterminated, which runs to the
+    /// next quote — so no two attempts scan the same stretch. It stays off <c>NonBacktracking</c> on purpose: this
+    /// is the pattern that engine gets wrong (see the class remarks).
+    /// </para>
     /// </remarks>
     private static readonly Regex SensitiveValue = new(
         $$"""
@@ -122,7 +157,7 @@ internal static class SparkLogScrubber
         ( \\?"? \b (?: {{SensitiveNames}} ) \b \\?"? \s* [:=] \s* )
         (?: \\?" [^"\\]* \\?" | ' [^']* ' | [^\s,;}\]\)]+ )
         """,
-        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>
     /// A sensitive name, whitespace, and a 64-character hex run.
@@ -145,6 +180,10 @@ internal static class SparkLogScrubber
     /// cases which motivated requiring a separator in the first place cannot match — <c>preimage TEXT,</c> has
     /// no hex after it, and a sentence mentioning a preimage does not continue with 32 bytes of it.
     /// </para>
+    /// <para>
+    /// Linear on the backtracking engine for the reasons <see cref="SensitiveValue"/> is, and more simply: the
+    /// value it looks for is a fixed 64 characters.
+    /// </para>
     /// </remarks>
     private static readonly Regex SensitiveHexValue = new(
         $$"""
@@ -152,31 +191,55 @@ internal static class SparkLogScrubber
         ( \\?"? \b (?: {{SensitiveNames}} ) \b \\?"? \s+ )
         \b [0-9a-f]{64} \b
         """,
-        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>
     /// An extended private key. Unambiguous: nothing public starts with these prefixes.
     /// </summary>
+    /// <remarks>
+    /// Linear on the backtracking engine: the leading <c>\b</c> means an attempt can only begin where a word does,
+    /// and the key run is the last thing in the pattern, so each word is scanned at most once, by the attempt that
+    /// begins at its start.
+    /// </remarks>
     private static readonly Regex ExtendedPrivateKey = new(
         @"\b[xtyzuv]prv[1-9A-HJ-NP-Za-km-z]{50,}",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>
     /// A credential whose value is the rest of the line rather than a delimited token.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// An <c>Authorization</c> header's value is a scheme and then the secret, so redacting "the value" after
     /// the colon removes the word <c>Bearer</c> and leaves the token. Everything after the name goes.
+    /// </para>
+    /// <para>
+    /// The one pattern on <c>NonBacktracking</c>, because it is the one the backtracking engine cannot bound.
+    /// Without <c>Multiline</c>, <c>$</c> matches only at the end of the text, so on a line with a newline before
+    /// the end, <c>.*</c> runs to that newline, fails, and gives it back a character at a time — once for every
+    /// credential word in front of it. That is quadratic: ten thousand <c>bearer </c> ahead of a newline took over
+    /// a second on the backtracking engine, which the old timeout turned into a dropped line and no timeout would
+    /// turn into a stalled SDK callback thread. On <c>NonBacktracking</c> the same line takes under a millisecond,
+    /// and is scrubbed.
+    /// </para>
+    /// <para>
+    /// Safe on that engine where <see cref="SensitiveValue"/> is not because it begins with a word boundary rather
+    /// than an optional character: the late match was only ever seen with an optional start, and dropping
+    /// <see cref="SensitiveValue"/>'s made it go away. Some sixteen million inputs, random and exhaustive, agreed
+    /// with the backtracking engine match for match before it moved; <c>SparkLogScrubberTests</c> keeps a seeded
+    /// sample of them running.
+    /// </para>
     /// </remarks>
     private static readonly Regex HeaderCredential = new(
         @"(?i)\b(authorization|bearer|cookie|set-cookie)\b\s*:?\s*.*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>
     /// Word-shaped tokens, used to find runs of BIP39 words.
     /// </summary>
+    /// <remarks>Linear on the backtracking engine: one character class, each run of it scanned once.</remarks>
     private static readonly Regex Word = new(
-        "[A-Za-z]+", RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        "[A-Za-z]+", RegexOptions.Compiled | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>Shortest valid BIP39 phrase, and therefore the length a run has to reach to be redacted.</summary>
     private const int ShortestPhrase = 12;
@@ -197,8 +260,10 @@ internal static class SparkLogScrubber
     /// </summary>
     /// <remarks>
     /// Never throws. This runs inside a UniFFI callback from an SDK-owned thread, where an exception is how
-    /// the process deadlocks — so a regex timeout, or anything else, yields a wholly redacted line rather than
-    /// a partially scrubbed one. Losing a log line is always cheaper than leaking one.
+    /// the process deadlocks — so anything that goes wrong yields a wholly redacted line rather than a
+    /// partially scrubbed one. Losing a log line is always cheaper than leaking one. What can no longer go
+    /// wrong is time: no pattern here carries a match timeout, so a given line scrubs the same way however
+    /// busy the machine is (see the class remarks).
     /// </remarks>
     internal static string Scrub(string? line) =>
         Scrub(line, $"{Redacted} (a Spark SDK log line could not be scrubbed and was dropped)");
