@@ -7,6 +7,21 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **A header credential on any line but the last is now redacted.** The scrubber's
+  `Authorization`/`Bearer`/`Cookie`/`Set-Cookie` pattern ends in `$` without `Multiline`, which means the end
+  of the text, so it only ever matched on the last line: `authorization: Bearer …` followed by any other line —
+  even a second trailing newline — reached the operator's log, and any merchant-facing error relaying such
+  text, token and all. A new pass, run last, redacts from the name to the end of whichever line it is on, so
+  the lines around it survive; a line that ends in one of those names carries on into the next line,
+  deliberately, because a folded header puts the value there (`authorization: Bearer`, then the token indented
+  below it). It is appended rather than folded into the existing pattern because every pass after that one
+  works on what it leaves: redacting whole lines there let 328 of a million random inputs through with a
+  secret the old pipeline caught. Appended, it can only hide more — over the same million inputs it never
+  showed a secret the old pipeline hid, and text without a line feed scrubs exactly as before. Found while
+  fixing the timeout flake below.
+
 ### Added
 
 - **Accept USDC and USDT at checkout, received as bitcoin.** One switch on the Flint page (or optional step 3 of
@@ -38,6 +53,24 @@ All notable changes to this plugin are recorded here. The format follows
   more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
   unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
   so it cannot read as stuck and invite a second claim.
+
+### Fixed
+
+- **A busy server no longer swaps a merchant's error for "could not be shown safely", or drops SDK log
+  lines.** Every pattern the scrubber runs over merchant-facing error text and forwarded SDK log lines
+  carried a 50 ms match timeout, and .NET measures that in elapsed time rather than work: a thread
+  descheduled or paused for a garbage collection in the middle of a microsecond match timed out anyway, and
+  the fail-closed catch replaced the whole text with its fallback — about one call in two hundred thousand
+  with six runnable threads per core, never without contention. The patterns are now bounded by their
+  engine instead of a clock. Four are linear on the backtracking engine as written and simply lost the
+  timeout; the `Authorization`/`Cookie` pattern, quadratic on that engine for multi-line text (which is why
+  its timeout was doing real work), runs on `NonBacktracking`, checked match for match against the old
+  engine over some sixteen million inputs. That engine is not used everywhere because on .NET 10 it returns
+  a late match for the name-and-value pattern, which would leave the start of a secret in place. Redaction
+  is otherwise unchanged — a million random lines scrubbed identically before and after — and still fails
+  closed on anything unexpected; a line built to backtrack quadratically is now scrubbed instead of dropped.
+  The unit test that flaked on this is backed by a new contention test that failed ten runs out of ten
+  before the change.
 
 ## [1.1.0] — 2026-09-07
 

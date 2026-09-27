@@ -29,10 +29,11 @@ public static class SparkErrors
         // none of them standing behind the log bridge's scrubbing. The rules that cover the
         // operator's log cover the merchant's error by standing here; scrubbing at each call
         // site instead would be forty chances to forget one.
-        // Two trades taken knowingly: the scrubber's HeaderCredential pattern eats to end-of-line
-        // on an authorization/bearer/cookie word (fail-closed — a truncated sentence beats a leaked
-        // token), and RedactPhrases may run the Bip39English static ctor inside a catch handler
-        // (low risk: it only loads an embedded wordlist).
+        // Two trades taken knowingly: the scrubber's header-credential patterns eat to end-of-line
+        // on an authorization/bearer/cookie word, and on into the next line when the word ends its
+        // own (fail-closed — a truncated sentence beats a leaked token), and RedactPhrases may run
+        // the Bip39English static ctor inside a catch handler (low risk: it only loads an embedded
+        // wordlist).
         var merchantFacing = exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
