@@ -8,6 +8,7 @@ using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Plugins;
 using BTCPayServer.Services;
+using Newtonsoft.Json.Linq;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.Flint.Services;
@@ -15,6 +16,7 @@ namespace BTCPayServer.Plugins.Flint.Services;
 public class SparkPluginUpdateChecker(
     SettingsRepository settingsRepository,
     PluginService pluginService,
+    PluginBuilderClient pluginBuilderClient,
     IHttpClientFactory httpClientFactory,
     ILogger<SparkPluginUpdateChecker> logger) : IPeriodicTask
 {
@@ -43,17 +45,16 @@ public class SparkPluginUpdateChecker(
         Version? latestRemote = null;
         try
         {
-            var remotePlugins = await pluginService
-                .GetRemotePlugins(Constants.PluginIdentifier, cancellationToken)
+            var remoteVersions = await pluginBuilderClient
+                .GetPluginVersionsForDownload(Constants.PluginIdentifier, Constants.BuiltAgainstBTCPayServerVersion,
+                    includePreRelease: false, includeAllVersions: true)
                 .ConfigureAwait(false);
 
-            foreach (var plugin in remotePlugins)
+            foreach (var published in remoteVersions)
             {
-                if (string.Equals(plugin.Identifier, Constants.PluginIdentifier, StringComparison.OrdinalIgnoreCase)
-                    && (latestRemote is null || plugin.Version > latestRemote))
-                {
-                    latestRemote = plugin.Version;
-                }
+                var versionStr = published.ManifestInfo?.Value<string>("Version");
+                if (Version.TryParse(versionStr, out var v) && (latestRemote is null || v > latestRemote))
+                    latestRemote = v;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
