@@ -23,6 +23,13 @@ All notable changes to this plugin are recorded here. The format follows
 - **Send page no longer shows payment history.** The history table has moved to the dedicated Wallet
   history page. The Send page now focuses on the form and the immediate send result.
 
+### Fixed
+
+- **SparkSweepEngine: `GetInfo` no longer requests an unnecessary sync.** After calling `SyncWallet`,
+  the balance is already current; passing `ensureSynced: true` to the subsequent `GetInfo` call was
+  redundant -- `ensureSynced: true` only applies to the SDK's first sync in a session, not to
+  mid-session refreshes. All three call sites in `SparkSweepEngine` now pass `ensureSynced: false`.
+
 
 ## [0.1.8.0] - 2026-08-24
 

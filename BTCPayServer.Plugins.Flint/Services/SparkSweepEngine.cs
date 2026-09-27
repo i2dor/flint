@@ -113,9 +113,9 @@ public sealed record SweepPreview(
 /// key as its own <c>Payment.id</c> — so <c>GetPayment(key)</c> answers definitively whether it happened. Until
 /// it does, this pass sends nothing. Nothing is ever retried blind.</description></item>
 /// <item><description><b><c>SyncWallet</c>, then read the balance.</b> The balance lagged a settled payment by
-/// ~20 s in the funded run and stayed stale even through <c>GetInfo(ensureSynced: true)</c>; only an explicit
-/// sync moved it. A threshold comparison against a stale balance is a sweep that either does not happen or is
-/// the wrong size.</description></item>
+/// ~20 s in the funded run; only an explicit <c>SyncWallet</c> moved it (<c>GetInfo(ensureSynced: true)</c>
+/// applies only to the SDK's first sync in a session). A threshold comparison against a stale balance is a
+/// sweep that either does not happen or is the wrong size.</description></item>
 /// <item><description><b>Economics before addresses.</b> The minimum-sweep floor is checked before a destination
 /// is resolved, so a store that is not worth sweeping does not burn an address from its wallet on every
 /// pass.</description></item>
@@ -327,7 +327,7 @@ public sealed class SparkSweepEngine
             // Synced here too. A preview that showed a stale balance would offer a sweep of the wrong size, and
             // the merchant would have no way to know.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -509,7 +509,7 @@ public sealed class SparkSweepEngine
         {
             // Step 3. The sync is what makes the number current; see the class remarks.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -1752,7 +1752,7 @@ public sealed class SparkSweepEngine
                     try
                     {
                         await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken)
+                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken)
                             .ConfigureAwait(false);
                     }
                     catch (Exception ex)

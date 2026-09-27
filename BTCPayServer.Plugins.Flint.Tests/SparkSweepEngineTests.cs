@@ -203,7 +203,7 @@ public class SparkSweepEngineTests
                 // The balance is synced and read first, because a threshold decision on a stale balance is the wrong
                 // sweep…
                 "sdk:sync",
-                "sdk:getinfo:synced",
+                "sdk:getinfo:cached",
                 // …then the pre-flight quote…
                 "sdk:quote",
                 // …then the record exists, with its key, *before* anything can have been sent…
@@ -230,16 +230,16 @@ public class SparkSweepEngineTests
     [Fact]
     public async Task The_wallet_is_synced_before_the_balance_is_read()
     {
-        // The balance lagged settlement by ~20 s in the funded run and stayed stale even through
-        // GetInfo(ensureSynced: true); only an explicit sync moved it. So the ordering is the invariant, and a call
-        // count cannot express it — swapping the two calls would leave SyncCount == 1 and the balance stale.
+        // The balance lagged settlement by ~20 s in the funded run; only an explicit SyncWallet moved it
+        // (GetInfo(ensureSynced: true) only applies to the SDK's first sync in a session). So the ordering
+        // is the invariant — swapping the two calls would leave SyncCount == 1 and the balance stale.
         var h = CreateHarness();
 
         await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
-        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a synced read; got [{string.Join(", ", h.Log.Entries)}]");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
+        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a cached read; got [{string.Join(", ", h.Log.Entries)}]");
         Assert.True(sync < read, "the wallet must be synced before its balance is read");
     }
 
@@ -1446,7 +1446,7 @@ public class SparkSweepEngineTests
         await h.Engine.PreviewAsync(StoreId, Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(sync >= 0 && read >= 0);
         Assert.True(sync < read, "a preview must sync before it reads the balance");
     }

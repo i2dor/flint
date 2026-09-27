@@ -370,7 +370,7 @@ public class GreenfieldSparkSweepTests
         // The engine's own ordering too: a threshold decision made against an unsynced balance is a sweep of the
         // wrong size, so the sync precedes the read.
         var syncIndex = h.WriteLog.Entries.IndexOf("sdk:sync");
-        var readIndex = h.WriteLog.Entries.IndexOf("sdk:getinfo:synced");
+        var readIndex = h.WriteLog.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(syncIndex >= 0 && readIndex > syncIndex, string.Join(" -> ", h.WriteLog.Entries));
     }
 
