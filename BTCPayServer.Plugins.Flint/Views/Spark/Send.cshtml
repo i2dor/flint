@@ -29,6 +29,10 @@
                     <div class="form-text font-monospace">@hash</div>
                 }
             </div>
+            <a asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+               class="btn btn-outline-secondary mb-3">
+                View payment history
+            </a>
         }
 
         <form method="post" asp-action="Send" asp-route-storeId="@Model.StoreId">

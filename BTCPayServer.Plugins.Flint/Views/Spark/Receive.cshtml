@@ -55,6 +55,10 @@
             <a asp-action="Receive" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
                 New invoice
             </a>
+            <a asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+               class="btn btn-outline-secondary">
+                View payment history
+            </a>
         }
         else
         {
