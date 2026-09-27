@@ -4,6 +4,26 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9.0] - 2026-09-27
+
+### Added
+
+- **Receive Lightning payments via BOLT11 invoice.** A new store page at `/plugins/{storeId}/spark/receive`
+  generates a BOLT11 invoice from the store's Spark wallet. Accepts an optional amount and memo; amountless
+  invoices are supported. The generated invoice is shown with a copy button and is valid for 24 hours.
+  Accessible from the store's Flint navigation under "Receive".
+
+- **Wallet history page.** A new store page at `/plugins/{storeId}/spark/history` shows the last 50
+  completed Lightning payments (sent and received), newest first. Each row shows direction, amount, fee,
+  timestamp, and description or payment hash. Accessible via the "Wallet history" link on the Flint status
+  page, below the Spark balance.
+
+### Changed
+
+- **Send page no longer shows payment history.** The history table has moved to the dedicated Wallet
+  history page. The Send page now focuses on the form and the immediate send result.
+
+
 ## [0.1.8.0] - 2026-08-24
 
 ### Added

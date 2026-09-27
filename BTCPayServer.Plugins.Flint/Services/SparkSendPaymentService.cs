@@ -155,6 +155,38 @@ public sealed class SparkSendPaymentService(
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<SparkPayment>> ListAllAsync(
+        string storeId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var sdk = await runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
+        if (sdk is null)
+            return [];
+        return await sdk.ListPaymentsAsync(
+            new SparkListPaymentsQuery(
+                Direction: null,
+                CompletedOnly: true,
+                Limit: limit),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<SparkReceiveResult?> ReceiveBolt11Async(
+        string storeId,
+        string? description,
+        long? amountSats,
+        CancellationToken cancellationToken)
+    {
+        var sdk = await runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
+        if (sdk is null)
+            return null;
+        return await sdk.ReceiveBolt11Async(
+            description ?? "",
+            amountSats,
+            expirySecs: 86400,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     // ----- fee approval -----
 
     private static string? ApproveQuote(SparkSendQuote quote, long amountSats, long? maxFeeSats)

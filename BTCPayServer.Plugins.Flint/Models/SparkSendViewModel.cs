@@ -1,11 +1,11 @@
 using System;
-using System.Collections.Generic;
-using BTCPayServer.Plugins.Flint.Sdk;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace BTCPayServer.Plugins.Flint.Models;
 
 public class SparkSendViewModel
 {
+    [BindNever]
     public string StoreId { get; set; } = "";
 
     /// <summary>A BOLT11 invoice or a Lightning Address (user@domain.com).</summary>
@@ -19,9 +19,6 @@ public class SparkSendViewModel
 
     /// <summary>Set after a successful send.</summary>
     public SparkSendResult? Result { get; set; }
-
-    /// <summary>Most recent sent payments from the wallet, newest first.</summary>
-    public IReadOnlyList<SparkPayment> History { get; set; } = [];
 }
 
 public class SparkSendResult

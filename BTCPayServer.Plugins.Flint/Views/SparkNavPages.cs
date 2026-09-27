@@ -33,6 +33,9 @@ public static class SparkNavPages
     /// <summary>Send a Lightning payment from the store's Spark wallet.</summary>
     public const string Send = "SparkSend";
 
+    /// <summary>Receive a Lightning payment: generate a BOLT11 invoice.</summary>
+    public const string Receive = "SparkReceive";
+
     /// <summary>
     /// Wallet details, recovery-phrase provenance and the settings most stores never touch. The deposits and
     /// removal pages borrow this entry: both are reached from the Advanced page rather than from the nav.

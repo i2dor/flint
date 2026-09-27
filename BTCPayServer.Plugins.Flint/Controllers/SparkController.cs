@@ -963,8 +963,7 @@ public class SparkController : Controller
         if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
-        var history = await _sendPayment.ListSentAsync(storeId, 25, cancellationToken).ConfigureAwait(false);
-        return View(new SparkSendViewModel { StoreId = storeId, History = history });
+        return View(new SparkSendViewModel { StoreId = storeId });
     }
 
     [HttpPost("send")]
@@ -1012,8 +1011,68 @@ public class SparkController : Controller
         vm.Destination = null;
         vm.AmountSats  = null;
         vm.MaxFeeSats  = null;
-        vm.History = await _sendPayment.ListSentAsync(storeId, 25, cancellationToken).ConfigureAwait(false);
         return View(vm);
+    }
+
+    [HttpGet("receive")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Receive([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        return View(new SparkReceiveViewModel { StoreId = storeId });
+    }
+
+    [HttpPost("receive")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> Receive(
+        [FromRoute] string storeId,
+        SparkReceiveViewModel vm,
+        CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+        vm.StoreId = storeId;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var result = await _sendPayment.ReceiveBolt11Async(
+            storeId, vm.Description, vm.AmountSats, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result is null)
+        {
+            ModelState.AddModelError(string.Empty, "The wallet is not running. Start it and try again.");
+            return View(vm);
+        }
+
+        vm.Result = result;
+        return View(vm);
+    }
+
+    [HttpGet("history")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
+    public async Task<IActionResult> WalletHistory([FromRoute] string storeId, CancellationToken cancellationToken)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var payments = await _sendPayment.ListAllAsync(storeId, 50, cancellationToken).ConfigureAwait(false);
+        return View(new SparkWalletHistoryViewModel { StoreId = storeId, Payments = payments });
     }
 
     #endregion
