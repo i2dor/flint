@@ -70,11 +70,12 @@ public class SparkLogScrubberTests
     /// </summary>
     /// <remarks>
     /// <para>
-    /// That engine is only used where the backtracking one cannot be bounded, because it is not a drop-in: on the
-    /// .NET 10 runtime this was measured on, for patterns shaped like <c>SensitiveValue</c>'s it sometimes returns a
-    /// match that starts after the leftmost one — which, for a redactor, means leaving the start of a secret where
-    /// it was. The first inputs below are exactly those cases, so moving <c>SensitiveValue</c> onto the engine fails
-    /// here instead of in somebody's log.
+    /// That engine holds only <c>HeaderCredential</c>, the one pattern the backtracking engine cannot bound, because
+    /// it is not a drop-in. On the .NET 10 runtime this was measured on, it sometimes returns a match that starts after
+    /// the leftmost one for patterns shaped like <c>SensitiveValue</c>'s — which, for a redactor, means leaving the
+    /// start of a secret where it was — and it drops a capture when a match takes the text's final line break, which is
+    /// why <c>HeaderCredentialOnEveryLine</c> is not on it. The first inputs below are exactly those cases, so moving
+    /// either of those patterns onto the engine fails here instead of in somebody's log.
     /// </para>
     /// <para>
     /// The rest are seeded, so a failure reproduces: token soup built from the names, separators, quotes and line
@@ -108,25 +109,37 @@ public class SparkLogScrubberTests
     }
 
     /// <summary>
-    /// A line built to make <c>HeaderCredential</c> backtrack quadratically is scrubbed, not dropped.
+    /// Lines built to make the header-credential patterns backtrack quadratically are scrubbed, not dropped.
     /// </summary>
     /// <remarks>
-    /// Without <c>Multiline</c>, <c>$</c> only matches at the end of the text, so every credential word in front of a
-    /// newline sends the backtracking engine to that newline and back again, a character at a time. For this line
-    /// that is 1.1 s of backtracking: under the old 50 ms timeout it came back as the fallback every time, and on that
-    /// engine with no timeout it would hold an SDK callback thread for the whole second. On <c>NonBacktracking</c> it
-    /// takes under a millisecond, so the credential on the last line is redacted and nothing else is touched —
-    /// deterministic in both directions, which is what makes it worth having next to the contention test.
+    /// <para>
+    /// One per trap. The first is <c>HeaderCredential</c>'s: ending in <c>$</c> without <c>Multiline</c>, it can only
+    /// match at the end of the text, so on the backtracking engine every credential word in front of a newline sends
+    /// the match to that newline and back again, a character at a time — 1.1 s for this line, which the old 50 ms
+    /// timeout turned into the fallback every time, and the reason that pattern runs on <c>NonBacktracking</c>. The
+    /// second is the trap <c>HeaderCredentialOnEveryLine</c> nearly had: with <c>[^\S\n]*:?[^\S\n]*</c> between a name
+    /// and the line break, a long run of spaces and no colon lets the two loops divide the run every possible way
+    /// before giving up, which for this line is seconds.
+    /// </para>
+    /// <para>
+    /// Both patterns are clear of their trap, so neither line costs more than a pass. What is asserted is the result,
+    /// deterministic in both directions: every credential line redacted — the first as well as the last, where
+    /// <c>HeaderCredential</c> alone leaves all but the last line — and nothing dropped. If either trap comes back,
+    /// this test is where the suite suddenly gets slow.
+    /// </para>
     /// </remarks>
     [Fact]
-    public void A_line_built_to_backtrack_quadratically_is_scrubbed_rather_than_dropped()
+    public void Lines_built_to_backtrack_quadratically_are_scrubbed_rather_than_dropped()
     {
-        // "bearer" is a credential word but not a BIP39 one, so the phrase scan leaves the noise alone too.
-        var noise = string.Concat(Enumerable.Repeat("bearer ", 10_000)) + "end";
+        string[] noise =
+        [
+            string.Concat(Enumerable.Repeat("bearer ", 10_000)) + "end",
+            "bearer" + new string(' ', 64_000) + "x",
+        ];
 
-        var scrubbed = SparkLogScrubber.Scrub($"{noise}\nauthorization: Bearer {Token}");
-
-        Assert.Equal($"{noise}\nauthorization: {SparkLogScrubber.Redacted}", scrubbed);
+        Assert.All(noise, line => Assert.Equal(
+            $"bearer: {SparkLogScrubber.Redacted}\nauthorization: {SparkLogScrubber.Redacted}",
+            SparkLogScrubber.Scrub($"{line}\nauthorization: Bearer {Token}")));
     }
 
     /// <summary>
@@ -222,13 +235,31 @@ public class SparkLogScrubberTests
             "\"]Mnemonic:apikey: t",
             "\" preimage:privkey= \"",
             "\".privkey:\"PreImage\":\\",
-            // The shapes HeaderCredential exists for, including the multi-line ones that made it quadratic.
+            // The shapes the header-credential patterns exist for, including the multi-line ones HeaderCredential
+            // alone lets through.
             "authorization: Bearer abcdef0123456789",
             "cookie: sid=1; bearer x",
             "bearer bearer bearer end\nauthorization: Bearer x",
             "set-cookie \nauthorization: y",
             "authorization: x\n",
             "a\nauthorization: x\n",
+            "authorization: Bearer x\nnext line",
+            "authorization: Bearer x\r\nnext line",
+            "authorization: Bearer x\n\n",
+            "authorization: Bearer x\rmore",
+            "request headers:\ncookie: sid=1\nauthorization: Bearer x\ncontent-type: application/json",
+            "set-cookie: session=1; Path=/\r\ncontent-length: 0\r\n",
+            "authorization:\n    Bearer x\nnext line",
+            "authorization: Bearer\n    x\nnext line",
+            "authorization:\n  Bearer\n  x\nnext line",
+            "cookie: a bearer\nx\nnext line",
+            "the service rejected the bearer\nretrying in 5s",
+            "bearer\nfoo\nbar",
+            "cookie\n\n\n:\n\nvalue\nlast",
+            // HeaderCredentialOnEveryLine on NonBacktracking reports group 1 missing here: a match taking the final
+            // line break.
+            "cookie\r\n",
+            "authorization: Bearer x bearer: \r\n",
         ];
 
         string[] tokens =

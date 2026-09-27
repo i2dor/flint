@@ -7,6 +7,21 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **A header credential on any line but the last is now redacted.** The scrubber's
+  `Authorization`/`Bearer`/`Cookie`/`Set-Cookie` pattern ends in `$` without `Multiline`, which means the end
+  of the text, so it only ever matched on the last line: `authorization: Bearer …` followed by any other line —
+  even a second trailing newline — reached the operator's log, and any merchant-facing error relaying such
+  text, token and all. A new pass, run last, redacts from the name to the end of whichever line it is on, so
+  the lines around it survive; a line that ends in one of those names carries on into the next line,
+  deliberately, because a folded header puts the value there (`authorization: Bearer`, then the token indented
+  below it). It is appended rather than folded into the existing pattern because every pass after that one
+  works on what it leaves: redacting whole lines there let 328 of a million random inputs through with a
+  secret the old pipeline caught. Appended, it can only hide more — over the same million inputs it never
+  showed a secret the old pipeline hid, and text without a line feed scrubs exactly as before. Found while
+  fixing the timeout flake below.
+
 ### Fixed
 
 - **A busy server no longer swaps a merchant's error for "could not be shown safely", or drops SDK log
