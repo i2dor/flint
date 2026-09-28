@@ -602,13 +602,21 @@ public sealed class FundedRegtestWallet : IAsyncLifetime
     /// </summary>
     internal static bool SessionTokenAppearsIn(string text) => SessionTokenShape.IsMatch(text);
 
+    /// <summary><c>session_token</c> next to a value, in the shapes <c>SparkLogScrubber.SensitiveValue</c> accepts.</summary>
+    /// <remarks>
+    /// No match timeout, for the reason <c>SparkLogScrubber</c>'s patterns have none: .NET measures one in elapsed
+    /// time rather than work, so a busy runner turns it into a <c>RegexMatchTimeoutException</c> on perfectly
+    /// ordinary text — here a red funded run, or a flaky <c>FundedRegtestAuditGatingTests</c>, which runs in the
+    /// unit suite. Linear on the backtracking engine for the reasons <c>SensitiveValue</c> is, whose shape this
+    /// mirrors, so a whole <c>sdk.log</c> costs one pass.
+    /// </remarks>
     private static readonly Regex SessionTokenShape = new(
         $$"""
         (?ix)
         \\?"? \b session_?token \b \\?"? \s* [:=] \s*
         (?: " [^"\\]* " | ' [^']* ' | [^\s,;}\]\)]+ )
         """,
-        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, Regex.InfiniteMatchTimeout);
 
     /// <summary>Every distinct 64-character hex run in the text, with the 48 characters in front of it.</summary>
     internal static IReadOnlyList<HexRun> DistinctHexRuns(string text)

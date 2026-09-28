@@ -30,10 +30,11 @@ public static class SparkErrors
         // none of them standing behind the log bridge's scrubbing. The rules that cover the
         // operator's log cover the merchant's error by standing here; scrubbing at each call
         // site instead would be forty chances to forget one.
-        // Two trades taken knowingly: the scrubber's HeaderCredential pattern eats to end-of-line
-        // on an authorization/bearer/cookie word (fail-closed — a truncated sentence beats a leaked
-        // token), and RedactPhrases may run the Bip39English static ctor inside a catch handler
-        // (low risk: it only loads an embedded wordlist).
+        // Two trades taken knowingly: the scrubber's header-credential patterns eat to end-of-line
+        // on an authorization/bearer/cookie word, and on into the next line when the word ends its
+        // own (fail-closed — a truncated sentence beats a leaked token), and RedactPhrases may run
+        // the Bip39English static ctor inside a catch handler (low risk: it only loads an embedded
+        // wordlist).
         var merchantFacing = exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
@@ -132,6 +133,31 @@ public static class SparkErrors
         ArgumentNullException.ThrowIfNull(exception);
         return exception is SdkException.NetworkException network &&
                network.v1?.Contains("amount too small", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    /// <summary>
+    /// The typed cross-chain amount refusal (0.26), read into the plugin's own terms; null for anything else.
+    /// </summary>
+    /// <remarks>
+    /// The SDK carries which bound was missed and the bound itself as fields, so nothing here parses the
+    /// provider's prose — whose wording ("Increase the input amount") is addressed to the integrator in any case.
+    /// </remarks>
+    public static SparkAmountOutOfRange? AmountOutOfRange(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainAmountOutOfRange outOfRange
+            ? new SparkAmountOutOfRange(outOfRange.tooSmall, outOfRange.boundAmount, outOfRange.boundUsdCents)
+            : null;
+    }
+
+    /// <summary>
+    /// For the typed "provider won't serve this route" refusal (0.26): whether the provider expects the route back
+    /// shortly. Null for anything else.
+    /// </summary>
+    public static bool? RouteUnavailable(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is SdkException.CrossChainRouteUnavailable unavailable ? unavailable.temporary : null;
     }
 
     /// <summary>

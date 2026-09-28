@@ -7,6 +7,38 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **A header credential on any line but the last is now redacted.** The scrubber's
+  `Authorization`/`Bearer`/`Cookie`/`Set-Cookie` pattern ends in `$` without `Multiline`, which means the end
+  of the text, so it only ever matched on the last line: `authorization: Bearer …` followed by any other line —
+  even a second trailing newline — reached the operator's log, and any merchant-facing error relaying such
+  text, token and all. A new pass, run last, redacts from the name to the end of whichever line it is on, so
+  the lines around it survive; a line that ends in one of those names carries on into the next line,
+  deliberately, because a folded header puts the value there (`authorization: Bearer`, then the token indented
+  below it). It is appended rather than folded into the existing pattern because every pass after that one
+  works on what it leaves: redacting whole lines there let 328 of a million random inputs through with a
+  secret the old pipeline caught. Appended, it can only hide more — over the same million inputs it never
+  showed a secret the old pipeline hid, and text without a line feed scrubs exactly as before. Found while
+  fixing the timeout flake below.
+
+### Added
+
+- **Accept USDC and USDT at checkout, received as bitcoin.** One switch on the Flint page (or optional step 3 of
+  setup) adds USDC and USDT beside Lightning on every new invoice. The customer picks the coin and the network they
+  hold it on — Ethereum, Solana, Tron, Base, Arbitrum, Polygon, BNB Chain or Avalanche, wherever the provider serves
+  that coin — and sends it to the quote's deposit address; the provider converts it on the way in, so **the store's
+  Spark wallet receives and keeps bitcoin and never holds the stablecoin** (or USDB, for a store holding its balance
+  in dollars through Stable Balance). The network's cost is shown as the invoice's network cost and paid by the
+  customer, so an exactly paid invoice settles exactly. Each network is shown with its icon — on its button, in the
+  middle of the QR code and on the address line — as the payer's check that they are on the right network; only
+  networks the plugin has an icon for are offered. Mainnet only; built on Breez Spark SDK 0.26's cross-chain
+  receive through Orchestra. Payments are matched to invoices by quote, with every live ask kept unique per
+  network, and credited exactly once through the same reconciliation discipline as Lightning. See
+  [Accepting USDC and USDT](docs/stablecoin-payments.md), and the new provider in the
+  [trust model](docs/trust-model.md).
+- **`GET`/`PUT /api/v1/stores/{storeId}/spark/stablecoins`**, the same switch through the Greenfield API.
+
 ### Changed
 
 - **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
@@ -55,6 +87,24 @@ All notable changes to this plugin are recorded here. The format follows
   page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
   tells the operator that following the Status column is what matters, since broadcasting an already-sent
   transaction is harmless.
+
+### Fixed
+
+- **A busy server no longer swaps a merchant's error for "could not be shown safely", or drops SDK log
+  lines.** Every pattern the scrubber runs over merchant-facing error text and forwarded SDK log lines
+  carried a 50 ms match timeout, and .NET measures that in elapsed time rather than work: a thread
+  descheduled or paused for a garbage collection in the middle of a microsecond match timed out anyway, and
+  the fail-closed catch replaced the whole text with its fallback — about one call in two hundred thousand
+  with six runnable threads per core, never without contention. The patterns are now bounded by their
+  engine instead of a clock. Four are linear on the backtracking engine as written and simply lost the
+  timeout; the `Authorization`/`Cookie` pattern, quadratic on that engine for multi-line text (which is why
+  its timeout was doing real work), runs on `NonBacktracking`, checked match for match against the old
+  engine over some sixteen million inputs. That engine is not used everywhere because on .NET 10 it returns
+  a late match for the name-and-value pattern, which would leave the start of a secret in place. Redaction
+  is otherwise unchanged — a million random lines scrubbed identically before and after — and still fails
+  closed on anything unexpected; a line built to backtrack quadratically is now scrubbed instead of dropped.
+  The unit test that flaked on this is backed by a new contention test that failed ten runs out of ten
+  before the change.
 
 ## [1.1.0] — 2026-09-07
 
