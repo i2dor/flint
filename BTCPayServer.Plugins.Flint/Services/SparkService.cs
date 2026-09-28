@@ -1525,6 +1525,10 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
                 if (!_exitStateBackupScheduler.ShouldTake(storeId, now))
                     continue;
 
+                // Before the export: a refresh requested while the export runs describes a change the
+                // export may not contain, and must stay pending past this pass.
+                var pass = _exitStateBackupScheduler.BeginPass(storeId);
+
                 var exported = await instance.Sdk.ExportUnilateralExitStateAsync(cancellationToken)
                     .ConfigureAwait(false);
 
@@ -1559,7 +1563,7 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
 
                 if (_exitStateBackupScheduler.ContentUnchanged(storeId, exported))
                 {
-                    _exitStateBackupScheduler.MarkSkipped(storeId, now);
+                    _exitStateBackupScheduler.MarkSkipped(storeId, now, pass);
                     continue;
                 }
 
@@ -1569,7 +1573,7 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
                 // a second note here would only be a second place the same fact gets stated, and the
                 // one that a manual writer's path does not share. MarkTaken is this pass's own
                 // report, ordered after the write, and nothing else can serve the pending request.
-                _exitStateBackupScheduler.MarkTaken(storeId, now);
+                _exitStateBackupScheduler.MarkTaken(storeId, now, pass);
 
                 _logger.LogInformation(
                     "Store {StoreId}: stored an automatic exit-state backup ({Length} characters)",

@@ -47,7 +47,7 @@ public class ExitStateBackupSchedulerTests
         // An existing backup anchors the safety net — a store that has never had one is due at once,
         // request or no request, and would answer "yes" here whatever the debounce said.
         s.RequestRefresh(Store);
-        s.MarkTaken(Store, Pending(s));
+        s.MarkTaken(Store, Pending(s), s.BeginPass(Store));
 
         s.RequestRefresh(Store);
         var started = Pending(s);
@@ -77,7 +77,7 @@ public class ExitStateBackupSchedulerTests
         var dueAt = Pending(s) + Min(2);
         Assert.True(s.ShouldTake(Store, dueAt));
 
-        s.MarkTaken(Store, dueAt);
+        s.MarkTaken(Store, dueAt, s.BeginPass(Store));
         Assert.Null(s.PendingSince(Store));
 
         s.RequestRefresh(Store);
@@ -87,6 +87,58 @@ public class ExitStateBackupSchedulerTests
         // not at the last take, which is already a past fact by then.
         Assert.False(s.ShouldTake(Store, second + Min(1)));
         Assert.True(s.ShouldTake(Store, second + Min(2)));
+    }
+
+    [Fact]
+    public void A_request_that_arrives_during_a_pass_is_not_served_by_it()
+    {
+        var s = new ExitStateBackupScheduler();
+        s.RequestRefresh(Store);
+        var first = Pending(s);
+
+        // The pass begins, its export runs, and the SDK reports a change while it does. The export read
+        // the wallet at some moment inside the call, so it may not contain that change: the refresh it
+        // earned is still owed after the pass reports.
+        var pass = s.BeginPass(Store);
+        s.RequestRefresh(Store);
+        s.MarkTaken(Store, first + Min(2), pass);
+
+        var stillPending = s.PendingSince(Store);
+        Assert.NotNull(stillPending);
+
+        // Pending from the pass's start at the latest — not from the first request, which would make the
+        // very next pass take it with no debounce at all, and never later than the request itself.
+        Assert.True(stillPending >= pass.StartedAt);
+        Assert.True(stillPending <= DateTimeOffset.UtcNow);
+        Assert.False(s.ShouldTake(Store, stillPending.Value + Min(1)));
+        Assert.True(s.ShouldTake(Store, stillPending.Value + Min(2)));
+    }
+
+    [Fact]
+    public void A_skip_that_raced_a_new_request_leaves_that_request_pending_too()
+    {
+        var s = new ExitStateBackupScheduler();
+        var pass = s.BeginPass(Store);
+        s.RequestRefresh(Store);
+        var arrived = Pending(s);
+
+        s.MarkSkipped(Store, Base, pass);
+
+        // Arrived during the pass, so it keeps its own stamp and its own debounce.
+        Assert.Equal(arrived, s.PendingSince(Store));
+    }
+
+    [Fact]
+    public void A_pass_with_no_request_after_it_began_serves_everything_that_was_pending()
+    {
+        var s = new ExitStateBackupScheduler();
+        s.RequestRefresh(Store);
+        s.RequestRefresh(Store);
+
+        var pass = s.BeginPass(Store);
+        s.MarkTaken(Store, Base, pass);
+
+        Assert.Null(s.PendingSince(Store));
     }
 
     // ------------------------------------------------------------------
@@ -107,7 +159,7 @@ public class ExitStateBackupSchedulerTests
     public void The_safety_net_fires_after_its_interval_with_no_event_having_ever_arrived()
     {
         var s = new ExitStateBackupScheduler();
-        s.MarkTaken(Store, Base);
+        s.MarkTaken(Store, Base, s.BeginPass(Store));
 
         // Nothing was ever requested — the events went missing in both directions, which this
         // codebase has observed the SDK actually do — and the store still gets its next copy.
@@ -123,7 +175,7 @@ public class ExitStateBackupSchedulerTests
 
         s.RequestRefresh(Store);
         var passAt = Pending(s) + Min(2);
-        s.MarkSkipped(Store, passAt);
+        s.MarkSkipped(Store, passAt, s.BeginPass(Store));
 
         // "A pass happened and nothing changed" leaves the state known-current at this moment:
         // the next check is owed an interval from here, not from the last actual write.
@@ -137,7 +189,7 @@ public class ExitStateBackupSchedulerTests
     {
         var s = new ExitStateBackupScheduler();
         s.RequestRefresh(Store);
-        s.MarkSkipped(Store, Base);
+        s.MarkSkipped(Store, Base, s.BeginPass(Store));
 
         Assert.Null(s.PendingSince(Store));
         Assert.False(s.ShouldTake(Store, Base + TimeSpan.FromSeconds(1)));
@@ -172,7 +224,7 @@ public class ExitStateBackupSchedulerTests
         s.MarkIdlePass(Store, Base);
         Assert.Equal(started, s.PendingSince(Store));
 
-        s.MarkTaken(Store, Base + Min(2));
+        s.MarkTaken(Store, Base + Min(2), s.BeginPass(Store));
         Assert.Null(s.PendingSince(Store));
         Assert.False(s.ShouldTake(Store, Base + Min(3)));
     }

@@ -264,6 +264,34 @@ public class SparkExitStateAutoBackupTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task A_refresh_requested_while_an_export_runs_stays_pending_after_the_pass()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+        var wallet = h.Sdk.Clients[StoreId];
+
+        // The SDK reports a change while the pass's export is in flight — the export may have read the
+        // wallet before that change, so the refresh it asked for is still owed once the pass reports.
+        wallet.ExportOverride = () =>
+        {
+            h.BackupScheduler.RequestRefresh(StoreId);
+            return Task.FromResult("exit-state-blob");
+        };
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+
+        Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+        Assert.NotNull(h.BackupScheduler.PendingSince(StoreId));
+
+        // And it is acted on after its own debounce, not an hour later at the safety net.
+        wallet.ExportOverride = null;
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, wallet.ExitExportCalls.Count);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task The_safety_net_takes_a_fresh_backup_although_no_event_ever_arrived()
     {
         var clock = new StubTimeProvider(Base);

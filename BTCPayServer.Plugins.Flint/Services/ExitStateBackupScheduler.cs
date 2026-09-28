@@ -78,7 +78,15 @@ public sealed class ExitStateBackupScheduler
     /// Hash of the last content believed stored, or null while nothing is believed stored — including the
     /// state right after a restart, before the caller has seeded it.
     /// </param>
-    private sealed record Marks(DateTimeOffset? RequestedAt, DateTimeOffset? LastPassAt, string? ContentHash);
+    /// <param name="Generation">
+    /// How many refresh requests this store has ever received. Moves on every request, pending or not, so
+    /// a pass can tell whether one arrived while it was exporting — see <see cref="BeginPass"/>.
+    /// </param>
+    private sealed record Marks(
+        DateTimeOffset? RequestedAt,
+        DateTimeOffset? LastPassAt,
+        string? ContentHash,
+        long Generation = 0);
 
     private readonly ConcurrentDictionary<string, Marks> _marks = new();
 
@@ -105,10 +113,36 @@ public sealed class ExitStateBackupScheduler
 
         _marks.AddOrUpdate(
             storeId,
-            _ => new Marks(DateTimeOffset.UtcNow, null, null),
+            _ => new Marks(DateTimeOffset.UtcNow, null, null, 1),
             (_, current) => current.RequestedAt is null
-                ? current with { RequestedAt = DateTimeOffset.UtcNow }
-                : current);
+                ? current with { RequestedAt = DateTimeOffset.UtcNow, Generation = current.Generation + 1 }
+                : current with { Generation = current.Generation + 1 });
+    }
+
+    /// <summary>
+    /// Marks the start of a pass over one store, before its export: what the pass will be able to serve.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A request that arrives during an export is not served by it.</b> The export reads the wallet at
+    /// some moment inside the call, and an event the SDK emitted after that moment describes a change the
+    /// export may not contain — the refresh it asked for is still owed. Clearing every request when the pass
+    /// ends, as this class once did, dropped exactly those: an exit-state change landing during a
+    /// multi-second export left the backup stale until the safety net, an hour later.
+    /// </para>
+    /// <para>
+    /// The token carries the request generation at this moment, and the real wall clock, because that is
+    /// the clock <see cref="RequestRefresh"/> stamps with: <see cref="MarkTaken"/> and
+    /// <see cref="MarkSkipped"/> clear the pending request only when no request arrived after this call,
+    /// and otherwise leave it pending from no later than this moment — never later than the request
+    /// itself, so the debounce it waits out is never longer than its own.
+    /// </para>
+    /// </remarks>
+    public ExitStateBackupPass BeginPass(string storeId)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+        var generation = _marks.TryGetValue(storeId, out var marks) ? marks.Generation : 0;
+        return new ExitStateBackupPass(generation, DateTimeOffset.UtcNow);
     }
 
     /// <summary>
@@ -150,16 +184,19 @@ public sealed class ExitStateBackupScheduler
     }
 
     /// <summary>
-    /// Records that a backup was taken: serves any pending request and restarts the safety net.
+    /// Records that a backup was taken: serves the requests that predate <paramref name="pass"/> and
+    /// restarts the safety net.
     /// </summary>
-    public void MarkTaken(string storeId, DateTimeOffset now) => MarkPass(storeId, now);
+    public void MarkTaken(string storeId, DateTimeOffset now, ExitStateBackupPass pass) =>
+        MarkPass(storeId, now, pass);
 
     /// <summary>
     /// Records that a pass reported on this store's state and found the stored copy unchanged, so nothing
-    /// was written. Serves any pending request and restarts the safety net, exactly like a take — the pass
-    /// happened and the state is known current.
+    /// was written. Serves the requests that predate <paramref name="pass"/> and restarts the safety net,
+    /// exactly like a take — the pass happened and the state is known current as of its export.
     /// </summary>
-    public void MarkSkipped(string storeId, DateTimeOffset now) => MarkPass(storeId, now);
+    public void MarkSkipped(string storeId, DateTimeOffset now, ExitStateBackupPass pass) =>
+        MarkPass(storeId, now, pass);
 
     /// <summary>
     /// Records that a pass ran and learned nothing worth acting on: the safety net restarts, and
@@ -242,14 +279,26 @@ public sealed class ExitStateBackupScheduler
                && string.Equals(hash, Hash(content), StringComparison.Ordinal);
     }
 
-    private void MarkPass(string storeId, DateTimeOffset now)
+    private void MarkPass(string storeId, DateTimeOffset now, ExitStateBackupPass pass)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
         _marks.AddOrUpdate(
             storeId,
             _ => new Marks(null, now, null),
-            (_, current) => current with { RequestedAt = null, LastPassAt = now });
+            (_, current) => current.Generation == pass.Generation
+                ? current with { RequestedAt = null, LastPassAt = now }
+                // A request arrived after the export began, so it is still owed. Pending from the pass's
+                // start at the latest: a request that was already pending before the pass (and got
+                // coalesced with the new one) must not keep its old time, or the next pass would take it
+                // immediately with no debounce at all; and one that arrived during the pass keeps its own.
+                : current with
+                {
+                    RequestedAt = current.RequestedAt is { } requested && requested > pass.StartedAt
+                        ? requested
+                        : pass.StartedAt,
+                    LastPassAt = now
+                });
     }
 
     /// <summary>
@@ -259,3 +308,9 @@ public sealed class ExitStateBackupScheduler
     private static string Hash(string content) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
 }
+
+/// <summary>
+/// What one pass over one store can serve: the request generation and the wall-clock moment its export began.
+/// </summary>
+/// <remarks>Opaque to callers; see <see cref="ExitStateBackupScheduler.BeginPass"/>.</remarks>
+public readonly record struct ExitStateBackupPass(long Generation, DateTimeOffset StartedAt);
