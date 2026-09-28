@@ -418,7 +418,19 @@ public enum SweepRefusalCode
     /// the provider states; this one bounds the <em>rate</em> it applies, which nothing inside the quote can
     /// check — a quote offering $100 of USDT for $320 of satoshi states a 0.34% spread.
     /// </remarks>
-    CrossChainValueUnverifiable = 16
+    CrossChainValueUnverifiable = 16,
+
+    /// <summary>
+    /// The store has a unilateral exit quoted or built, and a sweep would spend the leaves it is pinned to.
+    /// </summary>
+    /// <remarks>
+    /// A pause rather than a fault: it clears the moment the exit is marked completed or abandoned. Recorded like
+    /// any other refusal, so an operator who wonders why their balance stopped moving reads the reason in the
+    /// sweep history rather than inferring it. Named without the word "unilateral" because this enum is published
+    /// in the Greenfield document, which by policy offers no unilateral exit (see <c>SparkApiContractTests</c>);
+    /// the message carries the specifics.
+    /// </remarks>
+    ExitInProgress = 17
 }
 
 /// <summary>What set a sweep in motion.</summary>

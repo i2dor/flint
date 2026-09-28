@@ -969,8 +969,30 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         return View(BuildExitViewModel(storeId, page, settings));
+    }
+
+    /// <summary>
+    /// The store's settings for the exit page's own inputs, or null when they could not be read.
+    /// </summary>
+    /// <remarks>
+    /// Read only to pre-fill the explorer box, so a failure here costs an empty box and nothing else — and a
+    /// throw on this GET would cost the whole plugin: BTCPay 2.4 disables a plugin and restarts the server on an
+    /// unhandled exception from one of its requests. The service's own read of the same settings is guarded the
+    /// same way, and the page it returns already says when the store could not be read.
+    /// </remarks>
+    private async Task<SparkSettings?> ReadSettingsForExitPageAsync(string storeId)
+    {
+        try
+        {
+            return await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not read its settings for the exit page", storeId);
+            return null;
+        }
     }
 
     /// <summary>
@@ -1041,15 +1063,22 @@ public class SparkController : Controller
     /// Builds and signs the exit against the funding that has arrived. Broadcasts nothing.
     /// </summary>
     /// <remarks>
-    /// Safe to post again after a failure, and the page says so: the service re-discovers the funding UTXOs and
-    /// re-quotes the record's own leaves each time, so a build that failed for want of funding succeeds once
-    /// more has been sent, and steps already confirmed on-chain are skipped rather than rebuilt.
+    /// Safe to post again after a failure, and the page says so: the service re-quotes the record's own leaves
+    /// each time and, once a build has succeeded, hands the SDK the funding it committed to follow alongside
+    /// anything new on the address — so a build that failed for want of funding succeeds once more has been
+    /// sent, a rebuild never asks for the first funding twice, and steps already confirmed on-chain are skipped
+    /// rather than rebuilt.
     /// </remarks>
     [HttpPost("exit/build")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    /// <param name="feeRateSatPerVbyte">
+    /// Empty rebuilds at the record's rate; a value re-prices the build — the page's fee bump. Whether it is
+    /// allowed is the service's judgement.
+    /// </param>
     public async Task<IActionResult> BuildExit(
         [FromRoute] string storeId,
         string recordId,
+        long? feeRateSatPerVbyte,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1061,7 +1090,7 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .BuildAsync(storeId, recordId, cancellationToken)
+            .BuildAsync(storeId, recordId, feeRateSatPerVbyte, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(
@@ -1109,7 +1138,7 @@ public class SparkController : Controller
             .ConfigureAwait(false);
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         var model = BuildExitViewModel(storeId, page, settings);
 
         // Read after the write, so the banner and the table describe the same moment. Verdict is not
@@ -1360,19 +1389,22 @@ public class SparkController : Controller
     }
 
     /// <summary>
-    /// Records the operator's own statement that they broadcast the set and the sweep confirmed.
+    /// Completes the exit once Spark's check confirms it finished, or on the operator's own word when they say
+    /// a check cannot answer.
     /// </summary>
     /// <remarks>
-    /// Nothing here watches the chain in Phase 0, so this button is a note, not a verification — and it moves
-    /// no money either way. It exists because without it the only way a finished exit leaves the active state
-    /// is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page teaches
-    /// somebody to distrust it.
+    /// It moves no money either way. It exists because without it the only way a finished exit leaves the
+    /// active state is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page
+    /// teaches somebody to distrust it. Whether a check is needed, and what counts as finished, is the
+    /// service's judgement.
     /// </remarks>
+    /// <param name="confirmedWithoutVerdict">The page's "I confirmed the sweep myself" box.</param>
     [HttpPost("exit/complete")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> CompleteExit(
         [FromRoute] string storeId,
         string recordId,
+        bool confirmedWithoutVerdict,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1384,13 +1416,16 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .MarkCompletedAsync(storeId, recordId, cancellationToken)
+            .MarkCompletedAsync(storeId, recordId, confirmedWithoutVerdict, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(
             result,
-            "Recorded as completed. Nothing was broadcast or moved by this — it is your confirmation that the "
-            + "sweep confirmed, and it frees this store to quote another exit.");
+            result.Verdict is SparkExitVerdict.Done
+                ? "Recorded as completed: Spark's check confirmed every transaction, the sweep included, is in a "
+                  + "block. Nothing was broadcast or moved by this, and this store can quote another exit."
+                : "Recorded as completed on your confirmation that the sweep is in a block. Nothing was broadcast "
+                  + "or moved by this, and this store can quote another exit.");
         return RedirectToAction(nameof(Exit), new { storeId });
     }
 
@@ -1403,9 +1438,18 @@ public class SparkController : Controller
     /// be reached" would otherwise have to go looking for a settings screen that does not exist. A blank value
     /// clears the override; whether the string is an acceptable URL is the service's judgement, not this
     /// action's.
+    /// <para>
+    /// <b>Server administrators only, on top of the store permission.</b> The URL is not a store preference so
+    /// much as an instruction to this server to make HTTP requests to a host of the setter's choosing — on every
+    /// view of the exit page, by anyone who can view the store — and to relay what came back into the page. For
+    /// a store administrator on a shared server that is a blind request forger against the server's own network:
+    /// its LAN, its loopback services, whatever a cloud host exposes. The server's administrator is the one
+    /// person for whom pointing it at an internal esplora is a legitimate choice, so the setting is theirs.
+    /// </para>
     /// </remarks>
     [HttpPost("exit/explorer")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyServerSettings)]
     public async Task<IActionResult> SetExitExplorer(
         [FromRoute] string storeId,
         string? esploraApiUrl,
@@ -1494,7 +1538,12 @@ public class SparkController : Controller
             // said "nothing is ready" into an empty list here would change nothing — but turning a service
             // that said "I could not tell" into one would put an action block on screen for an unknown set.
             PendingBroadcast = page.PendingBroadcast,
-            EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
+            // Both links coalesced: a stored blob with an explicit "UnilateralExit": null deserialises to a null
+            // section whatever the property initialiser says, and a NullReferenceException on this GET disables
+            // the plugin and restarts BTCPay.
+            EsploraApiUrl = settings?.UnilateralExit?.EsploraApiUrl,
+            LoadError = page.LoadError,
+            StatusesReadUtc = page.StatusesReadUtc,
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };
@@ -1507,6 +1556,7 @@ public class SparkController : Controller
             // quote at rather than a field they have to fill in blind, and either way they can type another one.
             model.FeeRateSatPerVbyte = page.RecommendedFeeRateSatPerVbyte
                                        ?? SparkUnilateralExitService.DefaultFeeRateSatPerVbyte;
+            model.FeeRateSuggested = page.RecommendedFeeRateSatPerVbyte is not null;
             return model;
         }
 

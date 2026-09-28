@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,8 +21,10 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// <b>Nothing here broadcasts.</b> Phase 0 ends at a signed, ordered transaction set persisted on the
 /// <see cref="UnilateralExitRecord"/>; the operator broadcasts each package themselves (fan-out first
 /// and alone, then tree-node packages in <c>depends_on</c> order waiting for confirmation between,
-/// refunds after their CSV timelocks, sweep last and alone). The SDK in use (0.22.0) still needs the
-/// operators reachable to prepare an exit; exit-from-local-state arrives with a later SDK bump.
+/// refunds after their CSV timelocks, sweep last and alone). Since SDK 0.25 quoting and building read each
+/// leaf's pre-signed chain from local storage, so neither needs the operators reachable — only a leaf whose
+/// chain was collected while they still were (or restored from an exit-state backup) can be exited, and
+/// preparing still makes a best-effort refresh from them first, which is why its calls carry a deadline.
 /// </para>
 /// <para>
 /// One exit at a time per store: a store with an active record (awaiting funding or built) refuses a
@@ -59,16 +62,32 @@ public interface ISparkUnilateralExitService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Discovers the funding UTXOs on the record's funding address, re-quotes the record's own leaves,
-    /// and builds the signed transaction set onto the record.
+    /// Re-quotes the record's own leaves, gathers its funding, and builds the signed transaction set onto the
+    /// record.
     /// </summary>
     /// <remarks>
-    /// Refuses when the discovered funding falls short of the quoted requirement, and re-checks
-    /// recoverable-exceeds-fee against the fresh quote before signing (the persisted quote is display
-    /// state, not the guard). Safe to call again after a failure: the SDK resumes from chain state and
-    /// a shortfall or spent-funding conflict lands on the record as <see cref="UnilateralExitRecord.LastError"/>.
+    /// A first build discovers the funding on the record's address and spends the smallest single output that
+    /// covers the fresh quote. A rebuild — after a Redo, an unverified status, or to raise the fee — passes back
+    /// every output earlier builds committed (<see cref="UnilateralExitRecord.FundingUtxosJson"/>) plus anything
+    /// else confirmed on the address, and the SDK follows the committed ones to whatever they became. It
+    /// re-checks recoverable-exceeds-fee against the fresh quote before signing (the persisted quote is display
+    /// state, not the guard). Safe to call again after a failure: the SDK resumes from chain state and a
+    /// shortfall lands on the record as <see cref="UnilateralExitRecord.LastError"/>.
     /// </remarks>
-    Task<UnilateralExitOpResult> BuildAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
+    /// <param name="feeRateSatPerVbyte">
+    /// Null builds at the record's own rate. A value re-prices this build at that rate and, if it succeeds, makes
+    /// it the record's rate — the SDK's way to raise the fee on an exit that stopped confirming. A built exit's
+    /// rate may stay or rise but not fall, because a replacement has to pay more than what it replaces.
+    /// </param>
+    Task<UnilateralExitOpResult> BuildAsync(
+        string storeId,
+        string recordId,
+        long? feeRateSatPerVbyte,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Builds at the record's own rate; see the overload.</summary>
+    Task<UnilateralExitOpResult> BuildAsync(string storeId, string recordId, CancellationToken cancellationToken = default) =>
+        BuildAsync(storeId, recordId, null, cancellationToken);
 
     /// <summary>
     /// Marks the record abandoned so the store can start over. Abandoning moves no money and cancels
@@ -77,12 +96,33 @@ public interface ISparkUnilateralExitService
     Task<UnilateralExitOpResult> AbandonAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Marks a built record completed: the operator confirms they have broadcast the set and the sweep
-    /// has confirmed. The plugin cannot verify this itself in Phase 0 (nothing watches the chain), so
-    /// this is the operator's statement of fact — but without it, Abandon would be the only way a
-    /// finished exit ever leaves the active state, and abandoning is the wrong verb for success.
+    /// Marks a built record completed once Spark's check reports it <see cref="SparkExitVerdict.Done"/> — every
+    /// transaction, the sweep included, in a block. Without it, Abandon would be the only way a finished exit
+    /// ever leaves the active state, and abandoning is the wrong verb for success.
     /// </summary>
-    Task<UnilateralExitOpResult> MarkCompletedAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
+    /// <remarks>
+    /// Checked rather than taken on trust, because completing an exit takes its signed transactions off the
+    /// page, and completing one early hides the steps still to broadcast. Nothing watches the chain between
+    /// presses, so the check runs as part of this call; a verdict other than Done is a refusal that says what
+    /// the check found.
+    /// </remarks>
+    /// <param name="confirmedWithoutVerdict">
+    /// The operator's own statement that the sweep confirmed, for when a check cannot answer — the wallet will
+    /// not start, the chain service will not respond, or the last build returned nothing to check. Completes
+    /// without asking, and is logged as such.
+    /// </param>
+    Task<UnilateralExitOpResult> MarkCompletedAsync(
+        string storeId,
+        string recordId,
+        bool confirmedWithoutVerdict,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Completes only on a Done verdict; see the overload.</summary>
+    Task<UnilateralExitOpResult> MarkCompletedAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken = default) =>
+        MarkCompletedAsync(storeId, recordId, false, cancellationToken);
 
     /// <summary>
     /// Asks the chain how far a built exit has got, refreshes the record's stored transaction statuses from the
@@ -90,9 +130,12 @@ public interface ISparkUnilateralExitService
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Safe to call as often as an operator likes: it broadcasts nothing and signs nothing.</b> It reads the
-    /// chain and nothing else — no wallet, no leaves, no funding, no signer — which is what makes a built exit
-    /// followable from a stored record alone, days after the build, on a plugin that has been restarted since.
+    /// <b>Safe to call as often as an operator likes: it broadcasts nothing and signs nothing.</b> The SDK's
+    /// check reads the chain and nothing else — no leaves, no funding, no signer — which is what makes a built
+    /// exit followable from a stored record alone, days after the build, on a plugin that has been restarted
+    /// since. It does need the store's wallet <em>running</em>: the check is a method on the connected SDK
+    /// instance, and the plugin has no chain-only handle to ask instead, so a stopped wallet is refused with
+    /// that reason rather than reported as a chain failure.
     /// </para>
     /// <para>
     /// The refreshed transactions are persisted in place of the stored set, replacing the statuses with what the
@@ -140,8 +183,14 @@ public interface ISparkUnilateralExitService
     /// <summary>
     /// Stores the explorer override used for funding discovery. Null or blank clears it. This is the
     /// feature's one piece of real configuration, so it is settable from the page that reports it
-    /// missing; validation (absolute http/https URL) is here, not in the controller.
+    /// missing; validation (an absolute http/https base URL with no credentials, query or fragment, and not a
+    /// link-local, unspecified or multicast address) is here, not in the controller.
     /// </summary>
+    /// <remarks>
+    /// Who may call it is the one guard this service cannot hold, because it does not see the caller: the value
+    /// makes the server send requests to a host of the setter's choosing on every page view, so the controller
+    /// restricts it to server administrators. Anything else that calls this must do the same.
+    /// </remarks>
     Task<UnilateralExitOpResult> SetExplorerUrlAsync(string storeId, string? esploraApiUrl, CancellationToken cancellationToken = default);
 }
 
@@ -211,6 +260,16 @@ public sealed record UnilateralExitOpResult(
 /// a built exit runs to a dozen rows of which at most one or two are actionable at any moment. Null when
 /// there is no built set, or when the set read back was empty.
 /// </param>
+/// <param name="StatusesReadUtc">
+/// When the statuses in <paramref name="Transactions"/> were last read from the chain — by the build that stored
+/// them or by the last check. Nothing refreshes them between presses, so the page states this beside them. Null for
+/// a set stored before the time was recorded, and when there is no readable set.
+/// </param>
+/// <param name="LoadError">
+/// Set when the read itself failed — the exit records could not be loaded — and every other member is then the
+/// empty page. The view renders this instead of any form: an empty page with a quote form beside it would read
+/// as "no exit is in progress" when the truth is "this page could not tell".
+/// </param>
 public sealed record UnilateralExitPageData(
     bool WalletRunning,
     bool DisclosureAcknowledged,
@@ -224,4 +283,6 @@ public sealed record UnilateralExitPageData(
     string? FundingKeyPath,
     IReadOnlyList<SparkExitTransaction>? Transactions,
     bool TransactionsUnreadable,
-    IReadOnlyList<SparkExitTransaction>? PendingBroadcast);
+    IReadOnlyList<SparkExitTransaction>? PendingBroadcast,
+    string? LoadError = null,
+    DateTimeOffset? StatusesReadUtc = null);

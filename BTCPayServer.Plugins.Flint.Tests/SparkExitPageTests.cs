@@ -80,9 +80,9 @@ public class SparkExitPageTests
                 Store,
                 new SparkExitViewModel { FeeRateSatPerVbyte = 10, DestinationAddress = Destination },
                 CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(Store, "some-record", CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", false, CancellationToken.None));
         Assert.IsType<NotFoundResult>(
             await h.Mvc.SetExitExplorer(Store, "https://esplora.example/api", CancellationToken.None));
 
@@ -110,9 +110,9 @@ public class SparkExitPageTests
                 victim,
                 new SparkExitViewModel { FeeRateSatPerVbyte = 10, DestinationAddress = Destination },
                 CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(victim, "record-7", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(victim, "record-7", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(victim, "record-7", CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(victim, "record-7", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(victim, "record-7", false, CancellationToken.None));
         Assert.IsType<NotFoundResult>(
             await h.Mvc.SetExitExplorer(victim, "https://esplora.example/api", CancellationToken.None));
 
@@ -277,6 +277,49 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task A_page_read_that_failed_reaches_the_view_as_an_error_and_nothing_else()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // What the service hands back when the exit records could not be read at all. The view must render the
+        // error and not the quote form beside it: an empty page with a form reads as "no exit is in progress"
+        // when the truth is "this page could not tell".
+        var exit = new StubExitService
+        {
+            Page = Page() with { LoadError = SparkUnilateralExitService.ExitsUnreadable }
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+
+        Assert.Equal(SparkUnilateralExitService.ExitsUnreadable, model.LoadError);
+
+        var view = ExitTemplate();
+        var errorAt = view.IndexOf("id=\"SparkExitLoadError\"", StringComparison.Ordinal);
+        var quoteAt = view.IndexOf("id=\"SparkExitQuoteForm\"", StringComparison.Ordinal);
+        var elseAt = view.IndexOf("else", errorAt, StringComparison.Ordinal);
+        Assert.InRange(errorAt, 0, view.Length);
+        // Every form comes after the error branch's own else, so none can render beside it.
+        Assert.InRange(elseAt, errorAt, quoteAt);
+    }
+
+    [Fact]
+    public async Task A_settings_read_that_throws_does_not_take_the_exit_page_down()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // The controller reads the store's settings once more for the explorer box. On BTCPay 2.4 an exception
+        // escaping this GET disables the plugin and restarts the server, so a failed read costs the box, not that.
+        var exit = new StubExitService { Page = Page(disclosureAcknowledged: true) };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+        h.Settings.FailGetsWith = new InvalidOperationException("the settings could not be read");
+
+        var model = await RenderExit(h);
+
+        Assert.Null(model.EsploraApiUrl);
+    }
+
+    [Fact]
     public async Task On_mainnet_the_page_says_so_and_starts_with_no_override()
     {
         using var gate = FeatureGate(enabled: true);
@@ -433,6 +476,10 @@ public class SparkExitPageTests
 
         Assert.Contains("bitcoin-cli submitpackage", view);
         Assert.Contains("CpfpTxHex is { } cpfpTxHex", view);
+        // The command is built from stored strings and pasted into a shell, so it is only built from hex — both
+        // halves of a package, checked on the line that builds it rather than trusted from upstream.
+        Assert.Contains("!SparkExitTransaction.IsTransactionHex(tx.TxHex)", view);
+        Assert.Contains("!SparkExitTransaction.IsTransactionHex(tx.CpfpTxHex)", view);
         Assert.Contains("sendrawtransaction", view);
         Assert.Contains("SparkExitTransactions", view);
         Assert.Contains("SparkExitFundingAddress", view);
@@ -521,6 +568,162 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public void An_active_exit_says_what_can_invalidate_it()
+    {
+        // The exit is pinned to named leaves and nothing outside Flint's own sweep can be paused, so the page has
+        // to say out loud which other things spend leaves — otherwise the first an operator hears of it is a
+        // refused build days into the exit.
+        var view = ExitTemplate();
+
+        Assert.Contains("id=\"SparkExitLeavesAtRisk\"", view);
+        Assert.Contains("pauses its\n                own sweeps", view.Replace("\r\n", "\n"));
+        Assert.Contains("Lightning payments", view);
+        Assert.Contains("leaf optimisation", view);
+    }
+
+    [Fact]
+    public void The_rebuild_form_offers_a_fee_bump_that_can_only_go_up()
+    {
+        // The SDK raises an exit's fee by re-quoting at a higher rate and building again, so the rebuild has to
+        // carry a rate — and the page's old advice, "send more funding and build again", described a fee bump
+        // that every build at the record's own rate made impossible.
+        var view = ExitTemplate();
+
+        Assert.Contains("id=\"SparkExitRebuildFeeRate\"", view);
+        Assert.Contains("name=\"feeRateSatPerVbyte\"", view);
+        Assert.Contains("min=\"@record.FeeRateSatPerVbyte\"", view);
+        Assert.DoesNotContain("send more funding and build again", view);
+    }
+
+    [Fact]
+    public async Task Completing_on_the_operator_s_own_word_is_a_separate_deliberate_tick()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // Completing takes the signed set off the page, so the plain press asks the chain first and the override
+        // is a box the operator has to tick — never pre-ticked, never hidden in the button.
+        var view = ExitTemplate();
+        Assert.Contains("name=\"confirmedWithoutVerdict\"", view);
+        Assert.DoesNotContain("name=\"confirmedWithoutVerdict\" value=\"true\" checked", view);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
+        await h.Mvc.CompleteExit(Store, "record-7", true, CancellationToken.None);
+
+        Assert.Equal(["Complete:record-7", "Complete:record-7:confirmed"], exit.Calls);
+    }
+
+    [Fact]
+    public void The_page_says_where_the_fees_come_from_and_what_comes_back()
+    {
+        // The SDK's own arithmetic: the fan-out and CPFP fees come from the funding, only the sweep's fee comes
+        // out of the recovered value, unspent funding is swept to the destination, and funding for an exit that
+        // is never broadcast is not spent at all. The page used to say the opposite of each.
+        var view = ExitTemplate();
+
+        Assert.DoesNotContain("Gross, before the fees below come out of it", view);
+        Assert.DoesNotContain("spent whether or not the exit completes", view);
+        Assert.Contains("only the final", view);
+        Assert.Contains("Funding for an exit you never broadcast is not spent", view);
+    }
+
+    [Fact]
+    public void The_page_does_not_claim_a_check_works_with_the_wallet_stopped()
+    {
+        // The SDK's check reads only the chain, but it is made through the running wallet: there is no
+        // chain-only handle. The page used to say the opposite.
+        var view = ExitTemplate();
+
+        Assert.DoesNotContain("works with this", view);
+        Assert.Contains("It needs this store's Spark wallet running", view);
+    }
+
+    [Fact]
+    public async Task The_page_says_when_its_statuses_were_read_and_how_soon_to_look_again()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var readAt = new DateTimeOffset(2026, 9, 1, 8, 30, 0, TimeSpan.Zero);
+        var exit = new StubExitService
+        {
+            Page = Page(disclosureAcknowledged: true, activeRecord: Built(), transactions: SignedExit()) with
+            {
+                StatusesReadUtc = readAt
+            }
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+        Assert.Equal(readAt, model.StatusesReadUtc);
+
+        var view = ExitTemplate();
+        Assert.Contains("id=\"SparkExitStatusesReadAt\"", view);
+        Assert.Contains("Model.StatusesReadUtc is { } readAt", view);
+        // A watchtower's version of a step becomes valid ~50 blocks (~8 h) after the step, so "every day" is too
+        // slow; and the zero-value anchors need a node recent enough to relay them.
+        Assert.DoesNotContain("every day", view);
+        Assert.Contains("Bitcoin Core 29 or later", view);
+    }
+
+    [Fact]
+    public void Only_a_server_administrator_can_point_the_server_at_an_explorer()
+    {
+        // The override is an instruction to this server to send requests to a host of the setter's choosing on
+        // every view of the page. A store administrator on a shared server must not be able to aim it at the
+        // server's own network, so the action demands the server permission on top of the store one...
+        var policies = typeof(SparkController)
+            .GetMethod(nameof(SparkController.SetExitExplorer))!
+            .GetCustomAttributes(typeof(Microsoft.AspNetCore.Authorization.AuthorizeAttribute), inherit: true)
+            .Cast<Microsoft.AspNetCore.Authorization.AuthorizeAttribute>()
+            .Select(attribute => attribute.Policy)
+            .ToList();
+        Assert.Contains(BTCPayServer.Client.Policies.CanModifyServerSettings, policies);
+        Assert.Contains(BTCPayServer.Client.Policies.CanModifyStoreSettings, policies);
+
+        // ...and the page shows the form only to those who hold it, and what is set to everyone else.
+        var view = ExitTemplate();
+        Assert.Contains("permission=\"@Policies.CanModifyServerSettings\" id=\"SparkExitExplorerForm\"", view);
+        Assert.Contains("not-permission=\"@Policies.CanModifyServerSettings\"", view);
+    }
+
+    [Fact]
+    public async Task A_recommended_rate_is_labelled_as_the_explorer_s_suggestion()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService
+        {
+            Page = Page(disclosureAcknowledged: true, recommendedFeeRateSatPerVbyte: 9)
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+
+        Assert.Equal(9, model.FeeRateSatPerVbyte);
+        Assert.True(model.FeeRateSuggested);
+        Assert.Contains("id=\"SparkExitFeeRateSuggested\"", ExitTemplate());
+
+        exit.Page = Page(disclosureAcknowledged: true);
+        var fallback = await RenderExit(h);
+        Assert.False(fallback.FeeRateSuggested);
+    }
+
+    [Fact]
+    public async Task A_fee_bump_reaches_the_service_with_its_rate()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        await h.Mvc.BuildExit(Store, "record-7", 25, CancellationToken.None);
+
+        Assert.Contains("Build:record-7:25", exit.Calls);
+    }
+
+    [Fact]
     public void The_fee_input_takes_its_bounds_from_the_service()
     {
         // Two numbers typed into a template are two numbers to keep in step, and the one that mattered would
@@ -587,7 +790,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        var result = await h.Mvc.BuildExit(Store, "record-7", CancellationToken.None);
+        var result = await h.Mvc.BuildExit(Store, "record-7", null, CancellationToken.None);
 
         Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(refusal, h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
@@ -621,7 +824,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        var result = await h.Mvc.CompleteExit(Store, "record-7", CancellationToken.None);
+        var result = await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
 
         var redirect = Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(nameof(h.Mvc.Exit), redirect.ActionName);
@@ -643,7 +846,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        await h.Mvc.CompleteExit(Store, "record-7", CancellationToken.None);
+        await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
 
         Assert.Equal(refusal, h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
         Assert.Null(h.Mvc.TempData[WellKnownTempData.SuccessMessage]);
@@ -988,9 +1191,10 @@ public class SparkExitPageTests
         }
 
         public Task<UnilateralExitOpResult> BuildAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default)
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default)
         {
-            Calls.Add($"Build:{recordId}");
+            Calls.Add(feeRateSatPerVbyte is { } rate ? $"Build:{recordId}:{rate}" : $"Build:{recordId}");
             return Task.FromResult(Result);
         }
 
@@ -1002,9 +1206,10 @@ public class SparkExitPageTests
         }
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default)
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default)
         {
-            Calls.Add($"Complete:{recordId}");
+            Calls.Add(confirmedWithoutVerdict ? $"Complete:{recordId}:confirmed" : $"Complete:{recordId}");
             return Task.FromResult(Result);
         }
 

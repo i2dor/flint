@@ -1321,11 +1321,34 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// </remarks>
     public Action? WhenExitQuoted { get; set; }
 
-    public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+    /// <summary>
+    /// When set, every prepare, build and check waits on it before doing anything — and ignores the caller's
+    /// token while it waits.
+    /// </summary>
+    /// <remarks>
+    /// The binding's exit calls take no cancellation, and a prepare begins with a refresh from the Spark
+    /// operators that can hang while they are unreachable. A fake that honoured the token would let a caller
+    /// look bounded without bounding anything; this one waits exactly as long as the native call would, which is
+    /// for as long as the test says.
+    /// </remarks>
+    public TaskCompletionSource? HoldExitCalls { get; set; }
+
+    private Task HeldExitCall() => HoldExitCalls?.Task ?? Task.CompletedTask;
+
+    public async Task<SparkExitQuote> PrepareUnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await PrepareUnilateralExitCoreAsync(feeRateSatPerVbyte, destinationAddress, leafIds);
+    }
+
+    private Task<SparkExitQuote> PrepareUnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
     {
         ThrowIfConfigured();
         ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
@@ -1338,7 +1361,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         return Task.FromResult(quote);
     }
 
-    public Task<SparkExitResult> UnilateralExitAsync(
+    public async Task<SparkExitResult> UnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
@@ -1346,6 +1369,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         byte[] fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await UnilateralExitCoreAsync(
+            feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote);
+    }
+
+    private Task<SparkExitResult> UnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(fundingUtxos);
@@ -1376,8 +1412,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             throw FailExitBuildWith;
 
         // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
-        // build time and names the amount that would have worked.
-        var funded = fundingUtxos.Sum(utxo => utxo.ValueSat);
+        // build time and names the amount that would have worked — and it is judged on what the funding has
+        // become, not on what was handed in, exactly as the SDK's resolve_funding does.
+        var funded = FollowedFundingSat(fundingUtxos);
         if (funded < ExitSingleUtxoFundingSat)
             throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
 
@@ -1395,29 +1432,92 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             return Task.FromResult(new SparkExitResult(
                 quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
 
-        var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
+        var sweepDependsOn = quote.Leaves.Select(leaf => ExitTxid($"node:{leaf.LeafId}")).ToList();
         var transactions = new List<SparkExitTransaction>
         {
-            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [], ExitStatus())
+            new(SparkExitTxKind.Fanout, null, ExitTxid("fanout"), ExitHex("fanout"), null, null, [], ExitStatus())
         };
 
         transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
             SparkExitTxKind.TreeNode,
             $"node:{leaf.LeafId}",
-            $"txid:node:{leaf.LeafId}",
-            $"0200node{leaf.LeafId}",
+            ExitTxid($"node:{leaf.LeafId}"),
+            ExitHex($"node:{leaf.LeafId}"),
             // A CPFP child, because a tree node pays no fee of its own and must go out as a package. A fake
             // that left this null would let a caller ship single-transaction broadcast instructions.
-            $"0200cpfp{leaf.LeafId}",
+            ExitHex($"cpfp:{leaf.LeafId}"),
             1_008,
-            ["txid:fanout"],
+            [ExitTxid("fanout")],
             ExitStatus())));
 
         transactions.Add(new SparkExitTransaction(
-            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn, ExitStatus()));
+            SparkExitTxKind.Sweep, null, ExitTxid("sweep"), ExitHex("sweep"), null, null, sweepDependsOn,
+            ExitStatus()));
 
         return Task.FromResult(new SparkExitResult(
             quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+    }
+
+    /// <summary>
+    /// The txid this fake gives the exit transaction it labels <paramref name="label"/>: 64 hex digits, stable.
+    /// </summary>
+    /// <remarks>
+    /// Real-shaped rather than readable, because the service refuses a stored set whose txids and hex are not
+    /// what Bitcoin would produce — the page turns them into a shell command — and a fake that handed back
+    /// <c>"txid:fanout"</c> would have every build read back as unreadable. Tests name a transaction by passing
+    /// the same label here.
+    /// </remarks>
+    public static string ExitTxid(string label) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(label))).ToLowerInvariant();
+
+    /// <summary>Even-length hex standing in for a signed transaction, distinct per label.</summary>
+    public static string ExitHex(string label) =>
+        "02000000" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(label)).ToLowerInvariant();
+
+    /// <summary>
+    /// Funding outpoints an earlier attempt spent in a confirmed transaction, mapped to the outputs that spend
+    /// produced on the same script.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK's second-attempt contract, reproduced because it is the hazard: once a fan-out or a CPFP child
+    /// has confirmed, the output the operator sent no longer exists, and what the money became is a handful of
+    /// smaller outputs — each below a whole-exit requirement, and some of them possibly spent again. The real
+    /// SDK walks a supplied outpoint to those descendants and funds from them; a caller that instead re-lists the
+    /// address and picks the one biggest output asks the operator to fund the exit twice.
+    /// </para>
+    /// <para>
+    /// An outpoint absent from this map is taken at face value, which covers both the unspent case and the SDK's
+    /// "spent only by an unconfirmed transaction" rule: that spend is this exit's own in-flight child, which the
+    /// rebuild replaces, so the outpoint is still the caller's to spend. Descendants are de-duplicated by
+    /// outpoint, as the SDK does, so an output that is both passed in and reached by following counts once.
+    /// </para>
+    /// </remarks>
+    public Dictionary<string, List<SparkExitFundingUtxo>> ExitFundingSpentInto { get; } = new(StringComparer.Ordinal);
+
+    private long FollowedFundingSat(IReadOnlyList<SparkExitFundingUtxo> supplied)
+    {
+        var resolved = new Dictionary<string, long>(StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var frontier = new Stack<SparkExitFundingUtxo>(supplied);
+
+        while (frontier.TryPop(out var input))
+        {
+            if (!visited.Add(input.OutPoint))
+                continue;
+
+            if (ExitFundingSpentInto.TryGetValue(input.OutPoint, out var became))
+            {
+                foreach (var descendant in became)
+                    frontier.Push(descendant);
+                continue;
+            }
+
+            resolved[input.OutPoint] = input.ValueSat;
+        }
+
+        return resolved.Values.Sum();
     }
 
     /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
@@ -1435,9 +1535,15 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         _ => new SparkExitTxStatus(ExitReadiness)
     };
 
-    public Task<SparkExitProgress> CheckUnilateralExitAsync(
+    public async Task<SparkExitProgress> CheckUnilateralExitAsync(
         SparkExitResult exit,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await CheckUnilateralExitCoreAsync(exit);
+    }
+
+    private Task<SparkExitProgress> CheckUnilateralExitCoreAsync(SparkExitResult exit)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(exit);
@@ -1495,9 +1601,14 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         string destinationAddress,
         IReadOnlyList<string>? leafIds)
     {
-        var selected = leafIds is null || leafIds.Count == 0
-            ? ExitLeaves.ToList()
-            : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)).ToList();
+        // A leaf whose exit is over on-chain is dropped whether it was named or not, and reported back — the
+        // SDK's drop_finished_leaves. A named leaf that is simply not in ExitLeaves is dropped silently, which is
+        // the SDK's "not in local storage" skip and the case a resuming caller has to refuse.
+        var selected = (leafIds is null || leafIds.Count == 0
+                ? ExitLeaves
+                : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)))
+            .Where(leaf => !ExitFinishedLeafIds.Contains(leaf.LeafId))
+            .ToList();
 
         return new SparkExitQuote(
             selected.Sum(leaf => leaf.ValueSat),
@@ -1509,8 +1620,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                 .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
                 .ToList(),
             feeRateSatPerVbyte,
-            destinationAddress);
+            destinationAddress,
+            ExitFinishedLeafIds.ToList());
     }
+
+    /// <summary>
+    /// Leaves the chain shows as finished — refund swept, or branch stopped — which every quote leaves out and
+    /// reports in <see cref="SparkExitQuote.FinishedLeafIds"/>, as the SDK's <c>exit_chain_state</c> does.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from removing a leaf from <see cref="ExitLeaves"/>, and the distinction is the point: a finished
+    /// leaf is a legitimate absence from a resumed quote, a missing one is a smaller exit than was funded.
+    /// </remarks>
+    public List<string> ExitFinishedLeafIds { get; } = [];
 
     public sealed record ExitQuoteCall(
         ulong FeeRateSatPerVbyte,

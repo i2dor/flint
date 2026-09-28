@@ -179,15 +179,22 @@ public class SparkSettingsSerializationTests
     }
 
     [Fact]
-    public void An_explicit_null_unilateral_exit_section_deserialises_to_null_despite_the_initialiser()
+    public void An_explicit_null_unilateral_exit_section_reads_as_the_unacknowledged_default()
     {
-        // The same language behaviour that produced the NullReferenceException out of a scheduler pass, pinned for
-        // the new section too: an explicit null beats a property initialiser, so every reader coalesces. A reader
-        // that dereferenced this unguarded would throw on the exit page rather than showing an unacknowledged one.
+        // The same language behaviour that produced the NullReferenceException out of a scheduler pass — an explicit
+        // null beats a property initialiser — is closed for this section at the setter rather than left to every
+        // reader: the exit page dereferenced it unguarded, and a NullReferenceException on that GET disables the
+        // plugin and restarts BTCPay. What the null must not become is an acknowledgement.
         var read = Deserialize<SparkSettings>(
             """{"ProtectedMnemonic":"protected-blob","UnilateralExit":null}""")!;
 
-        Assert.Null(read.UnilateralExit);
+        Assert.NotNull(read.UnilateralExit);
+        Assert.False(read.UnilateralExit.DisclosureAcknowledged);
+        Assert.Null(read.UnilateralExit.EsploraApiUrl);
+
+        // And a caller assigning null in code gets the same default rather than a trap for the next reader.
+        read.UnilateralExit = null!;
+        Assert.NotNull(read.UnilateralExit);
     }
 
     [Fact]

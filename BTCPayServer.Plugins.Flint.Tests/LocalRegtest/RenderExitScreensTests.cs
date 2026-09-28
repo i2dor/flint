@@ -218,6 +218,55 @@ public class RenderExitScreensTests
         WriteScreen("05-awaiting-funding.html", html);
     }
 
+    /// <summary>
+    /// A built exit part-way through: the fan-out confirmed, one package ready, the sweep waiting — with the time
+    /// its statuses were read, the fee-bump form, and the completion that asks the chain first.
+    /// </summary>
+    /// <remarks>
+    /// Asserted as well as written, because this is the one screen that turns stored strings into shell
+    /// commands: the rendered page has to carry the package command built from the hex, and the time the
+    /// statuses were read.
+    /// </remarks>
+    [Fact]
+    public async Task The_built_screen_renders()
+    {
+        using var gate = FeatureGate();
+
+        var record = AwaitingFunding();
+        record.Status = UnilateralExitStatus.Built;
+        var fanout = FakeSparkSdkClient.ExitTxid("fanout");
+        var node = FakeSparkSdkClient.ExitTxid("node:leaf-a");
+        SparkExitTransaction[] transactions =
+        [
+            new(SparkExitTxKind.Fanout, null, fanout, FakeSparkSdkClient.ExitHex("fanout"), null, null, [],
+                new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: 812_000)),
+            new(SparkExitTxKind.TreeNode, "leaf-a", node, FakeSparkSdkClient.ExitHex("node:leaf-a"),
+                FakeSparkSdkClient.ExitHex("cpfp:leaf-a"), 144u, [fanout],
+                new SparkExitTxStatus(SparkExitTxReadiness.Ready)),
+            new(SparkExitTxKind.Sweep, null, FakeSparkSdkClient.ExitTxid("sweep"), FakeSparkSdkClient.ExitHex("sweep"),
+                null, null, [node], new SparkExitTxStatus(SparkExitTxReadiness.Waiting, SpendableAtHeight: 812_300))
+        ];
+        var readAt = new DateTimeOffset(2026, 9, 15, 6, 0, 0, TimeSpan.Zero);
+
+        var html = await RenderExitScreenAsync(
+            Page(
+                balanceSats: 400_000,
+                activeRecord: record,
+                leafCount: 1,
+                fundingKeyPath: "m/84'/1'/4607060'/0/3",
+                transactions: transactions,
+                pendingBroadcast: [transactions[1]]) with { StatusesReadUtc = readAt });
+
+        Assert.Contains("bitcoin-cli submitpackage", html);
+        Assert.Contains(FakeSparkSdkClient.ExitHex("cpfp:leaf-a"), html);
+        Assert.Contains("2026-09-15 06:00:00Z", html);
+        Assert.Contains("SparkExitRebuildFeeRate", html);
+        Assert.Contains("SparkExitCompleteConfirmed", html);
+        Assert.Contains("SparkExitLeavesAtRisk", html);
+
+        WriteScreen("08-built.html", html);
+    }
+
     /// <summary>The Advanced page with an exit-state backup stored.</summary>
     [Fact]
     public async Task The_advanced_backup_screen_renders_when_one_is_stored()
@@ -401,13 +450,15 @@ public class RenderExitScreensTests
             CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> BuildAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> AbandonAsync(
             string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> CheckAsync(
             string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();

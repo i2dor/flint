@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace BTCPayServer.Plugins.Flint.Sdk;
 
@@ -174,7 +175,12 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// The gross value of the selected leaves. <b>Fees are not netted out of it</b>, so a caller deciding whether
 /// an exit is worth doing must compare this against <paramref name="TotalFeeSat"/> itself.
 /// </param>
-/// <param name="TotalFeeSat">Every on-chain fee the exit will pay, fan-out included.</param>
+/// <param name="TotalFeeSat">
+/// Every on-chain fee the exit will pay, fan-out included — and paid from two places. The fan-out and the CPFP
+/// children are paid by the funding, the final sweep by the recovered value, so what arrives is
+/// <paramref name="RecoverableValueSat"/> less the sweep's fee plus whatever funding was not spent;
+/// recoverable minus this total counts the funding-paid fees twice.
+/// </param>
 /// <param name="SingleUtxoFundingSat">
 /// The amount that must sit on the funding address as <b>one</b> UTXO. This is the number an operator funds
 /// against: the plugin spends a single P2WPKH output, so two outputs each half this size do not qualify.
@@ -192,6 +198,14 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// matches what was asked for before it builds anything, because the built sweep is signed against whatever
 /// this says.
 /// </param>
+/// <param name="FinishedLeafIds">
+/// Leaves whose exit the chain shows as already over — their refund was swept, or their branch was taken by a
+/// spend the exit cannot continue from — read off the SDK's <c>exit_chain_state</c>. The SDK leaves such a leaf
+/// out of <see cref="Leaves"/> even when it was named, so this is what tells a leaf that is <em>done</em> apart
+/// from a leaf that is <em>gone</em>: the SDK also silently skips a named leaf missing from its local storage
+/// (spent by a payment, reshaped by leaf optimisation), and a caller resuming a pinned exit has to refuse that
+/// case rather than build a smaller exit than the one that was funded. Null reads as none.
+/// </param>
 public sealed record SparkExitQuote(
     long RecoverableValueSat,
     long TotalFeeSat,
@@ -200,10 +214,25 @@ public sealed record SparkExitQuote(
     long FanoutFeeSat,
     IReadOnlyList<SparkExitBranchFunding> PerBranchFunding,
     ulong FeeRateSatPerVbyte,
-    string Destination)
+    string Destination,
+    IReadOnlyList<string>? FinishedLeafIds = null)
 {
     /// <summary>True when the quote selected nothing — see the remarks on this type.</summary>
     public bool IsEmpty => Leaves.Count == 0;
+
+    /// <summary>
+    /// The pinned leaves this quote no longer covers and the chain does not show as finished, in the order given.
+    /// </summary>
+    /// <remarks>
+    /// Non-empty means the quote describes a smaller exit than the one pinned — the leaves went missing from
+    /// the wallet's storage or became unexitable — and a resume must not quietly build it.
+    /// </remarks>
+    public IReadOnlyList<string> UncoveredOf(IReadOnlyList<string> pinned)
+    {
+        var covered = new HashSet<string>(Leaves.Select(leaf => leaf.LeafId), StringComparer.Ordinal);
+        covered.UnionWith(FinishedLeafIds ?? []);
+        return pinned.Where(id => !covered.Contains(id)).ToList();
+    }
 }
 
 /// <summary>
@@ -284,6 +313,38 @@ public sealed record SparkExitTransaction(
     /// correspondence would silently drop a child the SDK started attaching elsewhere.
     /// </remarks>
     public bool RequiresPackageBroadcast => CpfpTxHex is not null;
+
+    /// <summary>True when <paramref name="value"/> is a txid as Bitcoin spells one: 64 hex digits.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>These two predicates exist because the page turns stored strings into a shell command.</b> The exit
+    /// page renders <c>bitcoin-cli submitpackage '["…","…"]'</c> for an operator to paste into a terminal, built
+    /// from <see cref="TxHex"/> and <see cref="CpfpTxHex"/> as they sit in the database. Hex cannot carry a quote,
+    /// a bracket or a semicolon, so a value that is hex cannot change what the pasted command does — and a value
+    /// that is not hex is not a transaction anyway, so refusing it costs nothing a real exit has.
+    /// </para>
+    /// <para>
+    /// Either case is accepted: Bitcoin Core accepts both, and a row that was written in upper case by some
+    /// earlier tool is no less a transaction for it.
+    /// </para>
+    /// </remarks>
+    public static bool IsTxid(string? value) => value is { Length: 64 } && IsHex(value);
+
+    /// <summary>True when <paramref name="value"/> is non-empty, even-length hex — a serialised transaction.</summary>
+    /// <remarks>See <see cref="IsTxid"/> for why this is checked at all.</remarks>
+    public static bool IsTransactionHex(string? value) =>
+        value is { Length: > 0 } && value.Length % 2 == 0 && IsHex(value);
+
+    private static bool IsHex(string value)
+    {
+        foreach (var character in value)
+        {
+            if (!char.IsAsciiHexDigit(character))
+                return false;
+        }
+
+        return true;
+    }
 }
 
 /// <summary>

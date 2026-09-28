@@ -54,10 +54,12 @@ public interface IUnilateralExitRecordStore
     /// an awaiting row must not land after the operator abandoned it.
     /// </para>
     /// <para>
-    /// <b>The identity of an exit is not writable.</b> Its store, destination, fee rate, creation time, funding
-    /// address, funding key index and leaf set are fixed at quote time and this method leaves them alone even if
-    /// the passed record disagrees — those are the values the operator approved and funded against, and the
-    /// signed transactions are only meaningful relative to them.
+    /// <b>The identity of an exit is not writable.</b> Its store, destination, creation time, funding address,
+    /// funding key index and leaf set are fixed at quote time and this method leaves them alone even if the
+    /// passed record disagrees — those are the values the operator approved and funded against, and the signed
+    /// transactions are only meaningful relative to them. The fee rate is not among them: raising it is the
+    /// SDK's documented way to speed up an exit that stopped confirming, so it is written with the figures it
+    /// produced (see <see cref="UnilateralExitRecord.FeeRateSatPerVbyte"/>).
     /// </para>
     /// <para>
     /// The two JSON blobs are coalesced rather than assigned: a null means "nothing new to say" and never "clear

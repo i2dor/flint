@@ -85,6 +85,7 @@ public class EfUnilateralExitRecordStore : IUnilateralExitRecordStore
         var from = expectedStatus;
         var status = record.Status;
         var updatedUtc = record.UpdatedUtc;
+        var feeRate = record.FeeRateSatPerVbyte;
         var recoverable = record.RecoverableValueSat;
         var totalFee = record.TotalFeeSat;
         var funding = record.SingleUtxoFundingSat;
@@ -96,13 +97,18 @@ public class EfUnilateralExitRecordStore : IUnilateralExitRecordStore
 
         // One conditional UPDATE, store-scoped and guarded on the status the caller read, touching only the
         // mutable half of the row: the identity columns are what the operator approved and funded against, and
-        // the signed transactions are only meaningful relative to them, so they are not in the setter list.
+        // the signed transactions are only meaningful relative to them, so they are not in the setter list. The
+        // fee rate is mutable — see the interface.
         var updated = await context.UnilateralExitRecords
             .Where(r => r.Id == id && r.StoreId == storeId && r.Status == from)
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(r => r.Status, status)
                     .SetProperty(r => r.UpdatedUtc, updatedUtc)
+                    // Assigned with the figures below, which it is the rate of: a build that re-prices an exit at
+                    // a higher rate writes both together. A history row projected without its blobs still carries
+                    // its rate, so writing one back cannot zero it.
+                    .SetProperty(r => r.FeeRateSatPerVbyte, feeRate)
                     // Assigned rather than coalesced: a build re-quotes with the pinned leaf set, and the second
                     // quote's figures are the ones the operator is funding against from then on.
                     .SetProperty(r => r.RecoverableValueSat, recoverable)
