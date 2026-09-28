@@ -163,6 +163,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             results = results.Where(p => p.Status is SparkPaymentStatus.Completed);
         if (query.From is { } from)
             results = results.Where(p => p.Timestamp >= from);
+        // The storage filters the real client maps a kind to: Spark transfers, or payments carrying token metadata.
+        if (query.Method is { } method)
+            results = results.Where(p => p.Method == method);
 
         // Honoured, because a caller that pages in the wrong direction walks away from what it is looking for
         // and a fake that ignored the flag would let that pass.
@@ -1049,11 +1052,29 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>The provider's proportional fee on a receive, in basis points of the amount.</summary>
     public long ReceiveFeeBps { get; set; } = 30;
 
+    /// <summary>
+    /// Base units added to every deposit: the unrounded tail the SDK's proportional sizing leaves on an 18-decimal
+    /// route, below the six decimals a payer is asked at.
+    /// </summary>
+    public BigInteger ReceiveDepositDust { get; set; }
+
     /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
     public bool ReceiveLandsAsToken { get; set; }
 
     /// <summary>How long the provider holds a receive quote's price: about two minutes, measured on mainnet.</summary>
     public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// When set, the expiry every receive quote carries instead of <see cref="ReceiveQuoteLifetime"/> from now — for
+    /// the values the real client produces at its edges, such as the clamp to the last representable second.
+    /// </summary>
+    public DateTimeOffset? ReceiveQuoteExpiresAt { get; set; }
+
+    /// <summary>
+    /// When set, the fingerprint every receive quote carries whatever it is asked for — a provider whose price and
+    /// fee did not move at all between quotes, for the service's give-up path.
+    /// </summary>
+    public (BigInteger Expected, BigInteger ServiceFee)? ReceiveFingerprint { get; set; }
 
     public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
 
@@ -1081,7 +1102,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
+        // Locked: the service asks for quotes concurrently, and a List loses an Add it is raced on.
+        lock (CrossChainReceiveCalls)
+            CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
         _writeLog?.Record("sdk:cc-receive");
 
         if (HoldCrossChainReceiveUntil is { } hold)
@@ -1095,12 +1118,24 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         var scale = BigInteger.Pow(10, (int)route.Decimals);
         var fixedFee = ReceiveFixedFeeMicroUsd * scale / 1_000_000;
         var proportional = amount * ReceiveFeeBps / 10_000;
-        var deposit = amount + fixedFee + proportional;
+        var deposit = amount + fixedFee + proportional + ReceiveDepositDust;
 
-        // Sats for the amount at the configured price, or USDB base units (6 dp) at par.
-        var expected = ReceiveLandsAsToken
-            ? amount * 1_000_000 / scale
-            : amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        // Sats for the amount at the configured price, floored to the sat; or USDB base units (6 dp) at par, floored
+        // to the cent as the provider floors a USDB estimate, with the sub-cent remainder counted in the quote's
+        // total fee as the provider's roundingFeeAmount is. Deterministic, as the real sizing is at a fixed rate: equal
+        // targets quote identical fingerprints, and a target a millionth apart differs only in that remainder.
+        BigInteger expected;
+        var rounding = BigInteger.Zero;
+        if (ReceiveLandsAsToken)
+        {
+            var usdb = amount * 1_000_000 / scale;
+            expected = usdb - usdb % 10_000;
+            rounding = (usdb - expected) * scale / 1_000_000;
+        }
+        else
+        {
+            expected = amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        }
 
         var address = route.Chain switch
         {
@@ -1109,6 +1144,10 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             _ => "0x" + index.ToString("x40", System.Globalization.CultureInfo.InvariantCulture)
         };
 
+        var serviceFee = fixedFee + proportional + rounding;
+        if (ReceiveFingerprint is { } fixedFingerprint)
+            (expected, serviceFee) = fixedFingerprint;
+
         return new SparkCrossChainReceiveQuote(
             route,
             address,
@@ -1116,9 +1155,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             expected,
             ReceiveLandsAsToken ? "USDB" : "BTC",
             ReceiveLandsAsToken ? Usdb.Value : null,
-            fixedFee + proportional,
+            serviceFee,
             route.Asset,
-            DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
+            ReceiveQuoteExpiresAt ?? DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
             address);
     }
 
@@ -1126,7 +1165,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// The inbound payment the SDK reports once the provider delivers a quote: a Spark transfer (or a token one)
     /// carrying the provider's conversion details, frozen from the quote exactly as the real provider row does.
     /// </summary>
-    /// <param name="paid">What the payer actually deposited, in route base units. Defaults to the SDK's deposit.</param>
+    /// <param name="paid">
+    /// What the payer actually deposited, in route base units, as the provider's order reports it. Defaults to the
+    /// SDK's quote-time deposit — which is also what the real SDK reports when the order carries no <c>amountIn</c>.
+    /// </param>
+    /// <param name="delivered">What reached the wallet, in the landing asset's units. Defaults to the quote's estimate.</param>
     /// <param name="withConversion">
     /// False reproduces the first report of a receive, before the provider's details arrive — a plain transfer
     /// with nothing to attribute it by.
@@ -1137,6 +1180,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         BigInteger? paid = null,
         bool withConversion = true,
         SparkPaymentStatus status = SparkPaymentStatus.Completed,
+        BigInteger? delivered = null,
         DateTimeOffset? at = null) =>
         new(
             sdkPaymentId,
@@ -1156,7 +1200,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                     SparkConversionStatus.Completed,
                     ProviderQuoteId: $"orchestra-quote-{sdkPaymentId}",
                     ProviderOrderId: $"orchestra-order-{sdkPaymentId}",
-                    DeliveredAmount: quote.ExpectedReceivedAmount,
+                    DeliveredAmount: delivered ?? quote.ExpectedReceivedAmount,
                     RecipientAddress: "spark1pgssfakewalletaddress",
                     Chain: quote.Route.Chain,
                     Asset: quote.Route.Asset,
@@ -1282,6 +1326,18 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     public Exception? FailImportWith { get; set; }
 
     /// <summary>
+    /// When set, what an export returns instead of <see cref="ExitStateToExport"/> — for a test that needs the
+    /// export to do something while it runs (an event arriving mid-export) or never to finish at all.
+    /// </summary>
+    public Func<Task<string>>? ExportOverride { get; set; }
+
+    /// <summary>
+    /// When set, what an import returns instead of <see cref="ExitStateImportResult"/> — for a test that needs
+    /// an import that hangs, or that answers differently per blob.
+    /// </summary>
+    public Func<string, Task<SparkExitStateImport>>? ImportOverride { get; set; }
+
+    /// <summary>
     /// The blob <see cref="ExportUnilateralExitStateAsync"/> hands back.
     /// </summary>
     /// <remarks>
@@ -1321,11 +1377,34 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// </remarks>
     public Action? WhenExitQuoted { get; set; }
 
-    public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+    /// <summary>
+    /// When set, every prepare, build and check waits on it before doing anything — and ignores the caller's
+    /// token while it waits.
+    /// </summary>
+    /// <remarks>
+    /// The binding's exit calls take no cancellation, and a prepare begins with a refresh from the Spark
+    /// operators that can hang while they are unreachable. A fake that honoured the token would let a caller
+    /// look bounded without bounding anything; this one waits exactly as long as the native call would, which is
+    /// for as long as the test says.
+    /// </remarks>
+    public TaskCompletionSource? HoldExitCalls { get; set; }
+
+    private Task HeldExitCall() => HoldExitCalls?.Task ?? Task.CompletedTask;
+
+    public async Task<SparkExitQuote> PrepareUnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await PrepareUnilateralExitCoreAsync(feeRateSatPerVbyte, destinationAddress, leafIds);
+    }
+
+    private Task<SparkExitQuote> PrepareUnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
     {
         ThrowIfConfigured();
         ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
@@ -1338,7 +1417,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         return Task.FromResult(quote);
     }
 
-    public Task<SparkExitResult> UnilateralExitAsync(
+    public async Task<SparkExitResult> UnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
@@ -1346,6 +1425,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         byte[] fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await UnilateralExitCoreAsync(
+            feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote);
+    }
+
+    private Task<SparkExitResult> UnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(fundingUtxos);
@@ -1376,8 +1468,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             throw FailExitBuildWith;
 
         // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
-        // build time and names the amount that would have worked.
-        var funded = fundingUtxos.Sum(utxo => utxo.ValueSat);
+        // build time and names the amount that would have worked — and it is judged on what the funding has
+        // become, not on what was handed in, exactly as the SDK's resolve_funding does.
+        var funded = FollowedFundingSat(fundingUtxos);
         if (funded < ExitSingleUtxoFundingSat)
             throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
 
@@ -1395,29 +1488,92 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             return Task.FromResult(new SparkExitResult(
                 quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
 
-        var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
+        var sweepDependsOn = quote.Leaves.Select(leaf => ExitTxid($"node:{leaf.LeafId}")).ToList();
         var transactions = new List<SparkExitTransaction>
         {
-            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [], ExitStatus())
+            new(SparkExitTxKind.Fanout, null, ExitTxid("fanout"), ExitHex("fanout"), null, null, [], ExitStatus())
         };
 
         transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
             SparkExitTxKind.TreeNode,
             $"node:{leaf.LeafId}",
-            $"txid:node:{leaf.LeafId}",
-            $"0200node{leaf.LeafId}",
+            ExitTxid($"node:{leaf.LeafId}"),
+            ExitHex($"node:{leaf.LeafId}"),
             // A CPFP child, because a tree node pays no fee of its own and must go out as a package. A fake
             // that left this null would let a caller ship single-transaction broadcast instructions.
-            $"0200cpfp{leaf.LeafId}",
+            ExitHex($"cpfp:{leaf.LeafId}"),
             1_008,
-            ["txid:fanout"],
+            [ExitTxid("fanout")],
             ExitStatus())));
 
         transactions.Add(new SparkExitTransaction(
-            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn, ExitStatus()));
+            SparkExitTxKind.Sweep, null, ExitTxid("sweep"), ExitHex("sweep"), null, null, sweepDependsOn,
+            ExitStatus()));
 
         return Task.FromResult(new SparkExitResult(
             quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
+    }
+
+    /// <summary>
+    /// The txid this fake gives the exit transaction it labels <paramref name="label"/>: 64 hex digits, stable.
+    /// </summary>
+    /// <remarks>
+    /// Real-shaped rather than readable, because the service refuses a stored set whose txids and hex are not
+    /// what Bitcoin would produce — the page turns them into a shell command — and a fake that handed back
+    /// <c>"txid:fanout"</c> would have every build read back as unreadable. Tests name a transaction by passing
+    /// the same label here.
+    /// </remarks>
+    public static string ExitTxid(string label) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(label))).ToLowerInvariant();
+
+    /// <summary>Even-length hex standing in for a signed transaction, distinct per label.</summary>
+    public static string ExitHex(string label) =>
+        "02000000" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(label)).ToLowerInvariant();
+
+    /// <summary>
+    /// Funding outpoints an earlier attempt spent in a confirmed transaction, mapped to the outputs that spend
+    /// produced on the same script.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK's second-attempt contract, reproduced because it is the hazard: once a fan-out or a CPFP child
+    /// has confirmed, the output the operator sent no longer exists, and what the money became is a handful of
+    /// smaller outputs — each below a whole-exit requirement, and some of them possibly spent again. The real
+    /// SDK walks a supplied outpoint to those descendants and funds from them; a caller that instead re-lists the
+    /// address and picks the one biggest output asks the operator to fund the exit twice.
+    /// </para>
+    /// <para>
+    /// An outpoint absent from this map is taken at face value, which covers both the unspent case and the SDK's
+    /// "spent only by an unconfirmed transaction" rule: that spend is this exit's own in-flight child, which the
+    /// rebuild replaces, so the outpoint is still the caller's to spend. Descendants are de-duplicated by
+    /// outpoint, as the SDK does, so an output that is both passed in and reached by following counts once.
+    /// </para>
+    /// </remarks>
+    public Dictionary<string, List<SparkExitFundingUtxo>> ExitFundingSpentInto { get; } = new(StringComparer.Ordinal);
+
+    private long FollowedFundingSat(IReadOnlyList<SparkExitFundingUtxo> supplied)
+    {
+        var resolved = new Dictionary<string, long>(StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var frontier = new Stack<SparkExitFundingUtxo>(supplied);
+
+        while (frontier.TryPop(out var input))
+        {
+            if (!visited.Add(input.OutPoint))
+                continue;
+
+            if (ExitFundingSpentInto.TryGetValue(input.OutPoint, out var became))
+            {
+                foreach (var descendant in became)
+                    frontier.Push(descendant);
+                continue;
+            }
+
+            resolved[input.OutPoint] = input.ValueSat;
+        }
+
+        return resolved.Values.Sum();
     }
 
     /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
@@ -1435,9 +1591,15 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         _ => new SparkExitTxStatus(ExitReadiness)
     };
 
-    public Task<SparkExitProgress> CheckUnilateralExitAsync(
+    public async Task<SparkExitProgress> CheckUnilateralExitAsync(
         SparkExitResult exit,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await CheckUnilateralExitCoreAsync(exit);
+    }
+
+    private Task<SparkExitProgress> CheckUnilateralExitCoreAsync(SparkExitResult exit)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(exit);
@@ -1466,7 +1628,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        ExitExportCalls.Add("export");
+        lock (ExitExportCalls)
+            ExitExportCalls.Add("export");
+
+        if (ExportOverride is { } exportOverride)
+            return exportOverride();
 
         return FailExportWith is not null
             ? Task.FromException<string>(FailExportWith)
@@ -1478,7 +1644,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        ExitImportCalls.Add(exitState);
+        lock (ExitImportCalls)
+            ExitImportCalls.Add(exitState);
+
+        if (ImportOverride is { } importOverride)
+            return importOverride(exitState);
 
         return FailImportWith is not null
             ? Task.FromException<SparkExitStateImport>(FailImportWith)
@@ -1495,9 +1665,14 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         string destinationAddress,
         IReadOnlyList<string>? leafIds)
     {
-        var selected = leafIds is null || leafIds.Count == 0
-            ? ExitLeaves.ToList()
-            : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)).ToList();
+        // A leaf whose exit is over on-chain is dropped whether it was named or not, and reported back — the
+        // SDK's drop_finished_leaves. A named leaf that is simply not in ExitLeaves is dropped silently, which is
+        // the SDK's "not in local storage" skip and the case a resuming caller has to refuse.
+        var selected = (leafIds is null || leafIds.Count == 0
+                ? ExitLeaves
+                : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)))
+            .Where(leaf => !ExitFinishedLeafIds.Contains(leaf.LeafId))
+            .ToList();
 
         return new SparkExitQuote(
             selected.Sum(leaf => leaf.ValueSat),
@@ -1509,8 +1684,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                 .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
                 .ToList(),
             feeRateSatPerVbyte,
-            destinationAddress);
+            destinationAddress,
+            ExitFinishedLeafIds.ToList());
     }
+
+    /// <summary>
+    /// Leaves the chain shows as finished — refund swept, or branch stopped — which every quote leaves out and
+    /// reports in <see cref="SparkExitQuote.FinishedLeafIds"/>, as the SDK's <c>exit_chain_state</c> does.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from removing a leaf from <see cref="ExitLeaves"/>, and the distinction is the point: a finished
+    /// leaf is a legitimate absence from a resumed quote, a missing one is a smaller exit than was funded.
+    /// </remarks>
+    public List<string> ExitFinishedLeafIds { get; } = [];
 
     public sealed record ExitQuoteCall(
         ulong FeeRateSatPerVbyte,

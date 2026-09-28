@@ -57,16 +57,25 @@ public sealed class SparkStoreProvisioner
     private readonly SparkMnemonicProtector _mnemonicProtector;
     private readonly ILogger<SparkStoreProvisioner> _logger;
 
+    /// <summary>
+    /// Where a previous wallet's deprecated settings copy of its exit-state backup is kept on a seed change;
+    /// see <see cref="CarryExitSettings"/>. Optional so a test of the setup flow need not build one — the
+    /// container always supplies it.
+    /// </summary>
+    private readonly IExitStateBackupStore? _exitStateBackups;
+
     public SparkStoreProvisioner(
         ISparkStoreSettingsStore settingsStore,
         SparkLightningWiring lightningWiring,
         SparkMnemonicProtector mnemonicProtector,
-        ILogger<SparkStoreProvisioner> logger)
+        ILogger<SparkStoreProvisioner> logger,
+        IExitStateBackupStore? exitStateBackups = null)
     {
         _settingsStore = settingsStore;
         _lightningWiring = lightningWiring;
         _mnemonicProtector = mnemonicProtector;
         _logger = logger;
+        _exitStateBackups = exitStateBackups;
     }
 
     /// <summary>
@@ -226,9 +235,7 @@ public sealed class SparkStoreProvisioner
             // Note what this does not carry: any exit already recorded. Those rows name a funding address
             // derived from the *old* seed, and the build re-derives and refuses when the two disagree — which is
             // the honest outcome, because the plugin can no longer sign for what was sent there.
-            UnilateralExit = existing?.UnilateralExit is { } previousExit
-                ? previousExit.Clone()
-                : new UnilateralExitSettings()
+            UnilateralExit = await CarryExitSettings(storeId, existing, normalized).ConfigureAwait(false)
         };
 
         SparkSettingsApplied applied;
@@ -296,6 +303,71 @@ public sealed class SparkStoreProvisioner
         _logger.LogInformation(
             "Store {StoreId}: Spark configured from a {SeedSource} seed", storeId, seedSource);
         return SparkProvisionResult.Ok;
+    }
+
+    /// <summary>
+    /// The exit settings the new configuration carries: the previous ones, minus the deprecated exit-state
+    /// backup when the seed changes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The deprecated backup belongs to a wallet, not to the store.</b> An earlier version kept a store's
+    /// exit-state backup in this settings section, and a store that has not connected with the feature on
+    /// since still holds it there. Carried across a seed change, it would be adopted by the <em>new</em>
+    /// wallet's connect — imported (every leaf foreign) and, before adoption learned to tell, written as the
+    /// new wallet's own backup. So on a seed change it is kept aside as the previous wallet's file, and only
+    /// then dropped from the new settings; if it cannot be kept aside it is carried as before, because the
+    /// adoption path sets a foreign blob aside itself and losing it would be worse.
+    /// </para>
+    /// <para>
+    /// The same seed re-provisioned keeps it: it is still this wallet's, and the connect adopts it as usual.
+    /// The seed comparison is on the canonical phrase; an old seed that can no longer be decrypted counts as
+    /// a change, since nothing then says the two are one wallet. Nothing here logs the value.
+    /// </para>
+    /// </remarks>
+    private async Task<UnilateralExitSettings> CarryExitSettings(
+        string storeId, SparkSettings? existing, string newMnemonic)
+    {
+        if (existing?.UnilateralExit is not { } previousExit)
+            return new UnilateralExitSettings();
+
+        var carried = previousExit.Clone();
+        if (string.IsNullOrEmpty(carried.ExitStateBackup))
+            return carried;
+
+        var previousMnemonic = _mnemonicProtector.TryUnprotect(existing.ProtectedMnemonic);
+        if (previousMnemonic is not null
+            && string.Equals(
+                SparkService.CanonicaliseMnemonic(previousMnemonic),
+                SparkService.CanonicaliseMnemonic(newMnemonic),
+                StringComparison.Ordinal))
+        {
+            return carried;
+        }
+
+        if (_exitStateBackups is null)
+            return carried;
+
+        try
+        {
+            var kept = await _exitStateBackups
+                .KeepAsideAsync(storeId, carried.ExitStateBackup, ExitStateBackupSetAside.OtherWallet)
+                .ConfigureAwait(false);
+            _logger.LogInformation(
+                "Store {StoreId}: the previous wallet's exit-state backup, left in the store's settings by an "
+                + "earlier plugin version, was kept aside as {File} before the seed change and not carried to the "
+                + "new wallet", storeId, kept);
+            carried.ExitStateBackup = null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: the previous wallet's exit-state backup in the store's settings could not be "
+                + "kept aside before the seed change ({ExceptionType}); it is carried in the settings instead",
+                storeId, ex.GetType().Name);
+        }
+
+        return carried;
     }
 
     /// <summary>

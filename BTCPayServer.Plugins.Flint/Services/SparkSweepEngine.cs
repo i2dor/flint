@@ -224,6 +224,12 @@ public sealed class SparkSweepEngine
     private readonly ILogger<SparkSweepEngine> _logger;
 
     /// <summary>
+    /// The store's unilateral exits, read only to ask whether one is in progress. Null where no store is wired —
+    /// the unit harnesses that predate the pause — which reads as "none".
+    /// </summary>
+    private readonly IUnilateralExitRecordStore? _unilateralExits;
+
+    /// <summary>
     /// Stores with a pass in progress. Membership is the lock; there is deliberately no queueing, because a pass
     /// that waits for another to finish would then act on a balance that other pass has just spent.
     /// </summary>
@@ -238,8 +244,10 @@ public sealed class SparkSweepEngine
         ICrossChainValueOracle valueOracle,
         ISweepTransactionLabeler transactionLabeler,
         TimeProvider timeProvider,
-        ILogger<SparkSweepEngine> logger)
+        ILogger<SparkSweepEngine> logger,
+        IUnilateralExitRecordStore? unilateralExits = null)
     {
+        _unilateralExits = unilateralExits;
         _settingsStore = settingsStore;
         _runtime = runtime;
         _records = records;
@@ -297,6 +305,11 @@ public sealed class SparkSweepEngine
         var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
         if (sdk is null)
             return new SweepPreview(WalletNotRunning, null, 0, 0, null, settings);
+
+        // Before the balance read, so the confirmation page says why the run would refuse without syncing a
+        // wallet for a sweep that is not going to happen.
+        if (await DescribeActiveExitAsync(storeId, cancellationToken).ConfigureAwait(false) is { } exitPause)
+            return new SweepPreview(exitPause, null, 0, 0, null, settings);
 
         long balance;
         SparkNodeInfo info;
@@ -477,6 +490,19 @@ public sealed class SparkSweepEngine
         {
             return new SweepRunResult(
                 SweepOutcomeKind.Skipped, "Automatic sweeping is switched off for this store.");
+        }
+
+        // A unilateral exit in progress pauses sweeping, automatic and manual alike. The exit is pinned to named
+        // leaves and funded against them; a cooperative sweep spends those same leaves, and the next build of the
+        // exit then finds them gone — its funding committed to an exit that can no longer be built or finished.
+        // After the automatic-off skip, so a store that has switched sweeping off files no refusal every pass.
+        if (await DescribeActiveExitAsync(storeId, cancellationToken).ConfigureAwait(false) is { } exitPause)
+        {
+            return await RefuseAsync(
+                    storeId, trigger, sweep,
+                    new SweepRefusal(SweepRefusalCode.ExitInProgress, exitPause),
+                    null, 0, 0, 0, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         long balance;
@@ -2477,6 +2503,49 @@ public sealed class SparkSweepEngine
 
     private const string WalletNotRunning =
         "This store's Spark wallet is not running, so nothing can be swept. Check the Flint status page.";
+
+    internal const string UnilateralExitInProgress =
+        "This store has a unilateral exit in progress, and a sweep would spend the very leaves that exit is "
+        + "pinned to — leaving its funding committed to an exit that can no longer be built or finished. Sweeping "
+        + "is paused until the exit is marked completed or abandoned on the unilateral-exit page.";
+
+    internal const string UnilateralExitUnknown =
+        "Whether this store has a unilateral exit in progress could not be read, and sweeping while one is would "
+        + "spend the leaves it is pinned to, so this sweep did not go ahead. It will be tried again.";
+
+    /// <summary>
+    /// Why sweeping is paused for a unilateral exit, or null when it is not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only while the exit feature is enabled on this server. A record left active from a time the feature was on
+    /// cannot be completed or abandoned while it is off — its page is gone — so honouring it then would pause a
+    /// store's sweeps with no way for anyone to lift the pause short of a database edit.
+    /// </para>
+    /// <para>
+    /// A read that fails is a refusal, not a pass: the whole point is not to spend pinned leaves, and "could not
+    /// tell" is not "none". A store whose database is failing is not going to record a sweep either.
+    /// </para>
+    /// </remarks>
+    private async Task<string?> DescribeActiveExitAsync(string storeId, CancellationToken cancellationToken)
+    {
+        if (_unilateralExits is null || !Constants.UnilateralExitEnabled)
+            return null;
+
+        try
+        {
+            var active = await _unilateralExits
+                .GetActiveForStoreAsync(storeId, cancellationToken)
+                .ConfigureAwait(false);
+            return active is null ? null : UnilateralExitInProgress;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: could not read whether a unilateral exit is in progress; not sweeping", storeId);
+            return UnilateralExitUnknown;
+        }
+    }
 }
 
 /// <param name="AmountSats">Amount to ask the SDK for. Zero when there is nothing to sweep.</param>

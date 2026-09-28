@@ -150,6 +150,7 @@ public class SparkExitStateAutoBackupTests
         h.SeedStore(brokenStore, SparkServiceHarness.MnemonicFor(1));
         h.SeedStore(healthyStore, SparkServiceHarness.MnemonicFor(2));
         await h.Service.StartAsync(Ct);
+        await RestoredAsync(h);
 
         h.Sdk.Clients[brokenStore].FailExportWith = new InvalidOperationException("export refused");
 
@@ -214,6 +215,31 @@ public class SparkExitStateAutoBackupTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task An_exit_state_change_event_requests_a_refresh_through_the_same_debounce()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // The SDK's own "an earlier export no longer covers this wallet" — fired when a leaf's exit data is
+        // completed or rebuilt, which is how a send, a swap or a renewal reaches the backup at all: none of
+        // them is a receive, and none of them emits a deposit event.
+        Emit(h, StoreId, SparkEventKind.UnilateralExitStateChanged, payment: null);
+        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+            "the exit-state change never requested a refresh");
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task An_inbound_payment_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);
@@ -236,6 +262,34 @@ public class SparkExitStateAutoBackupTests
         clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
         Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_refresh_requested_while_an_export_runs_stays_pending_after_the_pass()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+        var wallet = h.Sdk.Clients[StoreId];
+
+        // The SDK reports a change while the pass's export is in flight — the export may have read the
+        // wallet before that change, so the refresh it asked for is still owed once the pass reports.
+        wallet.ExportOverride = () =>
+        {
+            h.BackupScheduler.RequestRefresh(StoreId);
+            return Task.FromResult("exit-state-blob");
+        };
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+
+        Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+        Assert.NotNull(h.BackupScheduler.PendingSince(StoreId));
+
+        // And it is acted on after its own debounce, not an hour later at the safety net.
+        wallet.ExportOverride = null;
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, wallet.ExitExportCalls.Count);
     }
 
     [Fact(Timeout = 60_000)]
@@ -346,6 +400,7 @@ public class SparkExitStateAutoBackupTests
 
             h = first.Restart();
             await h.Service.StartAsync(Ct);
+            await RestoredAsync(h);
 
             // A restarted scheduler knows nothing about what is stored. The pass must seed from the
             // file — a first pass after every restart that rewrote every store's identical backup
@@ -373,7 +428,7 @@ public class SparkExitStateAutoBackupTests
         // One manual writer: the page's export, a paste, an adoption all write through this same
         // seam without saying anything to the scheduler — and through this seam they cannot, because
         // the tracked store moves the scheduler's belief as part of the write itself.
-        await h.ExitStateBackups.WriteAsync(StoreId, "pasted-exit-state", Ct);
+        await h.ExitStateBackups.WriteAsync(StoreId, "pasted-exit-state", null, Ct);
 
         // What a due pass will ask is now answered from that write rather than from a second read of
         // the file: the scheduler knows something is stored, and these exact bytes are it. Left
@@ -424,6 +479,7 @@ public class SparkExitStateAutoBackupTests
         {
             h.SeedStore(StoreId, SparkServiceHarness.MnemonicFor(1));
             await h.Service.StartAsync(CancellationToken.None);
+            await RestoredAsync(h, StoreId);
             return h;
         }
         catch
@@ -431,6 +487,17 @@ public class SparkExitStateAutoBackupTests
             h.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Waits for the connect-time restore of each store (every running one, when none is named) — the gate
+    /// the automatic pass now waits on, so a test that ran a pass straight after the start would be asking a
+    /// pass that correctly declined to run yet.
+    /// </summary>
+    private static async Task RestoredAsync(SparkServiceHarness h, params string[] storeIds)
+    {
+        var ids = storeIds.Length > 0 ? storeIds : (await h.Service.GetRunningStoreIds()).ToArray();
+        await Task.WhenAll(ids.Select(h.Service.WhenExitStateRestoredAsync)).WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     private static void Emit(SparkServiceHarness h, string storeId, SparkEventKind kind, Payment? payment) =>

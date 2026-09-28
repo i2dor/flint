@@ -1259,7 +1259,8 @@
                     "CrossChainOverpayExceedsBalance",
                     "StableBalanceHoldsTheFunds",
                     "CrossChainQuoteUnusable",
-                    "CrossChainValueUnverifiable"
+                    "CrossChainValueUnverifiable",
+                    "ExitInProgress"
                 ]
             },
             "SparkDepositData": {

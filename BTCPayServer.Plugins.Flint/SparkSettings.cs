@@ -75,8 +75,22 @@ public class SparkSettings
     /// acknowledgement silently disappearing from the blob the first time an operator saved settings with the
     /// gate off. The section existing is not the feature being available; see
     /// <see cref="UnilateralExitSettings"/>.
+    /// <para>
+    /// <b>Never null, including after a read.</b> A property initialiser covers a blob with no
+    /// <c>UnilateralExit</c> key at all, but a blob carrying an explicit <c>"UnilateralExit": null</c> — a hand
+    /// edit, a restored backup, an older serializer — has the deserializer call this setter with null, and every
+    /// reader that trusted the declared type then threw. On the exit page that was a
+    /// <see cref="NullReferenceException"/> on a GET, which BTCPay answers by disabling the plugin and restarting
+    /// the server. The setter coalesces, so the section a reader gets is always a usable default.
+    /// </para>
     /// </remarks>
-    public UnilateralExitSettings UnilateralExit { get; set; } = new();
+    public UnilateralExitSettings UnilateralExit
+    {
+        get => _unilateralExit;
+        set => _unilateralExit = value ?? new UnilateralExitSettings();
+    }
+
+    private UnilateralExitSettings _unilateralExit = new();
 
     /// <summary>
     /// An independent copy, nested settings included. Every property added to this class must be added here too.
@@ -473,10 +487,11 @@ public class StableBalanceSettings
 /// privacy or cost option, and the copy on the page says so.
 /// </para>
 /// <para>
-/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, on the pinned SDK
-/// (Breez.Sdk.Spark 0.22.0) preparing an exit <em>still requires the operators to be reachable</em>: the
-/// scenario a merchant most wants this for — operators gone — is the one it cannot serve until the SDK ships
-/// exit-from-local-state. Second, the tree transactions cannot pay their own fees, so the exit is funded by
+/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, an exit can only
+/// be built for leaves whose exit data is already on this server: since Breez.Sdk.Spark 0.25 quoting and building
+/// read each leaf's pre-signed chain from local storage, so they work with the operators unreachable — but that
+/// data is collected from the operators while they are still reachable, so a leaf never synced, or a server
+/// whose storage is lost with no exit-state backup, cannot be exited at all. Second, the tree transactions cannot pay their own fees, so the exit is funded by
 /// CPFP from an on-chain UTXO the operator has to send to a plugin-derived native-SegWit address first (see
 /// <see cref="Constants.UnilateralExitFundingAccount"/>); too little there and the build refuses. Third, the
 /// funds are not spendable when the transactions are built — they are spendable when the last timelock

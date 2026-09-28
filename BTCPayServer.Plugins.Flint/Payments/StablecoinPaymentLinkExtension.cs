@@ -9,7 +9,7 @@ namespace BTCPayServer.Plugins.Flint.Payments;
 
 /// <summary>
 /// The payment link BTCPay reports for a USDC/USDT prompt — the Greenfield invoice payment-methods endpoint's
-/// <c>paymentLink</c> — which is the quote on show, if there is one.
+/// <c>paymentLink</c> — which is the quote on show, if there is one and it is still current.
 /// </summary>
 /// <remarks>
 /// Null until a payer has picked a network: before that there is no address to link to, and a link that quoted on
@@ -32,8 +32,9 @@ public sealed class StablecoinPaymentLinkExtension : IPaymentLinkExtension
             return null;
         try
         {
+            // The checkout's own rule: a quote withdrawn because the invoice was part-paid is not a link to pay.
             return (_handler.ParsePaymentPromptDetails(raw) as StablecoinPromptDetails)?.Quote is { } quote
-                   && prompt.Destination == quote.DepositAddress
+                   && StablecoinCheckoutModelExtension.IsCurrent(prompt.ParentEntity, prompt, quote)
                 ? quote.PaymentRequest
                 : null;
         }

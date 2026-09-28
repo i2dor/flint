@@ -187,9 +187,10 @@ public static class Constants
     /// to broadcast themselves.
     /// </para>
     /// <para>
-    /// <b>Environment rather than a store setting</b>, because the decision is not the merchant's: on the
-    /// pinned SDK the flow needs the operators reachable to even quote, needs an on-chain UTXO the operator
-    /// funds by hand, and settles over multi-day CSV timelocks. That is a whole-deployment judgement by whoever
+    /// <b>Environment rather than a store setting</b>, because the decision is not the merchant's: the flow can
+    /// only exit leaves whose exit data was collected while the operators were reachable (the pinned SDK quotes
+    /// and builds from local storage, but cannot obtain what it never synced), needs an on-chain UTXO the
+    /// operator funds by hand, and settles over multi-day CSV timelocks. That is a whole-deployment judgement by whoever
     /// runs the server, and it must be revocable without touching any store's settings blob — unsetting the
     /// variable takes the feature away from every store at once, leaving the acknowledgements in place for if it
     /// comes back.

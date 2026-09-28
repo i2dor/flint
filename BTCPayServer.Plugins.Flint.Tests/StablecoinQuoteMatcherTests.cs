@@ -90,17 +90,68 @@ public class StablecoinQuoteMatcherTests
         Assert.Equal("a", match.Quote!.Id);
     }
 
-    [Fact]
-    public void Two_quotes_with_one_fingerprint_are_told_apart_by_the_exact_deposit()
+    [Theory]
+    [InlineData(10_100_001)]
+    [InlineData(10_100_000)]
+    public void Two_quotes_with_one_fingerprint_are_not_told_apart_by_the_amount_paid(long paid)
     {
-        // Equal invoices landing as USDB freeze the same cent-rounded estimate and the same fee. The asks differ
-        // by the millionth the service nudges them apart by, and an exact payment names one.
+        // What the matcher once did, and how it credited the wrong invoice: twin quotes asked 10.1 and 10.100001, and
+        // the payer of the second — a Tron QR code carries no amount, so they typed it — sent 10.1. The amount paid is
+        // what a wallet or exchange sent, which rounds, and when the provider omits it the SDK reports the quote's own
+        // deposit instead; it is not evidence of which address was paid. The service now keeps fingerprints unique,
+        // so only quotes from before that can be twins, and those are left for a human.
         var match = StablecoinQuoteMatcher.Match(
             [Quote("a", 10_100_000), Quote("b", 10_100_001)],
-            Arrival(paid: 10_100_001));
+            Arrival(paid: paid));
+
+        Assert.Equal(StablecoinMatchKind.Ambiguous, match.Kind);
+        Assert.Null(match.Quote);
+    }
+
+    [Fact]
+    public void A_quote_made_after_the_money_arrived_is_not_a_candidate_for_it()
+    {
+        var arrivedAt = DateTimeOffset.UtcNow.AddHours(-1);
+        var earlier = Quote("a", 10_100_000);
+        earlier.CreatedAt = arrivedAt.AddMinutes(-5);
+        var later = Quote("b", 10_100_001);
+        later.CreatedAt = arrivedAt.AddMinutes(30);
+
+        var match = StablecoinQuoteMatcher.Match([earlier, later], Arrival(paid: 10_100_001), arrivedAt);
 
         Assert.Equal(StablecoinMatchKind.Matched, match.Kind);
-        Assert.Equal("b", match.Quote!.Id);
+        Assert.Equal("a", match.Quote!.Id);
+    }
+
+    [Fact]
+    public void An_ambiguous_arrival_stays_ambiguous_as_its_twins_age()
+    {
+        // The window is the arrival's own. Measured from the clock instead, the older twin would leave it first and the
+        // arrival would start "matching" the younger one — whose payer may not have paid at all.
+        var arrivedAt = DateTimeOffset.UtcNow.AddHours(-47);
+        var older = Quote("a", 10_100_000);
+        older.CreatedAt = arrivedAt.AddHours(-2);
+        older.ExpiresAt = arrivedAt.AddHours(-1);
+        var younger = Quote("b", 10_100_001);
+        younger.CreatedAt = arrivedAt.AddMinutes(-10);
+        younger.ExpiresAt = arrivedAt.AddMinutes(-5);
+
+        var match = StablecoinQuoteMatcher.Match([older, younger], Arrival(paid: 10_100_001), arrivedAt);
+
+        Assert.Equal(StablecoinMatchKind.Ambiguous, match.Kind);
+    }
+
+    [Fact]
+    public void A_fingerprint_is_taken_only_by_an_open_quote_on_the_same_route()
+    {
+        var route = new SparkCrossChainReceiveRoute(
+            SparkCrossChainProvider.Orchestra, "base", "8453", "USDC", BaseUsdc.ToLowerInvariant(), 6,
+            LandsAsBitcoin: true, LandsAsToken: true, BitcoinLimits: null, Handle: null);
+        var quotes = new[] { Quote("a", 10_100_000, expected: 10_000, serviceFee: 80_000) };
+
+        Assert.True(StablecoinQuoteMatcher.FingerprintTaken(quotes, route, 10_000, 80_000));
+        Assert.False(StablecoinQuoteMatcher.FingerprintTaken(quotes, route, 10_000, 80_001));
+        Assert.False(StablecoinQuoteMatcher.FingerprintTaken(quotes, route with { Chain = "ethereum" }, 10_000, 80_000));
     }
 
     [Fact]
@@ -141,17 +192,16 @@ public class StablecoinQuoteMatcherTests
     }
 
     [Fact]
-    public void Without_a_fingerprint_only_an_exact_deposit_attributes()
+    public void Without_a_fingerprint_nothing_attributes_not_even_an_exact_amount()
     {
+        // The SDK reports both halves on every Orchestra receive it quoted; one without them is not one of these, and
+        // an equal amount on one of ours is no more evidence than it is for twins.
         var quotes = new[] { Quote("a", 10_100_000), Quote("b", 20_200_000) };
 
-        var exact = StablecoinQuoteMatcher.Match(quotes, Arrival(paid: 20_200_000, estimatedOut: null, serviceFee: null));
-        Assert.Equal("b", exact.Quote!.Id);
-
-        // Even with a single quote on the route: nothing says this arrival is that quote's.
-        var inexact = StablecoinQuoteMatcher.Match(
-            [Quote("a", 10_100_000)], Arrival(paid: 10_000_000, estimatedOut: null, serviceFee: null));
-        Assert.Equal(StablecoinMatchKind.NoMatch, inexact.Kind);
+        Assert.Equal(StablecoinMatchKind.NoMatch,
+            StablecoinQuoteMatcher.Match(quotes, Arrival(paid: 20_200_000, estimatedOut: null, serviceFee: null)).Kind);
+        Assert.Equal(StablecoinMatchKind.NoMatch,
+            StablecoinQuoteMatcher.Match([Quote("a", 10_100_000)], Arrival(paid: 10_100_000, serviceFee: null)).Kind);
     }
 
     [Fact]

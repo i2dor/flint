@@ -82,6 +82,12 @@ directory, or the Lightning payment-method configuration the plugin wrote — so
 simply loses its Lightning provider. Use the per-store **Remove** page first if that is what you meant;
 see [Setting a store up](docs/store-setup.md) for exactly what that destroys.
 
+**Upgrades are one-way.** A release can move the Spark SDK's local wallet storage forward, and an older
+plugin then cannot open it: rolling back from a release built on SDK 0.26 to 1.1.0 or earlier leaves every
+store's wallet unable to start (funds are safe on Spark; reinstalling the newer release restores them). To
+keep a real rollback path, copy `<DataDir>/Plugins/Flint` before upgrading. The [changelog](CHANGELOG.md)
+says so whenever a release does this.
+
 ## Getting a store running
 
 1. **[Set the store up](docs/store-setup.md)** — one page under **Plugins → Flint**, one question (where

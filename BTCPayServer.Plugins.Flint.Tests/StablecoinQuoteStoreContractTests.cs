@@ -54,14 +54,14 @@ public abstract class StablecoinQuoteStoreContractTests
         ExpiresAt = expiresAt ?? DateTimeOffset.UtcNow.AddMinutes(15)
     };
 
-    private static StablecoinSettlement Settlement(string paymentId) => new(
+    private static StablecoinSettlement Settlement(string paymentId, DateTimeOffset? settledAt = null) => new(
         paymentId,
         BigInteger.Parse("10087342000000000000"),
         new BigInteger(10_001),
         "0xpayer",
         "order-1",
         "quote-1",
-        DateTimeOffset.UtcNow);
+        settledAt ?? DateTimeOffset.UtcNow);
 
     [Fact]
     public async Task A_quote_round_trips_with_its_eighteen_decimal_amounts()
@@ -153,17 +153,44 @@ public abstract class StablecoinQuoteStoreContractTests
         await store.AddAsync(quote, Ct);
 
         // Not settled yet: nothing to credit, and nothing to mark.
-        Assert.Empty(await store.ListUncreditedAsync(StoreId, 10, Ct));
+        Assert.Empty(await store.ListUncreditedAsync(StoreId, DateTimeOffset.UtcNow.AddDays(-7), 10, Ct));
         Assert.False(await store.TryMarkCreditedAsync(quote.Id, DateTimeOffset.UtcNow, Ct));
 
         await store.TrySettleAsync(quote.Id, Settlement("pay-1"), Ct);
-        Assert.Equal([quote.Id], (await store.ListUncreditedAsync(StoreId, 10, Ct)).Select(q => q.Id).ToArray());
-        Assert.Equal([StoreId], (await store.ListStoresAwaitingCreditAsync(Ct)).ToArray());
+        Assert.Equal([quote.Id], (await store.ListUncreditedAsync(StoreId, DateTimeOffset.UtcNow.AddDays(-7), 10, Ct)).Select(q => q.Id).ToArray());
+        Assert.Equal([StoreId], (await store.ListStoresAwaitingCreditAsync(DateTimeOffset.UtcNow.AddDays(-7), Ct)).ToArray());
 
         Assert.True(await store.TryMarkCreditedAsync(quote.Id, DateTimeOffset.UtcNow, Ct));
         Assert.False(await store.TryMarkCreditedAsync(quote.Id, DateTimeOffset.UtcNow, Ct));
-        Assert.Empty(await store.ListUncreditedAsync(StoreId, 10, Ct));
-        Assert.Empty(await store.ListStoresAwaitingCreditAsync(Ct));
+        Assert.Empty(await store.ListUncreditedAsync(StoreId, DateTimeOffset.UtcNow.AddDays(-7), 10, Ct));
+        Assert.Empty(await store.ListStoresAwaitingCreditAsync(DateTimeOffset.UtcNow.AddDays(-7), Ct));
+    }
+
+    [Fact]
+    public async Task The_credit_retry_cutoff_is_applied_before_the_limit_not_after_it()
+    {
+        // A page of the oldest, filtered afterwards, is a page of quotes past the cutoff for as long as there are
+        // that many of them: the newer credit behind them never comes up.
+        var store = await CreateStoreAsync();
+        var now = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 3; i++)
+        {
+            var stale = Quote();
+            await store.AddAsync(stale, Ct);
+            await store.TrySettleAsync(stale.Id, Settlement($"stale-{i}", now.AddDays(-8 - i)), Ct);
+        }
+
+        var recent = Quote();
+        await store.AddAsync(recent, Ct);
+        await store.TrySettleAsync(recent.Id, Settlement("recent", now.AddHours(-1)), Ct);
+        var elsewhere = Quote(storeId: OtherStoreId);
+        await store.AddAsync(elsewhere, Ct);
+        await store.TrySettleAsync(elsewhere.Id, Settlement("elsewhere", now.AddDays(-9)), Ct);
+
+        Assert.Equal([recent.Id], (await store.ListUncreditedAsync(StoreId, now.AddDays(-7), 2, Ct)).Select(q => q.Id).ToArray());
+        Assert.Equal([StoreId], (await store.ListStoresAwaitingCreditAsync(now.AddDays(-7), Ct)).ToArray());
+        // However old, a credit that never landed is still counted for the store to see.
+        Assert.Equal(4, await store.CountUncreditedAsync(StoreId, Ct));
     }
 
     [Fact]

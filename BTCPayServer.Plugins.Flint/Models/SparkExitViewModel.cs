@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Data;
@@ -167,6 +168,21 @@ public class SparkExitViewModel
     [ValidateNever]
     public SparkExitVerdict? CheckResult { get; set; }
 
+    /// <summary>
+    /// Why the page could not be read, when it could not — see <c>UnilateralExitPageData.LoadError</c>. The view
+    /// renders only this when it is set.
+    /// </summary>
+    [ValidateNever]
+    public string? LoadError { get; set; }
+
+    /// <summary>
+    /// When the transaction statuses on the page were last read from the chain, or null when that was not
+    /// recorded — see <c>UnilateralExitPageData.StatusesReadUtc</c>. Shown beside them, because nothing refreshes
+    /// them between a build or a check and a stale "Ready" reads exactly like a fresh one.
+    /// </summary>
+    [ValidateNever]
+    public DateTimeOffset? StatusesReadUtc { get; set; }
+
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;
 
@@ -189,6 +205,13 @@ public class SparkExitViewModel
     /// </remarks>
     [Display(Name = "Fee rate")]
     public long FeeRateSatPerVbyte { get; set; }
+
+    /// <summary>
+    /// True when <see cref="FeeRateSatPerVbyte"/> was pre-filled from the explorer's recommendation rather than
+    /// the plugin's own floor, so the form can say whose number it is. Never set from a post.
+    /// </summary>
+    [BindNever]
+    public bool FeeRateSuggested { get; set; }
 
     /// <summary>Where the recovered coins are swept once the tree has been unrolled.</summary>
     /// <remarks>

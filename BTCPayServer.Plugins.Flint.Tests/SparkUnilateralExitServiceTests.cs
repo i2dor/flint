@@ -57,6 +57,18 @@ public class SparkUnilateralExitServiceTests
     private const string FundingTxid =
         "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
+    /// <summary>The fan-out a first build's funding became once it confirmed.</summary>
+    private const string FanoutTxid =
+        "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
+
+    /// <summary>A CPFP child's change output, still on the funding script.</summary>
+    private const string ChangeTxid =
+        "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4";
+
+    /// <summary>A second payment the operator sent to the funding address.</summary>
+    private const string TopUpTxid =
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     #region The feature gate
@@ -114,6 +126,7 @@ public class SparkUnilateralExitServiceTests
         Assert.False(backupAttempt.Success);
         Assert.Equal(SparkUnilateralExitService.FeatureDisabled, backupAttempt.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
 
         Assert.Empty(harness.Backups.ReadCalls);
     }
@@ -676,7 +689,7 @@ public class SparkUnilateralExitServiceTests
 
         // Default serializer options both ways, so any reader deserialising the seam records plainly gets them
         // back — which is what the exit page does with this column.
-        var transactions = JsonSerializer.Deserialize<SparkExitTransaction[]>(stored.TransactionsJson!)!;
+        var transactions = StoredSet(stored.TransactionsJson);
         Assert.Equal(4, transactions.Length);
         Assert.Equal(SparkExitTxKind.Fanout, transactions[0].Kind);
         Assert.Equal(SparkExitTxKind.Sweep, transactions[^1].Kind);
@@ -688,7 +701,7 @@ public class SparkUnilateralExitServiceTests
         var node = transactions.First(tx => tx.Kind is SparkExitTxKind.TreeNode);
         Assert.True(node.RequiresPackageBroadcast);
         Assert.Equal(1_008u, node.CsvTimelockBlocks!.Value);
-        Assert.Equal(["txid:fanout"], node.DependsOn);
+        Assert.Equal([FakeSparkSdkClient.ExitTxid("fanout")], node.DependsOn);
 
         // The build spent exactly the one output it was funded with, and it had a key for it.
         var call = Assert.Single(harness.Sdk.ExitBuildCalls);
@@ -1046,9 +1059,24 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(UnilateralExitStatus.Built, stored.Status);
         // An empty array rather than null: "built, with nothing left to broadcast" and "never built" are
         // different states and the page renders them differently.
-        Assert.Equal("[]", stored.TransactionsJson);
+        Assert.Empty(StoredSet(stored.TransactionsJson));
         // The previous attempt's complaint does not sit next to a successful build.
         Assert.Null(stored.LastError);
+
+        // And it reads back as what it is — an empty set — rather than as a damaged one. Reporting it unreadable
+        // told the operator their only copy of the exit was broken and made the page's empty branch unreachable.
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.False(page.TransactionsUnreadable);
+        Assert.NotNull(page.Transactions);
+        Assert.Empty(page.Transactions);
+        Assert.Null(page.PendingBroadcast);
+
+        // A check has nothing to ask the chain about, says so, and does not write that down as a failure.
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.Equal(SparkUnilateralExitService.EmptySetNothingToCheck, check.Error);
+        Assert.Empty(harness.Sdk.ExitCheckCalls);
+        Assert.Null(harness.Records.Records[record.Id].LastError);
     }
 
     /// <summary>
@@ -1072,24 +1100,410 @@ public class SparkUnilateralExitServiceTests
         harness.Explorer(Utxo(10_000));
 
         Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
-        var first = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var first = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
         Assert.Equal(4, first.Length);
-        Assert.Contains(first, tx => tx.Txid == "txid:node:leaf-b");
+        Assert.Contains(first, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
 
-        // leaf-b's branch has confirmed on chain, so the next build has nothing to do for it.
-        harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
+        // leaf-b's exit is over on chain — its refund was swept — so the next build has nothing to do for it and
+        // the SDK says so, which is what separates this from a leaf that went missing.
+        harness.Sdk.ExitFinishedLeafIds.Add("leaf-b");
 
         Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
 
-        var second = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var second = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
 
         Assert.Equal(3, second.Length);
-        Assert.DoesNotContain(second, tx => tx.Txid == "txid:node:leaf-b");
+        Assert.DoesNotContain(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
         // The transaction the rebuild dropped is gone from the row, not left behind as a step to broadcast.
         Assert.NotEqual(4, second.Length);
-        Assert.Contains(second, tx => tx.Txid == "txid:node:leaf-a");
+        Assert.Contains(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-a"));
+    }
+
+    #endregion
+
+    #region The pinned leaves
+
+    /// <summary>
+    /// A build whose re-quote no longer covers every pinned leaf refuses, rather than building a smaller exit
+    /// out of the same funding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK skips a named leaf that is missing from its local storage without a word
+    /// (<c>load_exit_tree_nodes</c>: "cannot exit it"), and nothing freezes the leaves an exit is pinned to: a
+    /// Lightning payment, a payout, a Stable Balance conversion or the SDK's own leaf optimisation can spend or
+    /// reshape one between the quote and the build. The quote that comes back is then a smaller exit, and a
+    /// build that accepted any subset whose value beat its fee would commit the operator's funding to
+    /// recovering less than they were shown.
+    /// </para>
+    /// <para>
+    /// Refused before funding is looked at, so nothing is committed; the funding key path is named because the
+    /// operator's way out is to abandon and recover what they sent.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_build_refuses_when_a_pinned_leaf_has_gone_missing()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("1 of the 2 leaves", result.Error);
+        Assert.Contains("m/84'/1'/4607060'/0/0", result.Error);
+        Assert.Empty(harness.Sdk.ExitBuildCalls);
+        Assert.Null(harness.Records.Records[record.Id].FundingUtxosJson);
+    }
+
+    /// <summary>
+    /// The same refusal holds against the quote the build itself commits to, which can differ from the one just
+    /// taken.
+    /// </summary>
+    [Fact]
+    public async Task The_build_s_own_quote_is_held_to_the_pinned_leaves_too()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        // leaf-b is spent between the step-one re-quote and the quote the build commits to.
+        var quotes = 0;
+        harness.Sdk.WhenExitQuoted = () =>
+        {
+            if (++quotes == 1)
+                harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
+        };
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("1 of the 2 leaves", result.Error);
+        // The veto refused it: the build was reached, and signed nothing.
+        var call = Assert.Single(harness.Sdk.ExitBuildCalls);
+        Assert.NotNull(call.Rejection);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, harness.Records.Records[record.Id].Status);
+    }
+
+    /// <summary>
+    /// A pinned leaf whose exit is over on-chain is the one legitimate absence, and an exit whose every leaf is
+    /// over says so instead of calling the leaves gone.
+    /// </summary>
+    [Fact]
+    public async Task Leaves_that_finished_on_chain_are_not_mistaken_for_missing_ones()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+
+        harness.Sdk.ExitFinishedLeafIds.Add("leaf-a");
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Equal(SparkUnilateralExitService.AllLeavesFinished, result.Error);
+        Assert.NotEqual(SparkUnilateralExitService.LeavesGone, result.Error);
+    }
+
+    #endregion
+
+    #region Rebuilding: funding a second attempt
+
+    /// <summary>
+    /// A rebuild hands the funding the first build committed back to the SDK, which follows it, instead of
+    /// re-listing the address and asking for a second full funding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The scenario the SDK's "Funding a second attempt" exists for, and the one the page sends operators
+    /// into.</b> A multi-leaf exit is built, its fan-out is broadcast and confirms, and a later check says Redo.
+    /// The output the operator sent no longer exists: it became one fee output per branch, each well below a
+    /// whole-exit requirement. Re-listing the address and picking the one biggest output — what every build used
+    /// to do — finds nothing big enough and tells the operator to send the whole amount again, stranding the
+    /// per-branch outputs on an address no wallet scans.
+    /// </para>
+    /// <para>
+    /// The SDK's contract is to pass back the funding the stored response carries; it follows each outpoint to
+    /// what it became and funds from there. So the assertion is on what reached the SDK: the committed outpoint,
+    /// alongside what the address now shows.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_hands_the_committed_funding_back_to_be_followed()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+        var original = $"{FundingTxid}:0";
+        Assert.Contains(original, harness.Records.Records[record.Id].FundingUtxosJson);
+
+        // The fan-out confirmed: the operator's 10,000 sat output is spent, and what it became is two 4,000 sat
+        // branch outputs on the same script. A rebuild at a higher requirement than either single one of them.
+        harness.Sdk.ExitFundingSpentInto[original] =
+        [
+            new SparkExitFundingUtxo(FanoutTxid, 0, 4_000, "pubkey"),
+            new SparkExitFundingUtxo(FanoutTxid, 1, 4_000, "pubkey")
+        ];
+        harness.Explorer(UtxoAt(FanoutTxid, 4_000, 0), UtxoAt(FanoutTxid, 4_000, 1));
+        harness.Sdk.ExitSingleUtxoFundingSat = 6_000;
+        var buildsBefore = harness.Sdk.ExitBuildCalls.Count;
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[buildsBefore];
+        // The committed outpoint went back, which is the whole fix: the SDK follows it.
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == original);
+        // And what the address shows went alongside, once each.
+        Assert.Equal(3, call.FundingUtxos.Select(utxo => utxo.OutPoint).Distinct().Count());
+        Assert.Equal(3, call.FundingUtxos.Count);
+        Assert.All(call.FundingUtxos, utxo => Assert.NotEqual("pubkey", utxo.PubkeyHex));
+
+        // The record remembers everything it was handed, so the next attempt can follow all of it again.
+        var stored = JsonSerializer.Deserialize<SparkExitFundingUtxo[]>(
+            harness.Records.Records[record.Id].FundingUtxosJson!)!;
+        Assert.Equal(
+            call.FundingUtxos.Select(utxo => utxo.OutPoint).Order(StringComparer.Ordinal),
+            stored.Select(utxo => utxo.OutPoint).Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// A top-up sent to the funding address reaches a rebuild alongside the committed funding, and a rebuild
+    /// that is still short says to send more — not to send the whole amount again as one output.
+    /// </summary>
+    /// <remarks>
+    /// A first build funds from one output, so its shortfall has to say "topping up does not help". A rebuild is
+    /// the opposite: the SDK sums what the committed funding has become plus anything else it is handed, so more
+    /// of any shape helps, and the page's own advice for a fee that turned out too low — send more and build
+    /// again — is only true if the new output is actually passed in.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_takes_a_top_up_alongside_the_committed_funding()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var original = $"{FundingTxid}:0";
+        var builtFee = harness.Records.Records[record.Id].TotalFeeSat;
+
+        // What is left of the first funding after its children confirmed: 1,000 sat of change.
+        harness.Sdk.ExitFundingSpentInto[original] = [new SparkExitFundingUtxo(ChangeTxid, 0, 1_000, "pubkey")];
+        harness.Explorer(UtxoAt(ChangeTxid, 1_000));
+        harness.Sdk.ExitSingleUtxoFundingSat = 5_000;
+
+        var short1 = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(short1.Success);
+        Assert.Contains("Spark followed the funding", short1.Error);
+        Assert.Contains("5,000 sat", short1.Error);
+        Assert.DoesNotContain("topping up does not help", short1.Error);
+        // A built exit stays built, and a failed rebuild leaves the figures of the set that is actually stored.
+        var afterShort = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, afterShort.Status);
+        Assert.Equal(builtFee, afterShort.TotalFeeSat);
+        Assert.Equal(short1.Error, afterShort.LastError);
+
+        // The operator sends 4,500 more as a new output. 1,000 + 4,500 covers the 5,000 the SDK asked for, and
+        // no single output does.
+        harness.Explorer(UtxoAt(ChangeTxid, 1_000), UtxoAt(TopUpTxid, 4_500));
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[^1];
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == original);
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == $"{TopUpTxid}:0");
+        Assert.Null(harness.Records.Records[record.Id].LastError);
+    }
+
+    /// <summary>A rebuild does not need the explorer: the committed funding is followed by the SDK itself.</summary>
+    /// <remarks>
+    /// The explorer is how a first build finds the output the operator sent. A rebuild already holds its
+    /// outpoints, and the SDK reads the chain through its own chain service to follow them — so an explorer
+    /// outage must not block a Redo that needs no new money, and when it does turn out short the message says
+    /// that a top-up already on the address may not have been seen.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_goes_ahead_on_the_committed_funding_when_the_explorer_is_down()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.ExplorerOffline();
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[^1];
+        Assert.Equal([$"{FundingTxid}:0"], call.FundingUtxos.Select(utxo => utxo.OutPoint));
+
+        harness.Sdk.ExitSingleUtxoFundingSat = 50_000;
+        var shortfall = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(shortfall.Success);
+        Assert.Contains("block explorer could not be read", shortfall.Error);
+    }
+
+    /// <summary>
+    /// A committed-funding column that is present but unreadable stops a rebuild before anything is signed.
+    /// </summary>
+    /// <remarks>
+    /// Building without it is the old failure in disguise: the SDK would be handed only whatever the address
+    /// lists, and the operator asked to fund the exit a second time. The refusal names the key path, because
+    /// that is how whatever is left on the address is recovered by hand.
+    /// </remarks>
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("[null]")]
+    [InlineData("""[{"Txid":"not-a-txid","Vout":0,"ValueSat":1000,"PubkeyHex":"02"}]""")]
+    public async Task An_unreadable_committed_funding_column_refuses_a_rebuild(string stored)
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Records.Records[record.Id].FundingUtxosJson = stored;
+        var buildsBefore = harness.Sdk.ExitBuildCalls.Count;
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(rebuilt.Success);
+        Assert.Contains("funding it has already committed could not be read", rebuilt.Error);
+        Assert.Contains("m/84'/1'/4607060'/0/0", rebuilt.Error);
+        Assert.Equal(buildsBefore, harness.Sdk.ExitBuildCalls.Count);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+    }
+
+    #endregion
+
+    #region Raising the fee
+
+    /// <summary>
+    /// A rebuild at a higher rate re-prices the exit at that rate, signs at it, and records it with the new set.
+    /// </summary>
+    /// <remarks>
+    /// The SDK's only fee bump is to quote again at the higher rate and build again: what has confirmed stays,
+    /// and what has not is rebuilt at the new rate and replaces the earlier version on the network. A page that
+    /// told the operator to "send more funding and build again" while every build reused the record's own rate
+    /// was describing a fee bump that could not happen.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_at_a_higher_rate_signs_at_it_and_records_it()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        Assert.Equal(10, harness.Records.Records[record.Id].FeeRateSatPerVbyte);
+        var quotesBefore = harness.Sdk.ExitQuoteCalls.Count;
+
+        var bumped = await harness.Service.BuildAsync(StoreId, record.Id, 25, Ct);
+
+        Assert.True(bumped.Success, bumped.Error);
+        // Both the re-quote and the build's own quote are at the new rate: the SDK signs what its quote priced.
+        Assert.All(harness.Sdk.ExitQuoteCalls.Skip(quotesBefore), call => Assert.Equal(25UL, call.FeeRateSatPerVbyte));
+        Assert.Equal(25UL, harness.Sdk.ExitBuildCalls[^1].FeeRateSatPerVbyte);
+        Assert.Equal(25, harness.Records.Records[record.Id].FeeRateSatPerVbyte);
+
+        // And it is the record's rate from now on, so a plain "build again" does not quietly fall back.
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+        Assert.Equal(25UL, harness.Sdk.ExitBuildCalls[^1].FeeRateSatPerVbyte);
+    }
+
+    /// <summary>
+    /// A built exit refuses a rebuild at a lower rate, before anything is asked of the SDK.
+    /// </summary>
+    /// <remarks>
+    /// A replacement has to pay a higher rate than what it replaces to relay, so a cheaper set could never
+    /// displace a child already in mempools — the operator would hold two signed sets and only the old one could
+    /// ever confirm. The refusal is not written to the row: nothing about the exit is wrong, the request was.
+    /// </remarks>
+    [Fact]
+    public async Task A_built_exit_refuses_a_lower_rate()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var quotesBefore = harness.Sdk.ExitQuoteCalls.Count;
+
+        var lower = await harness.Service.BuildAsync(StoreId, record.Id, 5, Ct);
+
+        Assert.False(lower.Success);
+        Assert.Contains("cannot go lower", lower.Error);
+        Assert.Equal(quotesBefore, harness.Sdk.ExitQuoteCalls.Count);
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(10, stored.FeeRateSatPerVbyte);
+        Assert.Null(stored.LastError);
+
+        // Out of the quote band entirely is the quote's own refusal, word for word.
+        var absurd = await harness.Service.BuildAsync(StoreId, record.Id, 5_000, Ct);
+        Assert.Equal(SparkUnilateralExitService.FeeRateOutOfRange, absurd.Error);
+    }
+
+    /// <summary>
+    /// A fee bump that fails leaves the stored set's rate and figures exactly as they were.
+    /// </summary>
+    /// <remarks>
+    /// The page prints the rate beside the transactions, and those transactions were signed at the old one. A
+    /// bump that could not be funded must not leave the row claiming a rate nothing on it was built at.
+    /// </remarks>
+    [Fact]
+    public async Task A_fee_bump_that_fails_leaves_the_built_rate_and_figures_alone()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var before = harness.Records.Records[record.Id];
+        var (fee, funding, transactions) = (before.TotalFeeSat, before.SingleUtxoFundingSat, before.TransactionsJson);
+
+        harness.Sdk.ExitSingleUtxoFundingSat = 90_000;
+        harness.Sdk.ExitTotalFeeSat = 60_000;
+
+        var bumped = await harness.Service.BuildAsync(StoreId, record.Id, 40, Ct);
+
+        Assert.False(bumped.Success);
+        var after = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, after.Status);
+        Assert.Equal(10, after.FeeRateSatPerVbyte);
+        Assert.Equal(fee, after.TotalFeeSat);
+        Assert.Equal(funding, after.SingleUtxoFundingSat);
+        Assert.Equal(transactions, after.TransactionsJson);
+        Assert.Equal(bumped.Error, after.LastError);
+    }
+
+    /// <summary>
+    /// An exit still awaiting funding can be built at a different rate, and the new rate lands with the new
+    /// requirement even when the funding turns out short.
+    /// </summary>
+    /// <remarks>
+    /// Before a first build nothing has been broadcast, so there is nothing to replace and no floor: the rate is
+    /// simply the one this exit will be built at. It is persisted with the fresh quote for the reason that quote
+    /// is persisted at all — the requirement the page shows has to be the one the next attempt is judged by.
+    /// </remarks>
+    [Fact]
+    public async Task An_exit_awaiting_funding_takes_a_new_rate_with_its_requirement()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
+        harness.Sdk.ExitSingleUtxoFundingSat = 6_000;
+        harness.Explorer(Utxo(5_000));
+
+        var lower = await harness.Service.BuildAsync(StoreId, record.Id, 3, Ct);
+
+        Assert.False(lower.Success);
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(3, stored.FeeRateSatPerVbyte);
+        Assert.Equal(6_000, stored.SingleUtxoFundingSat);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, stored.Status);
     }
 
     #endregion
@@ -1124,8 +1538,7 @@ public class SparkUnilateralExitServiceTests
         Assert.True(result.Success, result.Error);
         Assert.Single(harness.Sdk.ExitCheckCalls);
 
-        var refreshed = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var refreshed = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
         Assert.All(
             refreshed,
             tx => Assert.Equal(SparkExitTxReadiness.Waiting, tx.Status.Readiness));
@@ -1400,24 +1813,28 @@ public class SparkUnilateralExitServiceTests
     #region Finishing
 
     /// <summary>
-    /// Marking a built exit completed frees the store, and it is the right verb for a finished exit.
+    /// Marking a built exit completed frees the store, and it is the right verb for a finished exit — once the
+    /// chain says it is finished.
     /// </summary>
     /// <remarks>
-    /// Nothing here watches the chain, so this is the operator's statement rather than an observation. Without it
-    /// abandoning would be the only way a finished exit ever left the active state — and telling a merchant to
-    /// "abandon" the exit that recovered their money is a lie the page would have to keep telling.
+    /// Without it abandoning would be the only way a finished exit ever left the active state — and telling a
+    /// merchant to "abandon" the exit that recovered their money is a lie the page would have to keep telling.
+    /// The completion asks Spark's check first, and completes on its Done.
     /// </remarks>
     [Fact]
     public async Task Marking_a_built_exit_completed_frees_the_store()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
-        harness.WithLeaves(("leaf-a", 500_000));
-        var record = harness.Seed(status: UnilateralExitStatus.Built);
+        var record = await BuiltExit(harness);
+        harness.Sdk.CheckVerdict = SparkExitVerdict.Done;
+        harness.Sdk.ExitReadiness = SparkExitTxReadiness.Confirmed;
 
         var completed = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
 
         Assert.True(completed.Success, completed.Error);
+        Assert.Equal(SparkExitVerdict.Done, completed.Verdict);
+        Assert.Single(harness.Sdk.ExitCheckCalls);
         Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
 
         // Idempotent, like abandoning: a second press is not an error.
@@ -1463,13 +1880,196 @@ public class SparkUnilateralExitServiceTests
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = harness.Seed(status: UnilateralExitStatus.Built);
-        Assert.True((await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct)).Success);
+        Assert.True((await harness.Service.MarkCompletedAsync(
+            StoreId, record.Id, confirmedWithoutVerdict: true, Ct)).Success);
 
         var abandoned = await harness.Service.AbandonAsync(StoreId, record.Id, Ct);
 
         Assert.False(abandoned.Success);
         Assert.Contains("already recorded as finished", abandoned.Error);
         Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
+    }
+
+    /// <summary>
+    /// An exit the chain does not call finished is not marked completed unless the operator says so themselves.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Completing takes the signed set off the page — the only place it is shown — so completing early is how an
+    /// operator loses sight of steps still to broadcast, and the SDK can tell. "On track" is not finished, and
+    /// "can no longer finish" is not finished either: each gets its own refusal, because the next step differs.
+    /// </para>
+    /// <para>
+    /// The override exists for the cases a check cannot answer. A stopped wallet is the obvious one: the check is
+    /// made through the running SDK, so it refuses, and the operator who has watched the sweep confirm in their
+    /// own node must still be able to close the record.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(SparkExitVerdict.Valid, "still on track")]
+    [InlineData(SparkExitVerdict.Redo, "can no longer finish")]
+    public async Task An_unfinished_exit_is_not_marked_completed_on_a_plain_press(
+        SparkExitVerdict verdict, string expected)
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Sdk.CheckVerdict = verdict;
+
+        var result = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains(expected, result.Error);
+        Assert.Contains("tick the confirmation", result.Error);
+        Assert.Equal(verdict, result.Verdict);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+    }
+
+    [Fact]
+    public async Task A_stopped_wallet_blocks_the_check_but_not_the_operator_s_own_confirmation()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Runtime.Clients.Remove(StoreId);
+
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        // Said as what it is: a check needs the wallet. Not a chain failure, and not a claim that it works stopped.
+        Assert.Equal(SparkUnilateralExitService.CheckNeedsWallet, check.Error);
+
+        var plain = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
+        Assert.False(plain.Success);
+        Assert.Contains(SparkUnilateralExitService.CheckNeedsWallet, plain.Error);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+
+        var confirmed = await harness.Service.MarkCompletedAsync(
+            StoreId, record.Id, confirmedWithoutVerdict: true, Ct);
+        Assert.True(confirmed.Success, confirmed.Error);
+        Assert.Null(confirmed.Verdict);
+        Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
+    }
+
+    #endregion
+
+    #region When the statuses were read
+
+    /// <summary>
+    /// The page says when the statuses it shows were last read from the chain, and a check moves that time on.
+    /// </summary>
+    /// <remarks>
+    /// Nothing refreshes the stored statuses between presses, and a step's watchtower version becomes valid about
+    /// fifty blocks after the step itself — so "Ready" as of yesterday is a different instruction from "Ready" as
+    /// of a minute ago, and the page could not tell them apart. The time is stored in the same value as the set,
+    /// so it cannot describe a different write than the statuses beside it.
+    /// </remarks>
+    [Fact]
+    public async Task The_page_reports_when_the_statuses_were_last_read_from_the_chain()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+
+        var built = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.Equal(harness.Now, built.StatusesReadUtc);
+
+        harness.Time.Advance(TimeSpan.FromHours(9));
+        Assert.True((await harness.Service.CheckAsync(StoreId, record.Id, Ct)).Success);
+
+        var checkedPage = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.Equal(harness.Now.AddHours(9), checkedPage.StatusesReadUtc);
+        Assert.NotNull(checkedPage.Transactions);
+        Assert.False(checkedPage.TransactionsUnreadable);
+    }
+
+    /// <summary>
+    /// A set stored as a bare array, before the read time was recorded, still reads — with no time rather than
+    /// an invented one.
+    /// </summary>
+    [Fact]
+    public async Task A_set_stored_before_the_read_time_was_recorded_still_reads()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var legacy = JsonSerializer.Serialize(StoredSet(harness.Records.Records[record.Id].TransactionsJson));
+        harness.Records.Records[record.Id].TransactionsJson = legacy;
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.False(page.TransactionsUnreadable);
+        Assert.NotNull(page.Transactions);
+        Assert.NotEmpty(page.Transactions);
+        Assert.Null(page.StatusesReadUtc);
+
+        // And checking it writes the envelope, time included.
+        Assert.True((await harness.Service.CheckAsync(StoreId, record.Id, Ct)).Success);
+        Assert.StartsWith("{", harness.Records.Records[record.Id].TransactionsJson);
+    }
+
+    #endregion
+
+    #region Deadlines on the SDK's exit calls
+
+    /// <summary>
+    /// An SDK exit call that never answers releases the store's gate at its deadline, instead of holding it for
+    /// as long as an unreachable operator holds the call.
+    /// </summary>
+    /// <remarks>
+    /// Preparing an exit begins with a best-effort refresh from the Spark operators, and the binding offers no
+    /// cancellation. Without a deadline an operator that accepts connections and never answers would hold the
+    /// request, and every other exit action for the store would answer "already running" until the process
+    /// restarted. The call is abandoned, not cancelled — nothing it could do is broadcast — and the store's
+    /// next action goes through.
+    /// </remarks>
+    [Fact]
+    public async Task A_quote_that_never_answers_gives_up_and_frees_the_store()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        harness.Service.QuoteDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Sdk.HoldExitCalls = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var result = await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("did not finish quoting this exit", result.Error);
+        Assert.Empty(harness.Records.Records);
+
+        // The gate is free: the next action is answered on its merits, not with "already running".
+        var acknowledged = await harness.Service.AcknowledgeDisclosureAsync(StoreId, Ct);
+        Assert.NotEqual(SparkUnilateralExitService.OperationInFlight, acknowledged.Error);
+
+        harness.Sdk.HoldExitCalls.SetResult();
+    }
+
+    [Fact]
+    public async Task A_build_or_check_that_never_answers_gives_up_without_storing_anything()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var storedSet = harness.Records.Records[record.Id].TransactionsJson;
+        harness.Service.QuoteDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Service.BuildDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Service.CheckDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Sdk.HoldExitCalls = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.False(rebuilt.Success);
+        Assert.Contains("did not finish re-pricing this exit", rebuilt.Error);
+
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.Contains("did not finish checking this exit", check.Error);
+
+        // The stored set is untouched by either, and the exit is still the operator's to act on.
+        Assert.Equal(storedSet, harness.Records.Records[record.Id].TransactionsJson);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+        Assert.True((await harness.Service.AbandonAsync(StoreId, record.Id, Ct)).Success);
+
+        harness.Sdk.HoldExitCalls.SetResult();
     }
 
     #endregion
@@ -1543,19 +2143,25 @@ public class SparkUnilateralExitServiceTests
     #region The exit-state backup
 
     /// <summary>
-    /// A backup the operator pastes lands in the file store and not in the settings blob — the
-    /// value is multi-megabytes and settings are read on every settings read.
+    /// A backup the operator pastes is queued for import in the file store — not written over the automatic
+    /// backup, and not into the settings blob.
     /// </summary>
+    /// <remarks>
+    /// The automatic slot is the wallet's own latest export and every due pass replaces it, so a paste written
+    /// there was gone before anything had imported it. The queue is the slot nothing automatic writes.
+    /// </remarks>
     [Fact]
-    public async Task A_pasted_backup_lands_in_the_file_store_and_not_in_the_settings_blob()
+    public async Task A_pasted_backup_is_queued_for_import_and_not_written_over_the_automatic_backup()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
+        await harness.Backups.WriteAsync(StoreId, "the-wallet-s-own-export", "02aa", Ct);
 
         var result = await harness.Service.SetExitStateBackupAsync(StoreId, "opaque-sdk-backup", Ct);
 
         Assert.True(result.Success, result.Error);
-        Assert.Equal("opaque-sdk-backup", harness.Backups.Stored(StoreId));
+        Assert.Equal(["opaque-sdk-backup"], harness.Backups.Pending(StoreId));
+        Assert.Equal("the-wallet-s-own-export", harness.Backups.Stored(StoreId));
         // No settings write at all, on the one save action the operator triggers by hand: keeping
         // this value out of the settings column is the entire reason the file store exists.
         Assert.Empty(harness.Settings.Writes);
@@ -1577,14 +2183,15 @@ public class SparkUnilateralExitServiceTests
         Assert.NotNull(result.Error);
         Assert.Contains("characters", result.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
         Assert.Empty(harness.Backups.DeleteCalls);
     }
 
     /// <summary>
-    /// Re-pasting the backup already stored does not write it again.
+    /// Re-pasting a backup already waiting does not queue a second copy.
     /// </summary>
     [Fact]
-    public async Task Re_pasting_the_stored_backup_does_not_write_it_again()
+    public async Task Re_pasting_a_queued_backup_does_not_queue_it_twice()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
@@ -1592,22 +2199,25 @@ public class SparkUnilateralExitServiceTests
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
 
-        // A save button pressed twice, a page reloaded with the value still in the textarea: the
-        // equality check costs one string comparison and spares the disk a multi-megabyte rewrite.
-        Assert.Single(harness.Backups.WriteCalls);
+        // A save button pressed twice, a page reloaded with the value still in the textarea: one copy
+        // waits, not two multi-megabyte files.
+        Assert.Equal(["same-blob"], harness.Backups.Pending(StoreId));
+        Assert.Empty(harness.Backups.WriteCalls);
     }
 
-    /// <summary>Clearing the backup removes the file.</summary>
+    /// <summary>Clearing removes the automatic backup and everything waiting to be imported.</summary>
     [Fact]
-    public async Task Clearing_the_backup_removes_the_file()
+    public async Task Clearing_the_backup_removes_the_automatic_backup_and_the_queue()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
+        await harness.Backups.WriteAsync(StoreId, "automatic", "02aa", Ct);
         await harness.Service.SetExitStateBackupAsync(StoreId, "to-be-cleared", Ct);
 
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, null, Ct)).Success);
 
         Assert.Null(harness.Backups.Stored(StoreId));
+        Assert.Empty(harness.Backups.Pending(StoreId));
         Assert.Contains(StoreId, harness.Backups.DeleteCalls);
     }
 
@@ -1651,6 +2261,7 @@ public class SparkUnilateralExitServiceTests
 
         Assert.Equal(SparkUnilateralExitService.NotConfigured, result.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
     }
 
     #endregion
@@ -1772,9 +2383,22 @@ public class SparkUnilateralExitServiceTests
     /// </remarks>
     [Theory]
     [InlineData("not json at all")]
-    [InlineData("[]")]
     [InlineData("[{}]")]
+    [InlineData("""{"StatusesReadUtc":"2026-08-20T12:00:00+00:00"}""")]
+    [InlineData("""{"StatusesReadUtc":"2026-08-20T12:00:00+00:00","Transactions":[{}]}""")]
+    // Present but not what Bitcoin would produce. The page pastes the hex into a shell command, so a "hex" that
+    // could carry a quote must be refused here rather than rendered.
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200'; rm -rf ~; '","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200","CpfpTxHex":"zz","DependsOn":[],"Kind":1,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"020","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200","DependsOn":["not-a-txid"],"Kind":0,"Status":{"Readiness":1}}]""")]
     [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":99,"Status":0}]""")]
+    // The member most likely to be null, and the one that used to be dereferenced before it was checked: the
+    // status is a reference record, and System.Text.Json fills an explicit or missing null into it regardless.
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0,"Status":null}]""")]
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0}]""")]
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[null],"Kind":0,"Status":{"Readiness":1}}]""")]
     public async Task An_unreadable_transaction_column_is_reported_rather_than_thrown(string stored)
     {
         using var harness = Harness.Create();
@@ -1786,8 +2410,62 @@ public class SparkUnilateralExitServiceTests
 
         Assert.True(page.TransactionsUnreadable);
         Assert.Null(page.Transactions);
+        Assert.Null(page.LoadError);
         // And the record itself is still on the page, so the operator can abandon it.
         Assert.Equal(record.Id, page.ActiveRecord?.Id);
+
+        // The check reads the same column and must refuse on it the same way, not throw on the way to the SDK.
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.NotEqual(SparkUnilateralExitService.UnexpectedFailure, check.Error);
+        Assert.Empty(harness.Sdk.ExitCheckCalls);
+    }
+
+    /// <summary>
+    /// A database that will not answer becomes a refusal on every operation and a "could not read" page, never
+    /// an exception.
+    /// </summary>
+    /// <remarks>
+    /// These methods are called from request handlers, and BTCPay 2.4 answers an unhandled plugin exception during
+    /// a request by disabling the plugin and restarting the server — every store's Lightning, over one exit page.
+    /// The page read in particular must not fall back to the quote form: "no exit is in progress" on the strength
+    /// of a query that never answered is an invitation to start a second one.
+    /// </remarks>
+    [Fact]
+    public async Task A_database_that_will_not_answer_degrades_every_entry_point_instead_of_throwing()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed();
+        harness.Records.FailReadsWith = new InvalidOperationException("the database is not answering");
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.Equal(SparkUnilateralExitService.ExitsUnreadable, page.LoadError);
+        Assert.Null(page.ActiveRecord);
+        Assert.False(page.DisclosureAcknowledged);
+
+        foreach (var attempt in new[]
+                 {
+                     await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct),
+                     await harness.Service.BuildAsync(StoreId, record.Id, Ct),
+                     await harness.Service.CheckAsync(StoreId, record.Id, Ct),
+                     await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct),
+                     await harness.Service.AbandonAsync(StoreId, record.Id, Ct)
+                 })
+        {
+            Assert.False(attempt.Success);
+            Assert.Equal(SparkUnilateralExitService.UnexpectedFailure, attempt.Error);
+        }
+
+        // Nothing was signed on the way to those refusals.
+        Assert.Empty(harness.Sdk.ExitBuildCalls);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, harness.Records.Records[record.Id].Status);
+
+        // And the per-store gate was released each time, so the store is usable again once the database is.
+        harness.Records.FailReadsWith = null;
+        Assert.True((await harness.Service.AbandonAsync(StoreId, record.Id, Ct)).Success);
     }
 
     /// <summary>
@@ -2011,11 +2689,12 @@ public class SparkUnilateralExitServiceTests
     /// The half-hour estimate and not the fastest rate on offer, because this one number is paid by every
     /// transaction in a chain of dozens: pricing all of them at the panic rate overpays on each, and pricing them at
     /// a floor risks the failure this flow cannot recover from — a half-broadcast exit whose fan-out is already
-    /// spent. The ceiling matters from the other side: a fee spike must not produce a rate the quote form's own
-    /// bounds refuse, which would show an operator a number that cannot be submitted.
+    /// spent. The ceiling matters from the other side, and it is the suggestion's own rather than the form's: the
+    /// recommendation is a third party's claim, and an explorer answering 900 — broken or hostile — must not make
+    /// the most expensive exit the form accepts the default in front of an operator about to fund it.
     /// </remarks>
     [Fact]
-    public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_form_bounds()
+    public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_suggestion_cap()
     {
         using var harness = Harness.Create();
         harness.ExplorerBody(
@@ -2037,9 +2716,86 @@ public class SparkUnilateralExitServiceTests
             """{"fastestFee":4000,"halfHourFee":900,"hourFee":800,"economyFee":700,"minimumFee":600}""");
 
         Assert.Equal(
-            SparkUnilateralExitService.MaxFeeRateSatPerVbyte,
+            SparkExitFundingExplorer.MaxRecommendedFeeRateSatPerVbyte,
             await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
                 mainnet: true, new UnilateralExitSettings(), Ct));
+        Assert.True(
+            SparkExitFundingExplorer.MaxRecommendedFeeRateSatPerVbyte < SparkUnilateralExitService.MaxFeeRateSatPerVbyte);
+    }
+
+    /// <summary>
+    /// An explorer base URL may be a scheme, a host, a port and a path — and nothing that would carry a secret
+    /// into logs, reshape the request paths, or aim the server at its own cloud metadata service.
+    /// </summary>
+    /// <remarks>
+    /// The page asks this host on every view by anyone who can view the store, so the setting is a standing
+    /// instruction to the server. Loopback and private addresses stay allowed — a self-hosted esplora beside the
+    /// server is the choice the override exists for, and only a server administrator can set it — while
+    /// link-local, unspecified and multicast literals are never an explorer on any network.
+    /// </remarks>
+    [Theory]
+    [InlineData("https://user:secret@esplora.example/api", "user name or password")]
+    [InlineData("https://esplora.example/api?key=abc", "query string")]
+    [InlineData("https://esplora.example/api#frag", "query string or a fragment")]
+    [InlineData("http://169.254.169.254/latest", "link-local")]
+    [InlineData("http://[fe80::1]/api", "link-local")]
+    [InlineData("http://0.0.0.0:3002/api", "link-local")]
+    [InlineData("http://224.0.0.1/api", "link-local")]
+    public void An_explorer_url_that_is_never_an_explorer_is_refused(string candidate, string expected)
+    {
+        Assert.False(SparkExitFundingExplorer.TryNormaliseApiUrl(candidate, out var normalised, out var error));
+        Assert.Null(normalised);
+        Assert.Contains(expected, error);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:3002/api/")]
+    [InlineData("http://127.0.0.1:3002/api")]
+    [InlineData("http://10.21.21.26:3006/api")]
+    [InlineData("http://esplora.local/api")]
+    [InlineData("https://mempool.space/api")]
+    public void A_self_hosted_or_public_explorer_is_accepted(string candidate)
+    {
+        Assert.True(SparkExitFundingExplorer.TryNormaliseApiUrl(candidate, out var normalised, out var error));
+        Assert.Null(error);
+        Assert.False(normalised!.EndsWith('/'));
+    }
+
+    /// <summary>
+    /// A failed lookup names neither the full URL nor anything the HTTP stack said about it — not in the log,
+    /// and not in the refusal the page and the record carry.
+    /// </summary>
+    /// <remarks>
+    /// An esplora path can carry an access token, and a handler's exception message can carry the host, the
+    /// resolved address and the whole request URL. The banner and the record's last error are read by anyone
+    /// who can view the store's settings, and the log by whoever reads the server's logs.
+    /// </remarks>
+    [Fact]
+    public async Task A_failed_lookup_keeps_the_explorer_path_and_the_handler_s_words_out_of_logs_and_errors()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true, esploraApiUrl: "https://esplora.example/api/SECRET-TOKEN");
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(leafIds: ["leaf-a"]);
+        harness.ExplorerOffline();
+
+        var logger = new CapturingLogger<SparkExitFundingExplorer>();
+        var explorer = new SparkExitFundingExplorer(harness.ClientFactory, harness.Time, logger);
+        var lookup = await explorer.ListConfirmedAsync(
+            "https://esplora.example/api/SECRET-TOKEN", FundingAddress, "02" + new string('a', 64), Ct);
+
+        Assert.Null(lookup.Utxos);
+        Assert.DoesNotContain("SECRET-TOKEN", lookup.Error);
+        Assert.DoesNotContain("no route to host", lookup.Error);
+        Assert.NotEmpty(logger.Lines);
+        Assert.DoesNotContain("SECRET-TOKEN", logger.AllText);
+        Assert.DoesNotContain("no route to host", logger.AllText);
+        Assert.Contains("https://esplora.example", logger.AllText);
+
+        var build = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.False(build.Success);
+        Assert.DoesNotContain("SECRET-TOKEN", build.Error);
+        Assert.DoesNotContain("SECRET-TOKEN", harness.Records.Records[record.Id].LastError);
     }
 
     /// <summary>
@@ -2177,6 +2933,29 @@ public class SparkUnilateralExitServiceTests
         return record;
     }
 
+    /// <summary>
+    /// The signed set a record stores, read the way the service reads it: the envelope carrying the time its
+    /// statuses were read from the chain, or a bare array from before that was recorded.
+    /// </summary>
+    private static SparkExitTransaction[] StoredSet(string? json)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(json), "the record holds no transaction set");
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind is JsonValueKind.Array
+            ? JsonSerializer.Deserialize<SparkExitTransaction[]>(json)!
+            : JsonSerializer.Deserialize<SparkExitTransaction[]>(
+                document.RootElement.GetProperty("Transactions").GetRawText())!;
+    }
+
+    /// <summary>One confirmed entry of an esplora <c>/address/{address}/utxo</c> response, at a txid of the test's own.</summary>
+    private static string UtxoAt(string txid, long valueSat, uint vout = 0) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            """{{"txid":"{0}","vout":{1},"value":{2},"status":{{"confirmed":true}}}}""",
+            txid,
+            vout,
+            valueSat);
+
     /// <summary>One entry of an esplora <c>/address/{address}/utxo</c> response.</summary>
     private static string Utxo(long valueSat, uint vout = 0, bool confirmed = true) =>
         string.Format(
@@ -2212,8 +2991,9 @@ public class SparkUnilateralExitServiceTests
             Runtime.Clients[StoreId] = Sdk;
 
             Time = new StubTimeProvider(Now);
+            ClientFactory = new ExplorerClientFactory(_handler);
             ExplorerClient = new SparkExitFundingExplorer(
-                new ExplorerClientFactory(_handler),
+                ClientFactory,
                 Time,
                 NullLogger<SparkExitFundingExplorer>.Instance);
 
@@ -2244,6 +3024,9 @@ public class SparkUnilateralExitServiceTests
         /// service in the way — and so a test can tell a fetch the service made from one it did not.
         /// </summary>
         public SparkExitFundingExplorer ExplorerClient { get; }
+
+        /// <summary>The HTTP client factory behind <see cref="ExplorerClient"/>, for a second explorer instance.</summary>
+        public IHttpClientFactory ClientFactory { get; }
 
         public FakeSparkSdkClient Sdk { get; } = new();
 

@@ -35,6 +35,12 @@ public static class SparkErrors
         // own (fail-closed — a truncated sentence beats a leaked token), and RedactPhrases may run
         // the Bip39English static ctor inside a catch handler (low risk: it only loads an embedded
         // wordlist).
+        // Before the type switch, because the downgrade refusal arrives as whatever the SDK's storage layer
+        // wraps it in — a StorageException today — and its own text ("rusqlite_migrate error:
+        // MigrationDefinition(DatabaseTooFarAhead)") says nothing an operator can act on.
+        if (IsStorageFromNewerVersion(exception))
+            return StorageFromNewerVersion;
+
         var merchantFacing = exception switch
         {
             SdkException.InsufficientFunds => "Insufficient Spark balance.",
@@ -63,6 +69,62 @@ public static class SparkErrors
         // The total-redaction fallback is this sink's own sentence, not the log bridge's: a banner
         // quoting a failed request should not gain a stray clause about SDK log lines.
         return SparkLogScrubber.Scrub(merchantFacing, "Spark reported an error that could not be shown safely.");
+    }
+
+    /// <summary>
+    /// What an operator is told when a wallet's storage was written by a newer SDK than the one installed.
+    /// </summary>
+    /// <remarks>
+    /// Plain words, and each clause answers a question the raw SDK text leaves open: what happened (a newer
+    /// version wrote the storage), what to do (install that version or a newer one), and whether the money is
+    /// at risk (it is not — the refusal happens before anything in the storage is touched, and the funds are
+    /// held by the Spark operators against the seed, not by the file).
+    /// </remarks>
+    internal const string StorageFromNewerVersion =
+        "This store's Spark wallet storage was written by a newer version of the Flint plugin (and its Spark "
+        + "SDK) than the one installed now, so this version cannot open it. Install that version of the plugin "
+        + "or a newer one to bring the wallet back. The wallet's funds are not affected.";
+
+    /// <summary>
+    /// True when the SDK refused to open a store's storage because a newer SDK had already migrated it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is what a plugin downgrade looks like.</b> Once SDK 0.26 has opened a wallet's SQLite storage it
+    /// has migrated the schema forward, and an older SDK's migration runner refuses the file with
+    /// <c>rusqlite_migrate error: MigrationDefinition(DatabaseTooFarAhead)</c>, surfaced through the storage
+    /// layer's generic "implementation error" wrapping. Without this, the connect failure reads as a broken
+    /// configuration — "unavailable until the configuration is corrected" — and sends an operator hunting
+    /// through settings that are fine, or worse, re-entering a seed.
+    /// </para>
+    /// <para>
+    /// Matched on the marker text anywhere in the exception chain, whatever the exception type: the wrapping
+    /// is an SDK detail that has moved between versions, the variant name is what the migration crate itself
+    /// prints, and a type check would silently stop matching the day the SDK re-wraps it. It only ever helps
+    /// a downgrade <em>from</em> a version that ships this check, which is the reason to ship it now.
+    /// </para>
+    /// </remarks>
+    public static bool IsStorageFromNewerVersion(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            var text = current switch
+            {
+                SdkException.StorageException storage => storage.v1,
+                SdkException.Generic generic => generic.v1,
+                SdkException.SparkException spark => spark.v1,
+                _ => null
+            };
+
+            if (ContainsTooFarAhead(text) || ContainsTooFarAhead(current.Message))
+                return true;
+        }
+
+        return false;
+
+        static bool ContainsTooFarAhead(string? text) =>
+            text?.Contains("DatabaseTooFarAhead", StringComparison.OrdinalIgnoreCase) is true;
     }
 
     /// <summary>

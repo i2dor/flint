@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -61,8 +62,8 @@ public enum StablecoinReceiveOutcome
 /// <para>
 /// <b>Why every credit is by quote, never by invoice.</b> The provider pays into the one static Spark address of
 /// the wallet, so the arrival carries nothing but the quote-time data the provider row froze onto it. See
-/// <see cref="StablecoinQuoteMatcher"/> for the rules, and <see cref="StablecoinAmounts.UniqueAsk"/> for what keeps
-/// an exactly-paid quote attributable.
+/// <see cref="StablecoinQuoteMatcher"/> for the rules, and <see cref="QuoteAsync"/> for what keeps that data unique
+/// to one quote.
 /// </para>
 /// </remarks>
 public sealed class StablecoinPaymentService
@@ -86,8 +87,9 @@ public sealed class StablecoinPaymentService
     /// <summary>How far before the oldest open quote the reconciliation scan starts, for clock skew.</summary>
     private static readonly TimeSpan ScanSlack = TimeSpan.FromMinutes(10);
 
-    private const int ScanPageSize = 50;
-    private const int MaxScanPages = 10;
+    internal const int ScanPageSize = 50;
+    /// <summary>Oldest-first pages the reconciliation sweep reads per rail per pass, after each rail's newest page.</summary>
+    internal const int MaxScanPages = 5;
     private const int MaxCreditsPerStorePerPass = 100;
     private const int MaxStoresPerPass = 500;
 
@@ -153,13 +155,36 @@ public sealed class StablecoinPaymentService
 
     #region The store's switch
 
-    /// <summary>Whether the store offers USDC and USDT at checkout. False for a store that does not exist.</summary>
+    /// <summary>
+    /// Whether the store offers USDC and USDT at checkout. False for a store that does not exist — and for one whose
+    /// configuration cannot be read right now, which is logged.
+    /// </summary>
+    /// <remarks>
+    /// Never throws, because the Flint pages call it inside BTCPay's request, where an exception from plugin code
+    /// disables the plugin and restarts the server. A caller that must tell "off" from "could not tell" uses
+    /// <see cref="TryReadEnabledAsync"/>.
+    /// </remarks>
     public async Task<bool> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default) =>
-        await _storeConfig.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+        await TryReadEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+
+    /// <summary>Whether the store offers USDC and USDT at checkout, or null when that cannot be read right now.</summary>
+    public async Task<bool?> TryReadEnabledAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _storeConfig.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not read whether USDC and USDT payments are on", storeId);
+            return null;
+        }
+    }
 
     /// <summary>
     /// Turns USDC and USDT on or off for a store. Turning them on is refused off mainnet, where no invoice could
-    /// ever offer them; turning them off always goes through.
+    /// ever offer them; turning them off always goes through. False when nothing was changed, including when the
+    /// store's configuration could not be written, which is logged rather than thrown (see <see cref="IsEnabledAsync"/>).
     /// </summary>
     public async Task<bool> SetEnabledAsync(string storeId, bool enabled, CancellationToken cancellationToken = default)
     {
@@ -167,7 +192,18 @@ public sealed class StablecoinPaymentService
         if (enabled && !Available)
             return false;
 
-        var updated = await _storeConfig.SetEnabledAsync(storeId, enabled, cancellationToken).ConfigureAwait(false);
+        bool updated;
+        try
+        {
+            updated = await _storeConfig.SetEnabledAsync(storeId, enabled, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not turn USDC and USDT payments {State}",
+                storeId, enabled ? "on" : "off");
+            return false;
+        }
+
         if (updated)
         {
             _logger.LogInformation(
@@ -304,9 +340,44 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
+    /// How many quotes one request asks the provider for, each with its target nudged, before telling the payer to
+    /// try again — see <see cref="QuoteAsync"/> on why a quote can need another.
+    /// </summary>
+    internal const int MaxFingerprintAttempts = 4;
+
+    /// <summary>
     /// A quote for paying <paramref name="invoiceId"/>'s <paramref name="paymentMethodId"/> prompt from
     /// <paramref name="chain"/>, shown on the prompt — reusing a live one for the same network and due.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every recorded quote has a fingerprint no other open quote on its route shares.</b> The fingerprint —
+    /// the quote's <c>expectedReceivedAmount</c> and <c>serviceFeeAmount</c> — is the only thing the arriving payment
+    /// carries that says which quote it paid (<see cref="StablecoinQuoteMatcher"/>). Equal dues on one route produce
+    /// equal fingerprints: landing as USDB every time, because the SDK's sizing is deterministic at dollar parity and
+    /// the estimate is floored to the cent; landing as sats whenever the provider's price and the SDK's fiat rate
+    /// have not moved between two quotes. So a quote whose fingerprint is taken is not recorded, and the provider is
+    /// asked again for a target nudged up. The quote that lost is never shown to anyone, so nothing is sent to its
+    /// address; the SDK polls its row for a day like any other unpaid quote.
+    /// </para>
+    /// <para>
+    /// <b>Why nudging the target works, and by how much.</b> The SDK sizes the deposit from the target, and the
+    /// provider's quote is exact-in: it forward-computes the estimate from that deposit, and its total fee includes
+    /// the sub-cent remainder the estimate was floored by (<c>service_fee_from_quote</c>). Between them the two
+    /// halves pin down the deposit, so any change in the deposit changes the fingerprint. A target a millionth of the
+    /// token higher is enough when the quote lands as USDB (the SDK rescales the target to USDB's six decimals); a
+    /// quote landing as sats needs a sat's worth, because the SDK converts the target to whole sats first. The first
+    /// attempt starts past the open quotes with the same due on the route — the twins it would most likely
+    /// collide with — so the common case costs one provider round trip and a few millionths of a dollar.
+    /// </para>
+    /// <para>
+    /// <b>The per-store gate covers the check and the write, never the provider.</b> Uniqueness is a read of the
+    /// open quotes followed by a write of the new one, and two requests interleaved there could both take the same
+    /// fingerprint. The provider call — up to <see cref="StablecoinPayments.QuoteDeadline"/> — happens outside it,
+    /// so one slow quote does not queue every payer at the store behind it; the fingerprint it produced is checked
+    /// against a fresh read once the gate is held, and a request that lost the race asks again.
+    /// </para>
+    /// </remarks>
     public async Task<StablecoinQuoteResult> QuoteAsync(
         string invoiceId,
         PaymentMethodId paymentMethodId,
@@ -341,66 +412,18 @@ public sealed class StablecoinPaymentService
         if (sdk is null)
             return StablecoinQuoteResult.Refused($"{asset.Symbol} payments are unavailable right now. Please pay another way.");
 
-        // One quote at a time per store: the uniqueness of every live ask on a route is decided by reading the
-        // open quotes and then writing a new one, and two quotes interleaved there could both take the same ask.
-        var gate = _storeGates.GetOrAdd(invoice.StoreId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            return await QuoteLockedAsync(invoice, asset, network, sdk, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            gate.Release();
-        }
-    }
-
-    private async Task<StablecoinQuoteResult> QuoteLockedAsync(
-        StablecoinInvoice invoice,
-        StablecoinAsset asset,
-        StablecoinNetworkOption network,
-        ISparkSdkClient sdk,
-        CancellationToken cancellationToken)
-    {
         var now = _time.GetUtcNow();
-        var paymentMethodId = asset.PaymentMethodId;
-
         var existing = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
-        var reusable = existing.FirstOrDefault(quote =>
-            quote.PaymentMethodId == paymentMethodId.ToString()
-            && StablecoinPayments.Same(quote.Chain, network.Chain)
-            && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
-            && quote.SdkPaymentId is null
-            && quote.DueAmount == invoice.Due
-            && StablecoinPayments.OfferedUntil(quote.ExpiresAt) > now + ReuseMargin);
-        if (reusable is not null)
-        {
-            var shown = ToActiveQuote(reusable);
-            await _invoices.ShowQuoteAsync(invoice.InvoiceId, paymentMethodId, shown, cancellationToken)
-                .ConfigureAwait(false);
-            return new StablecoinQuoteResult(shown, null);
-        }
-
+        if (Reusable(existing, invoice, asset, network, sdk, now) is { } reusable)
+            return await ShowAsync(invoice, asset, reusable, cancellationToken).ConfigureAwait(false);
         if (existing.Count >= StablecoinPayments.MaxQuotesPerInvoice)
-        {
-            return StablecoinQuoteResult.Refused(
-                "This invoice has already asked for as many quotes as it may. Use an address it has already "
-                + "shown, or pay another way.");
-        }
+            return TooManyForInvoice();
 
         var open = await _quotes
             .ListOpenAsync(invoice.StoreId, now - StablecoinPayments.MatchWindow, cancellationToken)
             .ConfigureAwait(false);
-        if (open.Count >= StablecoinPayments.MaxOpenQuotesPerStore)
-        {
-            _logger.LogWarning(
-                "Store {StoreId}: refusing a new {Asset} quote for invoice {InvoiceId}; the store already holds "
-                + "{Open} unsettled quotes from the last {Hours} hours",
-                invoice.StoreId, asset.Symbol, invoice.InvoiceId, open.Count,
-                StablecoinPayments.MatchWindow.TotalHours);
-            return StablecoinQuoteResult.Refused(
-                $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
-        }
+        if (StoreBusy(invoice, asset, open, now) is { } busy)
+            return busy;
 
         var routes = await _routes
             .GetAsync(invoice.StoreId, sdk, StablecoinPayments.RouteFetchDeadline, cancellationToken)
@@ -417,20 +440,215 @@ public sealed class StablecoinPaymentService
         }
 
         var decimals = (int)route.Decimals;
-        var amount = StablecoinAmounts.ToBaseUnits(invoice.Due, decimals);
+        var due = StablecoinAmounts.ToBaseUnits(invoice.Due, decimals);
+        var step = StablecoinAmounts.Pow10(Math.Max(0, decimals - StablecoinPayments.Divisibility));
+        var twins = open.Where(q => OnRoute(q, route) && q.DueAmount == invoice.Due).ToList();
+        BigInteger nudge = twins.Count;
+        // Twins that landed as sats say what a sat's worth is before the provider is asked at all.
+        if (twins.LastOrDefault(q => q.DestinationAsset == "BTC" && q.ExpectedReceived > BigInteger.Zero) is { } sats)
+            step = BigInteger.Max(step, SatsWorth(due, sats.ExpectedReceived));
 
-        SparkCrossChainReceiveQuote quote;
+        for (var attempt = 0; attempt < MaxFingerprintAttempts; attempt++)
+        {
+            var amount = due + step * nudge;
+            var (quote, refusal) = await RequestQuoteAsync(invoice, asset, network, route, sdk, amount, cancellationToken)
+                .ConfigureAwait(false);
+            if (quote is null)
+                return refusal!;
+
+            // What the payer is asked for: the SDK's deposit at the prompt's precision.
+            var ask = StablecoinAmounts.RoundUpToDivisibility(quote.DepositAmount, decimals, StablecoinPayments.Divisibility);
+            var asked = StablecoinAmounts.FromBaseUnits(ask, decimals, StablecoinPayments.Divisibility);
+            var fee = Math.Max(0m, asked - invoice.Due);
+            if (fee > invoice.Due * MaxFeeShareOfDue)
+            {
+                return StablecoinQuoteResult.Refused(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Paying from {0} would add {1} {2} in network costs to this payment. Choose a cheaper network.",
+                    network.Name, fee, asset.Symbol));
+            }
+
+            StablecoinQuote? recorded = null;
+            StablecoinQuote? raced = null;
+            StablecoinQuoteResult? refused = null;
+            var gate = _storeGates.GetOrAdd(invoice.StoreId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                now = _time.GetUtcNow();
+                var current = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
+                raced = Reusable(current, invoice, asset, network, sdk, now);
+                if (raced is null)
+                {
+                    var fresh = await _quotes
+                        .ListOpenAsync(invoice.StoreId, now - StablecoinPayments.MatchWindow, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (current.Count >= StablecoinPayments.MaxQuotesPerInvoice)
+                    {
+                        refused = TooManyForInvoice();
+                    }
+                    else if (StoreBusy(invoice, asset, fresh, now) is { } stillBusy)
+                    {
+                        refused = stillBusy;
+                    }
+                    else if (!StablecoinQuoteMatcher.FingerprintTaken(
+                                 fresh, route, quote.ExpectedReceivedAmount, quote.ServiceFeeAmount))
+                    {
+                        recorded = NewRecord(invoice, asset, route, quote, ask, fee, now);
+                        // Recorded before anyone is shown the address: the row is the only thing that will
+                        // attribute a payment to it, so an address shown without one is money that arrives
+                        // unattributable.
+                        await _quotes.AddAsync(recorded, cancellationToken).ConfigureAwait(false);
+                        RecordMinted(sdk, recorded.Id);
+                    }
+                }
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+            if (raced is not null)
+                return await ShowAsync(invoice, asset, raced, cancellationToken).ConfigureAwait(false);
+            if (refused is not null)
+                return refused;
+            if (recorded is not null)
+            {
+                _logger.LogInformation(
+                    "Store {StoreId}: quoted {Amount} {Asset} on {Chain} for invoice {InvoiceId} (due {Due}, landing "
+                    + "as {Destination})",
+                    invoice.StoreId, StablecoinAmounts.Format(ask, decimals), asset.Symbol, route.Chain,
+                    invoice.InvoiceId, invoice.Due, quote.DestinationAsset);
+                return await ShowAsync(invoice, asset, recorded, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Taken. Landing as sats, a millionth of a dollar is a hundredth of a sat and moves nothing, so from
+            // here on each step is at least a sat's worth at the rate this quote implies.
+            if (quote.TokenIdentifier is null && quote.ExpectedReceivedAmount > BigInteger.Zero)
+                step = BigInteger.Max(step, SatsWorth(amount, quote.ExpectedReceivedAmount));
+
+            nudge += BigInteger.One;
+            _logger.LogDebug(
+                "Store {StoreId}: a {Asset} quote on {Chain} for invoice {InvoiceId} matched another open quote's "
+                + "fingerprint; asking again with the target nudged",
+                invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId);
+        }
+
+        _logger.LogWarning(
+            "Store {StoreId}: {Attempts} {Asset} quotes on {Chain} for invoice {InvoiceId} each matched another open "
+            + "quote's fingerprint; refusing rather than showing an address its payment could not be attributed from",
+            invoice.StoreId, MaxFingerprintAttempts, asset.Symbol, route.Chain, invoice.InvoiceId);
+        return StablecoinQuoteResult.Refused(
+            $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
+    }
+
+    /// <summary>Route base units per sat, rounded up, at the rate a quote of <paramref name="sats"/> for <paramref name="amount"/> implies.</summary>
+    private static BigInteger SatsWorth(BigInteger amount, BigInteger sats) =>
+        BigInteger.Divide(amount + sats - BigInteger.One, sats);
+
+    /// <summary>The quotes each running wallet minted, by the SDK handle it runs as.</summary>
+    /// <remarks>
+    /// Weak on the handle, so a wallet that is torn down takes its entry with it. See <see cref="Reusable"/>.
+    /// </remarks>
+    private readonly ConditionalWeakTable<ISparkSdkClient, ConcurrentDictionary<string, byte>> _mintedBy = new();
+
+    private bool MintedBy(ISparkSdkClient sdk, string quoteId) =>
+        _mintedBy.TryGetValue(sdk, out var minted) && minted.ContainsKey(quoteId);
+
+    private void RecordMinted(ISparkSdkClient sdk, string quoteId) =>
+        _mintedBy.GetValue(sdk, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal))[quoteId] = 0;
+
+    /// <summary>
+    /// The live quote this invoice already holds for the network and due, if any: a payer clicking back and forth
+    /// costs nothing.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only a quote the running wallet made.</b> A quote's address pays whichever wallet quoted it, and after a
+    /// store's recovery phrase is replaced that is the old one: reused, the checkout kept handing payers an address
+    /// into a wallet the store had moved away from, for the hour it is offered. The table records no wallet, so the
+    /// running wallet's own quotes are tracked here, by the SDK handle that minted them. After a restart nothing is
+    /// known to be the running wallet's, and the next request for each network mints once — a provider row, against
+    /// sending a payer to a wallet that may no longer be the store's.
+    /// </remarks>
+    private StablecoinQuote? Reusable(
+        IReadOnlyList<StablecoinQuote> invoiceQuotes,
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinNetworkOption network,
+        ISparkSdkClient sdk,
+        DateTimeOffset now) =>
+        invoiceQuotes.FirstOrDefault(quote =>
+            MintedBy(sdk, quote.Id)
+            && quote.PaymentMethodId == asset.PaymentMethodId.ToString()
+            && StablecoinPayments.Same(quote.Chain, network.Chain)
+            && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
+            && quote.SdkPaymentId is null
+            && quote.DueAmount == invoice.Due
+            && StablecoinPayments.OfferedUntil(quote.ExpiresAt) > now + ReuseMargin);
+
+    private static StablecoinQuoteResult TooManyForInvoice() =>
+        StablecoinQuoteResult.Refused(
+            "This invoice has already asked for as many quotes as it may. Use an address it has already "
+            + "shown, or pay another way.");
+
+    /// <summary>
+    /// A refusal when the store already holds <see cref="StablecoinPayments.MaxOpenQuotesPerStore"/> quotes still on
+    /// offer to a payer; null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only quotes still on offer count.</b> The cap bounds the provider rows the SDK polls hard, and the SDK polls
+    /// a quote on every tick only until its provider expiry; after that, once per ten minutes
+    /// (<c>RECEIVE_EXPIRED_PROBE_SECS</c>) until it gives up a day later. A quote past
+    /// <see cref="StablecoinPayments.OfferedUntil"/> is also no longer shown to anyone. Counting every quote in the
+    /// two-day match window let an anonymous caller — fifty invoices, ten quotes each — switch a store's USDC and
+    /// USDT off for two days; now holding the cap takes minting quotes continuously against the checkout's rate
+    /// limit. Quotes past their offer still count for attribution: the fingerprint check reads the whole window.
+    /// </remarks>
+    private StablecoinQuoteResult? StoreBusy(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        IReadOnlyList<StablecoinQuote> open,
+        DateTimeOffset now)
+    {
+        var offered = open.Count(q => StablecoinPayments.OfferedUntil(q.ExpiresAt) > now);
+        if (offered < StablecoinPayments.MaxOpenQuotesPerStore)
+            return null;
+
+        _logger.LogWarning(
+            "Store {StoreId}: refusing a new {Asset} quote for invoice {InvoiceId}; the store already has {Offered} "
+            + "unsettled quotes on offer to payers",
+            invoice.StoreId, asset.Symbol, invoice.InvoiceId, offered);
+        return StablecoinQuoteResult.Refused(
+            $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
+    }
+
+    private static bool OnRoute(StablecoinQuote quote, SparkCrossChainReceiveRoute route) =>
+        StablecoinPayments.Same(quote.Chain, route.Chain)
+        && StablecoinPayments.Same(quote.Asset, route.Asset)
+        && StablecoinPayments.Same(quote.ContractAddress, route.ContractAddress);
+
+    /// <summary>One provider quote for <paramref name="amount"/>, or the sentence the payer is shown instead.</summary>
+    private async Task<(SparkCrossChainReceiveQuote? Quote, StablecoinQuoteResult? Refusal)> RequestQuoteAsync(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinNetworkOption network,
+        SparkCrossChainReceiveRoute route,
+        ISparkSdkClient sdk,
+        BigInteger amount,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            quote = await sdk
+            var quote = await sdk
                 .ReceiveCrossChainAsync(route, amount, StablecoinPayments.MaxSlippageBps, cancellationToken)
                 .WaitAsync(StablecoinPayments.QuoteDeadline, _time, cancellationToken)
                 .ConfigureAwait(false);
+            return (quote, null);
         }
         catch (TimeoutException)
         {
-            return StablecoinQuoteResult.Refused(
-                $"Spark took too long to quote {asset.Symbol} on {network.Name}. Try again, or pick another network.");
+            return (null, StablecoinQuoteResult.Refused(
+                $"Spark took too long to quote {asset.Symbol} on {network.Name}. Try again, or pick another network."));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -438,95 +656,73 @@ public sealed class StablecoinPaymentService
             _logger.LogInformation(
                 "Store {StoreId}: could not quote {Asset} on {Chain} for invoice {InvoiceId} ({Reason})",
                 invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId, reason);
-            // The two typed refusals get the payer's own sentence; the provider's words, written for the integrator,
-            // are in the log line above. Anything else is relayed, scrubbed, as the provider put it.
-            return StablecoinQuoteResult.Refused(
+            // The payer only ever reads the plugin's own sentences; the provider's words are in the log line above.
+            // They are written for the integrator, and relaying even a scrubbed error to an anonymous checkout hands
+            // whoever holds an invoice link the provider's and the SDK's internals.
+            return (null, StablecoinQuoteResult.Refused(
                 SparkErrors.AmountOutOfRange(ex) is { } range
-                    ? OutOfRange(asset, network.Name, range, decimals, amount)
+                    ? OutOfRange(asset, network.Name, range, (int)route.Decimals, amount)
                     : SparkErrors.RouteUnavailable(ex) is { } temporary
                         ? temporary
                             ? $"{asset.Symbol} on {network.Name} is unavailable right now. Try again shortly, or choose another network."
                             : $"{asset.Symbol} on {network.Name} can't take this payment. Choose another network."
-                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}");
+                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now. Try again shortly, or choose another network."));
         }
+    }
 
-        // What the payer is asked for: the SDK's deposit at the prompt's precision, nudged by millionths when
-        // another live quote on this route already asks exactly that.
-        var rounded = StablecoinAmounts.RoundUpToDivisibility(quote.DepositAmount, decimals, StablecoinPayments.Divisibility);
-        var taken = open
-            .Where(q => StablecoinPayments.Same(q.Chain, route.Chain)
-                        && StablecoinPayments.Same(q.Asset, route.Asset)
-                        && StablecoinPayments.Same(q.ContractAddress, route.ContractAddress))
-            .Select(q => q.Asked)
-            .ToHashSet();
-        if (StablecoinAmounts.UniqueAsk(rounded, decimals, StablecoinPayments.Divisibility, taken) is not { } ask)
-        {
-            _logger.LogWarning(
-                "Store {StoreId}: every amount near {Amount} {Asset} on {Chain} is already asked for by a live "
-                + "quote; refusing another for invoice {InvoiceId}",
-                invoice.StoreId, StablecoinAmounts.Format(rounded, decimals), asset.Symbol, route.Chain,
-                invoice.InvoiceId);
-            return StablecoinQuoteResult.Refused(
-                $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
-        }
+    private static StablecoinQuote NewRecord(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        SparkCrossChainReceiveRoute route,
+        SparkCrossChainReceiveQuote quote,
+        BigInteger ask,
+        decimal fee,
+        DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid().ToString("N"),
+        StoreId = invoice.StoreId,
+        InvoiceId = invoice.InvoiceId,
+        PaymentMethodId = asset.PaymentMethodId.ToString(),
+        Chain = route.Chain,
+        ChainId = route.ChainId,
+        Asset = route.Asset,
+        ContractAddress = route.ContractAddress,
+        Decimals = (int)route.Decimals,
+        DepositAddress = quote.DepositAddress,
+        DepositBaseUnits = StablecoinQuote.FormatBaseUnits(quote.DepositAmount),
+        AskedBaseUnits = StablecoinQuote.FormatBaseUnits(ask),
+        PaymentRequest = PaymentRequestFor(route, quote.DepositAddress, ask),
+        DueAmount = invoice.Due,
+        FeeAmount = fee,
+        ExpectedReceivedBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ExpectedReceivedAmount),
+        DestinationAsset = quote.DestinationAsset,
+        ServiceFeeBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ServiceFeeAmount),
+        ServiceFeeAsset = quote.ServiceFeeAsset,
+        CreatedAt = now,
+        ExpiresAt = quote.ExpiresAt
+    };
 
-        var asked = StablecoinAmounts.FromBaseUnits(ask, decimals, StablecoinPayments.Divisibility);
-        var fee = Math.Max(0m, asked - invoice.Due);
-        if (fee > invoice.Due * MaxFeeShareOfDue)
-        {
-            return StablecoinQuoteResult.Refused(string.Format(
-                CultureInfo.InvariantCulture,
-                "Paying from {0} would add {1} {2} in network costs to this payment. Choose a cheaper network.",
-                network.Name, fee, asset.Symbol));
-        }
-
-        var record = new StablecoinQuote
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            StoreId = invoice.StoreId,
-            InvoiceId = invoice.InvoiceId,
-            PaymentMethodId = paymentMethodId.ToString(),
-            Chain = route.Chain,
-            ChainId = route.ChainId,
-            Asset = route.Asset,
-            ContractAddress = route.ContractAddress,
-            Decimals = decimals,
-            DepositAddress = quote.DepositAddress,
-            DepositBaseUnits = StablecoinQuote.FormatBaseUnits(quote.DepositAmount),
-            AskedBaseUnits = StablecoinQuote.FormatBaseUnits(ask),
-            PaymentRequest = PaymentRequestFor(route, quote.DepositAddress, ask),
-            DueAmount = invoice.Due,
-            FeeAmount = fee,
-            ExpectedReceivedBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ExpectedReceivedAmount),
-            DestinationAsset = quote.DestinationAsset,
-            ServiceFeeBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ServiceFeeAmount),
-            ServiceFeeAsset = quote.ServiceFeeAsset,
-            CreatedAt = now,
-            ExpiresAt = quote.ExpiresAt
-        };
-
-        // Recorded before anyone is shown the address: the row is the only thing that will attribute a payment to
-        // it, so an address shown without one is money that arrives unattributable.
-        await _quotes.AddAsync(record, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Store {StoreId}: quoted {Amount} {Asset} on {Chain} for invoice {InvoiceId} (due {Due}, landing as {Destination})",
-            invoice.StoreId, StablecoinAmounts.Format(ask, decimals), asset.Symbol, route.Chain, invoice.InvoiceId,
-            invoice.Due, quote.DestinationAsset);
-
-        var active = ToActiveQuote(record);
-        await _invoices.ShowQuoteAsync(invoice.InvoiceId, paymentMethodId, active, cancellationToken)
+    private async Task<StablecoinQuoteResult> ShowAsync(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinQuote quote,
+        CancellationToken cancellationToken)
+    {
+        var shown = ToActiveQuote(quote);
+        await _invoices.ShowQuoteAsync(invoice.InvoiceId, asset.PaymentMethodId, shown, cancellationToken)
             .ConfigureAwait(false);
-        return new StablecoinQuoteResult(active, null);
+        return new StablecoinQuoteResult(shown, null);
     }
 
     /// <summary>
-    /// What the payer's wallet is handed: an EIP-681 token transfer on an EVM chain, the bare address elsewhere.
+    /// What the payer's wallet is handed by link: an EIP-681 token transfer on an EVM chain, the bare address
+    /// elsewhere. The QR code is the bare address everywhere — a scanner that does not read EIP-681 takes its first
+    /// address, the token contract, as the recipient.
     /// </summary>
     /// <remarks>
     /// Built here rather than taken from the SDK, because the SDK's URI carries the deposit it sized and the payer
-    /// is asked for <paramref name="ask"/> — rounded to the prompt's precision and possibly nudged — which is the
-    /// amount that keeps an exact payment attributable. Solana and Tron wallets do not honour their schemes'
+    /// is asked for <paramref name="ask"/>, rounded up to the prompt's precision, and a wallet handed the unrounded
+    /// 18-decimal deposit would send a hair less than the prompt says. Solana and Tron wallets do not honour their schemes'
     /// parameters reliably (the SDK's own reasoning), so those get the address alone and the amount is shown
     /// beside it.
     /// </remarks>
@@ -574,6 +770,19 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
+    /// The expiry every quote an arrival at <paramref name="arrivedAt"/> could have paid is after: the match window,
+    /// measured back from the arrival — or from now, for an arrival stamped in the future.
+    /// </summary>
+    private DateTimeOffset CandidatesExpiringAfter(DateTimeOffset arrivedAt)
+    {
+        var now = _time.GetUtcNow();
+        var from = arrivedAt < now ? arrivedAt : now;
+        return from < DateTimeOffset.MinValue + StablecoinPayments.MatchWindow
+            ? DateTimeOffset.MinValue
+            : from - StablecoinPayments.MatchWindow;
+    }
+
+    /// <summary>
     /// Settles and credits one inbound payment if it is a completed cross-chain receive this plugin quoted.
     /// Safe to call any number of times for the same payment, from any path.
     /// </summary>
@@ -611,15 +820,16 @@ public sealed class StablecoinPaymentService
                 : StablecoinReceiveOutcome.AlreadyCredited;
         }
 
-        // Re-evaluated every time rather than remembered as lost: an arrival that fitted two quotes equally well
-        // becomes attributable once the other of them is settled by its own exact payment. Only the report is
-        // remembered, so the operator hears about each one once.
+        // Re-evaluated every time rather than remembered as lost, so a verdict reached before the quote row was
+        // readable is not final; the window is the arrival's own (see StablecoinQuoteMatcher), so the passing of
+        // time cannot turn an ambiguous arrival into a match. Only the report is remembered, so the operator hears
+        // about each one once.
         openQuotes ??= (await _quotes
-                .ListOpenAsync(storeId, _time.GetUtcNow() - StablecoinPayments.MatchWindow, cancellationToken)
+                .ListOpenAsync(storeId, CandidatesExpiringAfter(payment.Timestamp), cancellationToken)
                 .ConfigureAwait(false))
             .ToList();
 
-        var match = StablecoinQuoteMatcher.Match(openQuotes, conversion);
+        var match = StablecoinQuoteMatcher.Match(openQuotes, conversion, payment.Timestamp);
         if (match is not { Kind: StablecoinMatchKind.Matched, Quote: { } quote })
         {
             ReportUnattributed(storeId, payment, conversion, match);
@@ -654,6 +864,7 @@ public sealed class StablecoinPaymentService
         }
 
         openQuotes.Remove(quote);
+        ForgetUnattributed(storeId, payment.SdkPaymentId);
 
         _logger.LogInformation(
             "Store {StoreId}: {Asset} payment on {Chain} (Spark payment {SdkPaymentId}) settled quote {QuoteId} "
@@ -666,13 +877,73 @@ public sealed class StablecoinPaymentService
         return await CreditAsync(fresh ?? quote, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// How far short of its quote's estimate a delivery landing as sats may fall and still read as the quote paid in
+    /// full, in basis points — when the provider has not said what was deposited (see <see cref="CreditedBaseUnits"/>).
+    /// </summary>
+    /// <remarks>
+    /// Wide, because a sats delivery moves with the bitcoin price: the provider reprices a deposit made after the
+    /// quote's two-minute price, and the SDK watches for one for a day. A token delivery is at dollar parity and gets
+    /// the quote's own slippage budget (<see cref="StablecoinPayments.MaxSlippageBps"/>) instead.
+    /// </remarks>
+    internal const int SatsDeliveryToleranceBps = 1_000;
+
+    /// <summary>
+    /// What a settled quote's payer is taken to have deposited, in route base units — the amount its invoice is
+    /// credited with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The deposit the SDK reports is not always the deposit.</b> <c>assetAmountIn</c> is the provider order's
+    /// <c>amountIn</c> when the order carries one, and the <em>quote-time</em> deposit when it does not
+    /// (<c>build_orchestra_receive_conversion_info</c> falls back to the row's own <c>amount_in</c>; the SDK's
+    /// completed-receive fixture has no <c>amountIn</c> at all). So a reported amount equal to
+    /// <see cref="StablecoinQuote.DepositBaseUnits"/> is indistinguishable from no report, and is read as one.
+    /// Crediting it as sent recorded a hair less than the payer was asked for on an 18-decimal route, where the ask is
+    /// the deposit rounded <em>up</em> to six decimals, and a correctly paid BSC invoice read as partly paid.
+    /// </para>
+    /// <para>
+    /// <b>The rules.</b> A reported amount that is not the quote-time deposit is the provider's word on what arrived,
+    /// and is credited as it is. Anything else means "the payer paid this quote", and is credited as the amount
+    /// they were asked for — unless what reached the wallet says otherwise: a delivery short of the quote's estimate
+    /// by more than a price move explains (<see cref="SatsDeliveryToleranceBps"/> for sats, the slippage budget for a
+    /// token at par) is credited in proportion to what was delivered, rounded down, because then the ask is the one
+    /// thing the payer certainly did not send.
+    /// </para>
+    /// </remarks>
+    internal static BigInteger CreditedBaseUnits(StablecoinQuote quote)
+    {
+        ArgumentNullException.ThrowIfNull(quote);
+
+        var asked = quote.Asked;
+        if (quote.PaidBaseUnits is { } reported
+            && StablecoinQuote.ParseBaseUnits(reported) is var paid
+            && paid != StablecoinQuote.ParseBaseUnits(quote.DepositBaseUnits))
+        {
+            return paid;
+        }
+
+        var expected = quote.ExpectedReceived;
+        if (quote.DeliveredBaseUnits is null || expected <= BigInteger.Zero)
+            return asked;
+
+        var delivered = StablecoinQuote.ParseBaseUnits(quote.DeliveredBaseUnits);
+        var toleranceBps = string.Equals(quote.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase)
+            ? SatsDeliveryToleranceBps
+            : (int)StablecoinPayments.MaxSlippageBps;
+        if (delivered * 10_000 >= expected * (10_000 - toleranceBps))
+            return asked;
+
+        return BigInteger.Min(asked, asked * delivered / expected);
+    }
+
     /// <summary>Records a settled quote's payment on its BTCPay invoice, and marks it recorded.</summary>
     private async Task<StablecoinReceiveOutcome> CreditAsync(StablecoinQuote quote, CancellationToken cancellationToken)
     {
         if (quote.SdkPaymentId is not { } paymentId)
             return StablecoinReceiveOutcome.CreditFailed;
 
-        var paid = quote.PaidBaseUnits is null ? quote.Asked : StablecoinQuote.ParseBaseUnits(quote.PaidBaseUnits);
+        var paid = CreditedBaseUnits(quote);
         var value = StablecoinAmounts.FromBaseUnits(paid, quote.Decimals, StablecoinPayments.Divisibility);
         // The quote's own network cost, so a payer who sent exactly what was asked settles exactly the due. Capped
         // at what arrived: a deposit below the cost is still a payment, of nothing net.
@@ -704,12 +975,15 @@ public sealed class StablecoinPaymentService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex,
+            _logger.Log(CreditFailureLevel(quote.Id), ex,
                 "Store {StoreId}: could not record the {Asset} payment {SdkPaymentId} on invoice {InvoiceId} yet; "
                 + "it is retried on the next reconciliation pass",
                 quote.StoreId, quote.Asset, paymentId, quote.InvoiceId);
             return StablecoinReceiveOutcome.CreditFailed;
         }
+
+        if (outcome is StablecoinCreditOutcome.CreditedNow or StablecoinCreditOutcome.AlreadyRecorded)
+            _creditFailureWarned.TryRemove(quote.Id, out _);
 
         switch (outcome)
         {
@@ -725,7 +999,7 @@ public sealed class StablecoinPaymentService
                 return StablecoinReceiveOutcome.AlreadyCredited;
 
             default:
-                _logger.LogWarning(
+                _logger.Log(CreditFailureLevel(quote.Id),
                     "Store {StoreId}: the {Asset} payment {SdkPaymentId} ({Value}) matched invoice {InvoiceId}, but it "
                     + "could not be recorded there ({Outcome}). The money is in the Spark wallet; the plugin keeps "
                     + "retrying for {Days} days",
@@ -733,6 +1007,28 @@ public sealed class StablecoinPaymentService
                     CreditRetryHorizon.TotalDays);
                 return StablecoinReceiveOutcome.CreditFailed;
         }
+    }
+
+    /// <summary>How often one quote's failing credit is reported at warning level; in between, at debug.</summary>
+    internal static readonly TimeSpan CreditFailureWarningInterval = TimeSpan.FromHours(6);
+
+    /// <summary>When each failing credit was last reported at warning level.</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _creditFailureWarned = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Warning the first time a quote's credit fails and every <see cref="CreditFailureWarningInterval"/> after,
+    /// debug otherwise. The retry runs every pass for a week, and a credit that cannot land (the invoice deleted, its
+    /// prompt gone) would otherwise write a warning a minute for all of it — per quote.
+    /// </summary>
+    private LogLevel CreditFailureLevel(string quoteId)
+    {
+        var now = _time.GetUtcNow();
+        if (_creditFailureWarned.Count > 10_000)
+            _creditFailureWarned.Clear();
+        if (_creditFailureWarned.TryGetValue(quoteId, out var last) && now - last < CreditFailureWarningInterval)
+            return LogLevel.Debug;
+        _creditFailureWarned[quoteId] = now;
+        return LogLevel.Warning;
     }
 
     private void ReportUnattributed(
@@ -746,9 +1042,19 @@ public sealed class StablecoinPaymentService
         if (!_reportedUnattributed.TryAdd(payment.SdkPaymentId, 0))
             return;
 
-        var paid = conversion.AssetAmountIn is { } amount
-            ? StablecoinAmounts.Format(amount, (int)conversion.AssetDecimals)
-            : "an unreported amount of";
+        var amount = conversion.AssetAmountIn is { } units
+            ? StablecoinAmounts.Format(units, (int)conversion.AssetDecimals)
+            : null;
+        RememberUnattributed(storeId, new StablecoinUnattributedArrival(
+            payment.SdkPaymentId,
+            conversion.Asset ?? "stablecoin",
+            conversion.Chain is { Length: > 0 } chain ? StablecoinPayments.ChainName(chain) : "an unknown network",
+            amount,
+            conversion.ExternalTxHash,
+            match.Kind is StablecoinMatchKind.Ambiguous ? match.Candidates : 0,
+            payment.Timestamp));
+
+        var paid = amount ?? "an unreported amount of";
         _logger.LogWarning(
             "Store {StoreId}: received {Paid} {Asset} on {Chain} (Spark payment {SdkPaymentId}, payer transaction "
             + "{ExternalTxHash}) that {Reason}. It is in the Spark wallet and has not been recorded on any invoice; "
@@ -758,6 +1064,101 @@ public sealed class StablecoinPaymentService
             match.Kind is StablecoinMatchKind.Ambiguous
                 ? $"fits {match.Candidates} open quotes equally well"
                 : "matches none of this store's open quotes");
+    }
+
+    #endregion
+
+    #region What the store owner should know
+
+    /// <summary>The arrivals each store's page lists, newest last, at most <see cref="MaxRememberedPerStore"/> each.</summary>
+    private readonly Dictionary<string, List<StablecoinUnattributedArrival>> _unattributed = new(StringComparer.Ordinal);
+
+    internal const int MaxRememberedPerStore = 20;
+
+    /// <summary>How long after settling a credit that has not landed is shown to the store, rather than left to the retry.</summary>
+    internal static readonly TimeSpan UncreditedNoticeAfter = TimeSpan.FromMinutes(15);
+
+    private void RememberUnattributed(string storeId, StablecoinUnattributedArrival arrival)
+    {
+        lock (_unattributed)
+        {
+            if (!_unattributed.TryGetValue(storeId, out var list))
+            {
+                if (_unattributed.Count >= MaxStoresPerPass * 2)
+                    _unattributed.Clear();
+                _unattributed[storeId] = list = [];
+            }
+
+            list.RemoveAll(a => a.SdkPaymentId == arrival.SdkPaymentId);
+            list.Add(arrival);
+            if (list.Count > MaxRememberedPerStore)
+                list.RemoveRange(0, list.Count - MaxRememberedPerStore);
+        }
+    }
+
+    private void ForgetUnattributed(string storeId, string sdkPaymentId)
+    {
+        lock (_unattributed)
+        {
+            if (_unattributed.TryGetValue(storeId, out var list))
+                list.RemoveAll(a => a.SdkPaymentId == sdkPaymentId);
+        }
+    }
+
+    /// <summary>
+    /// The USDC/USDT money in a store's wallet that is on no invoice: arrivals nothing could attribute, and
+    /// payments that matched an invoice but could not be recorded on it. Never throws.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the store needs to hear this.</b> Both are real money a human has to place by hand, and until now they
+    /// were a warning in the server log — which on a shared server the store owner never sees. The Flint status page
+    /// shows them (<c>Views/Shared/Spark/StablecoinAttention.cshtml</c>), once each, without anything being sent.
+    /// </para>
+    /// <para>
+    /// <b>Arrivals are remembered in memory, bounded per store.</b> Nothing stores an arrival that matched no quote,
+    /// and adding a table for a notice is more than it is worth: after a restart the reconciliation pass reports each
+    /// one again for as long as it is inside an open quote's window, which is where it can still be matched by hand
+    /// from the invoice it belongs to. Uncredited payments are read from the quote table, so they survive restarts
+    /// and are counted however old.
+    /// </para>
+    /// </remarks>
+    public async Task<StablecoinAttention> GetAttentionAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(storeId) || !Available)
+            return StablecoinAttention.None;
+
+        IReadOnlyList<StablecoinUnattributedArrival> arrivals;
+        lock (_unattributed)
+            arrivals = _unattributed.TryGetValue(storeId, out var list) ? [.. list] : [];
+
+        try
+        {
+            var count = await _quotes.CountUncreditedAsync(storeId, cancellationToken).ConfigureAwait(false);
+            if (count == 0)
+                return new StablecoinAttention(arrivals, [], 0);
+
+            var noticeBefore = _time.GetUtcNow() - UncreditedNoticeAfter;
+            var uncredited = (await _quotes
+                    .ListUncreditedAsync(storeId, DateTimeOffset.MinValue, MaxRememberedPerStore, cancellationToken)
+                    .ConfigureAwait(false))
+                .Where(q => q.SettledAt is { } at && at < noticeBefore)
+                .Select(q => new StablecoinUncreditedPayment(
+                    q.InvoiceId,
+                    q.Asset,
+                    StablecoinPayments.ChainName(q.Chain),
+                    StablecoinAmounts.Format(CreditedBaseUnits(q), q.Decimals),
+                    q.SdkPaymentId!,
+                    q.SettledAt!.Value))
+                .ToList();
+            // The count covers what the list, bounded, leaves out; below the bound the list is the count.
+            return new StablecoinAttention(arrivals, uncredited, count > MaxRememberedPerStore ? count : uncredited.Count);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Store {StoreId}: could not read the USDC/USDT payments awaiting a credit", storeId);
+            return new StablecoinAttention(arrivals, [], 0);
+        }
     }
 
     #endregion
@@ -778,7 +1179,9 @@ public sealed class StablecoinPaymentService
                 .ListStoresWithOpenQuotesAsync(now - StablecoinPayments.MatchWindow, cancellationToken)
                 .ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
-        var creditStores = await _quotes.ListStoresAwaitingCreditAsync(cancellationToken).ConfigureAwait(false);
+        var creditStores = await _quotes
+            .ListStoresAwaitingCreditAsync(now - CreditRetryHorizon, cancellationToken)
+            .ConfigureAwait(false);
 
         await PruneAsync(now, cancellationToken).ConfigureAwait(false);
 
@@ -827,9 +1230,9 @@ public sealed class StablecoinPaymentService
     {
         var credited = 0;
         var pending = await _quotes
-            .ListUncreditedAsync(storeId, MaxCreditsPerStorePerPass, cancellationToken)
+            .ListUncreditedAsync(storeId, now - CreditRetryHorizon, MaxCreditsPerStorePerPass, cancellationToken)
             .ConfigureAwait(false);
-        foreach (var quote in pending.Where(q => q.SettledAt is not { } at || now - at <= CreditRetryHorizon))
+        foreach (var quote in pending)
         {
             if (await CreditAsync(quote, cancellationToken).ConfigureAwait(false) is StablecoinReceiveOutcome.Credited)
                 credited++;
@@ -838,52 +1241,137 @@ public sealed class StablecoinPaymentService
         return credited;
     }
 
+    /// <summary>
+    /// The two kinds of payment a cross-chain receive arrives as: a Spark transfer of sats, or a token transfer of
+    /// the store's Stable Balance token. Listed separately because the SDK can filter storage by either but not by
+    /// "has cross-chain details", and not by both at once.
+    /// </summary>
+    private static readonly SparkPaymentMethod[] ScanRails = [SparkPaymentMethod.Spark, SparkPaymentMethod.Token];
+
+    /// <summary>Where each store's sweep of each rail resumes: the window it was walking, and how far it got.</summary>
+    private readonly ConcurrentDictionary<(string StoreId, SparkPaymentMethod Rail), (DateTimeOffset From, int Offset)>
+        _scanResume = new();
+
+    /// <summary>
+    /// Credits what the event stream dropped: every completed cross-chain receive in the window of the store's
+    /// open quotes, bounded per pass.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Only the rails a cross-chain receive can arrive on.</b> The window reaches back to the oldest open quote —
+    /// two days and more — and a store's Lightning receives in that time can be thousands. Reading them all to find
+    /// the few cross-chain ones pushed a dropped event past the page limit on a busy store for up to two days, so the
+    /// scan asks the SDK for Spark transfers and token payments only.
+    /// </para>
+    /// <para>
+    /// <b>Newest first, then a resumable sweep.</b> Each rail's newest page is read on every pass, because a dropped
+    /// event is most likely a recent one. Then the sweep walks the window oldest first for at most
+    /// <see cref="MaxScanPages"/> pages and remembers where it stopped, so a window longer than one pass's budget is
+    /// covered over several passes instead of re-reading its first pages forever. Seeing a payment twice costs a
+    /// lookup; crediting is idempotent.
+    /// </para>
+    /// </remarks>
     private async Task<int> ScanStoreAsync(string storeId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
         if (sdk is null)
             return 0;
 
-        var open = (await _quotes
-                .ListOpenAsync(storeId, now - StablecoinPayments.MatchWindow, cancellationToken)
+        var open = await _quotes
+            .ListOpenAsync(storeId, now - StablecoinPayments.MatchWindow, cancellationToken)
+            .ConfigureAwait(false);
+        if (open.Count == 0)
+        {
+            foreach (var rail in ScanRails)
+                _scanResume.TryRemove((storeId, rail), out _);
+            return 0;
+        }
+
+        // From the oldest quote that could still be paid: nothing earlier can be one of them. Matched against every
+        // quote an arrival that early could have paid, which reaches further back than the quotes open now; see
+        // StablecoinQuoteMatcher on why the window is the arrival's.
+        var from = open.Min(q => q.CreatedAt) - ScanSlack;
+        var candidates = (await _quotes
+                .ListOpenAsync(storeId, CandidatesExpiringAfter(from), cancellationToken)
                 .ConfigureAwait(false))
             .ToList();
-        if (open.Count == 0)
-            return 0;
 
-        // Oldest first from the oldest quote that could still be paid: nothing earlier can be one of them.
-        var from = open.Min(q => q.CreatedAt) - ScanSlack;
         var credited = 0;
-        for (var page = 0; page < MaxScanPages && open.Count > 0; page++)
+        foreach (var rail in ScanRails)
         {
-            var payments = await sdk
-                .ListPaymentsAsync(
-                    new SparkListPaymentsQuery(
-                        SparkPaymentDirection.Receive,
-                        CompletedOnly: true,
-                        From: from,
-                        Offset: page * ScanPageSize,
-                        Limit: ScanPageSize,
-                        Ascending: true),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            if (candidates.Count == 0)
+                break;
 
-            foreach (var payment in payments)
+            var (recent, _) = await ScanPageAsync(
+                    storeId, sdk, rail, from, 0, ascending: false, candidates, cancellationToken)
+                .ConfigureAwait(false);
+            credited += recent;
+
+            var key = (storeId, rail);
+            var offset = _scanResume.TryGetValue(key, out var resume) && resume.From == from ? resume.Offset : 0;
+            var finished = false;
+            for (var page = 0; page < MaxScanPages && candidates.Count > 0; page++)
             {
-                if (payment.Conversion is not { Provider: SparkCrossChainProvider.Orchestra, Status: SparkConversionStatus.Completed })
-                    continue;
-                if (await TryCreditAsync(storeId, payment, open, cancellationToken).ConfigureAwait(false)
-                    is StablecoinReceiveOutcome.Credited)
+                var (count, read) = await ScanPageAsync(
+                        storeId, sdk, rail, from, offset, ascending: true, candidates, cancellationToken)
+                    .ConfigureAwait(false);
+                credited += count;
+                offset += read;
+                if (read < ScanPageSize)
                 {
-                    credited++;
+                    finished = true;
+                    break;
                 }
             }
 
-            if (payments.Count < ScanPageSize)
-                break;
+            if (finished)
+                _scanResume.TryRemove(key, out _);
+            else
+                _scanResume[key] = (from, offset);
         }
 
         return credited;
+    }
+
+    /// <summary>One page of one rail: how many it credited, and how many payments it read.</summary>
+    private async Task<(int Credited, int Read)> ScanPageAsync(
+        string storeId,
+        ISparkSdkClient sdk,
+        SparkPaymentMethod rail,
+        DateTimeOffset from,
+        int offset,
+        bool ascending,
+        List<StablecoinQuote> candidates,
+        CancellationToken cancellationToken)
+    {
+        var payments = await sdk
+            .ListPaymentsAsync(
+                new SparkListPaymentsQuery(
+                    SparkPaymentDirection.Receive,
+                    CompletedOnly: true,
+                    From: from,
+                    Offset: offset,
+                    Limit: ScanPageSize,
+                    Ascending: ascending,
+                    Method: rail),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var credited = 0;
+        foreach (var payment in payments)
+        {
+            if (candidates.Count == 0)
+                break;
+            if (payment.Conversion is not { Provider: SparkCrossChainProvider.Orchestra, Status: SparkConversionStatus.Completed })
+                continue;
+            if (await TryCreditAsync(storeId, payment, candidates, cancellationToken).ConfigureAwait(false)
+                is StablecoinReceiveOutcome.Credited)
+            {
+                credited++;
+            }
+        }
+
+        return (credited, payments.Count);
     }
 
     #endregion

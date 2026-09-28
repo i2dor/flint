@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -858,9 +860,54 @@ public class SparkController : Controller
             // because the plugin refreshes this file on its own as the wallet's leaves change — this page is
             // showing the operator how current the automation is, not asking whether they want a backup.
             ExitStateBackupTakenAt = Constants.UnilateralExitEnabled
-                ? await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
-                : null
+                ? await ReadBackupTakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
+                : null,
+            PendingExitStateBackups = Constants.UnilateralExitEnabled
+                ? await ReadPendingBackupsAsync(storeId, cancellationToken).ConfigureAwait(false)
+                : []
         };
+    }
+
+    /// <summary>
+    /// The backups waiting to be imported, or none when that cannot be read. Never throws, for the reason
+    /// <see cref="ReadBackupTakenAtAsync"/> gives.
+    /// </summary>
+    private async Task<IReadOnlyList<PendingExitStateBackup>> ReadPendingBackupsAsync(
+        string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _exitStateBackupStore.ListPendingAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: could not list the exit-state backups waiting to be imported", storeId);
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// When the stored exit-state backup was written, or null when none is — or when that cannot be read.
+    /// </summary>
+    /// <remarks>
+    /// Never throws: every Advanced-page action renders through <see cref="BuildAdvancedViewModel"/>, and a
+    /// filesystem fault reading one timestamp must not take the page — or, through BTCPay's plugin
+    /// exception handler, the plugin — down with it. A read that failed is logged and shown as "none
+    /// stored", which the Download action then re-checks for itself.
+    /// </remarks>
+    private async Task<DateTimeOffset?> ReadBackupTakenAtAsync(string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: could not read when its exit-state backup was written", storeId);
+            return null;
+        }
     }
 
     #endregion
@@ -969,8 +1016,30 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         return View(BuildExitViewModel(storeId, page, settings));
+    }
+
+    /// <summary>
+    /// The store's settings for the exit page's own inputs, or null when they could not be read.
+    /// </summary>
+    /// <remarks>
+    /// Read only to pre-fill the explorer box, so a failure here costs an empty box and nothing else — and a
+    /// throw on this GET would cost the whole plugin: BTCPay 2.4 disables a plugin and restarts the server on an
+    /// unhandled exception from one of its requests. The service's own read of the same settings is guarded the
+    /// same way, and the page it returns already says when the store could not be read.
+    /// </remarks>
+    private async Task<SparkSettings?> ReadSettingsForExitPageAsync(string storeId)
+    {
+        try
+        {
+            return await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not read its settings for the exit page", storeId);
+            return null;
+        }
     }
 
     /// <summary>
@@ -1041,15 +1110,22 @@ public class SparkController : Controller
     /// Builds and signs the exit against the funding that has arrived. Broadcasts nothing.
     /// </summary>
     /// <remarks>
-    /// Safe to post again after a failure, and the page says so: the service re-discovers the funding UTXOs and
-    /// re-quotes the record's own leaves each time, so a build that failed for want of funding succeeds once
-    /// more has been sent, and steps already confirmed on-chain are skipped rather than rebuilt.
+    /// Safe to post again after a failure, and the page says so: the service re-quotes the record's own leaves
+    /// each time and, once a build has succeeded, hands the SDK the funding it committed to follow alongside
+    /// anything new on the address — so a build that failed for want of funding succeeds once more has been
+    /// sent, a rebuild never asks for the first funding twice, and steps already confirmed on-chain are skipped
+    /// rather than rebuilt.
     /// </remarks>
     [HttpPost("exit/build")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    /// <param name="feeRateSatPerVbyte">
+    /// Empty rebuilds at the record's rate; a value re-prices the build — the page's fee bump. Whether it is
+    /// allowed is the service's judgement.
+    /// </param>
     public async Task<IActionResult> BuildExit(
         [FromRoute] string storeId,
         string recordId,
+        long? feeRateSatPerVbyte,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1061,7 +1137,7 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .BuildAsync(storeId, recordId, cancellationToken)
+            .BuildAsync(storeId, recordId, feeRateSatPerVbyte, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(
@@ -1109,7 +1185,7 @@ public class SparkController : Controller
             .ConfigureAwait(false);
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         var model = BuildExitViewModel(storeId, page, settings);
 
         // Read after the write, so the banner and the table describe the same moment. Verdict is not
@@ -1140,13 +1216,11 @@ public class SparkController : Controller
     /// collected while Spark was still reachable is the only kind that works with the operators gone.
     /// </para>
     /// <para>
-    /// <b>This is the one action in the controller that resolves the store's live wallet itself</b>, because
-    /// the export has no service method — <see cref="ISparkUnilateralExitService"/> exposes the check and the
-    /// backup <em>store</em>, not the export, and the exit service is the wrong owner for an operation that is
-    /// about the wallet rather than one exit. It goes through <see cref="ISparkStoreRuntime"/>, the same seam
-    /// every service uses, so no SDK type is opened here: a null client is the ordinary "your wallet is not
-    /// running" answer and is reported as one, and any failure from the call is relayed through
-    /// <see cref="SparkErrors.Describe"/> exactly as the exit service relays its own.
+    /// <b>The export and its storing are <see cref="ISparkStoreRuntime.ExportExitStateAsync"/>'s</b>, not this
+    /// action's: storing the wallet's own export is the same write the automatic pass makes, with the same
+    /// rules — it waits for the connect's restore (which may be reading the file this would replace), it keeps
+    /// a different wallet's backup aside instead of overwriting it, and it is bounded. This action renders
+    /// what came back, and never throws.
     /// </para>
     /// </remarks>
     [HttpPost("advanced/exit-state/export")]
@@ -1171,45 +1245,33 @@ public class SparkController : Controller
         // Rendering rather than redirecting on every outcome, so the operator stays on the section they
         // pressed the button in and the blob (when there is one) is never re-served by a replay of a
         // redirect target.
-        var sdk = await _storeRuntime.GetSdkClientAsync(storeId).ConfigureAwait(false);
-        if (sdk is null)
-        {
-            TempData[WellKnownTempData.ErrorMessage] =
-                "This store's Spark wallet is not running, so its exit data cannot be read. Start the wallet "
-                + "and export again.";
-            return View("Advanced", model);
-        }
-
+        ExitStateExportResult export;
         try
         {
-            model.ExportedExitState = await sdk
-                .ExportUnilateralExitStateAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            // The same blob goes into the store, so the copy the operator just read and the copy the plugin
-            // keeps cannot disagree. Without this, pressing Export would hand out bytes *newer* than the
-            // stored backup and leave the page's "last taken" stamp behind them — which is precisely the
-            // staleness the automatic refresh exists to remove, reintroduced by the button that reads the
-            // wallet directly.
-            if (model.ExportedExitState is { Length: > 0 } exported)
-            {
-                await _exitStateBackupStore.WriteAsync(storeId, exported, cancellationToken)
-                    .ConfigureAwait(false);
-                model.ExitStateBackupTakenAt = await _exitStateBackupStore
-                    .TakenAtAsync(storeId, cancellationToken)
-                    .ConfigureAwait(false);
-            }
+            export = await _storeRuntime.ExportExitStateAsync(storeId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            // The message is the SDK's own, put through the same scrubber every other SDK failure goes
-            // through: this path prints its result into a page, so an unscrubbed payload would be a leak with
-            // a textarea around it.
-            _logger.LogWarning(ex, "Store {StoreId}: could not export unilateral-exit state", storeId);
-            TempData[WellKnownTempData.ErrorMessage] =
-                "Spark could not export this wallet's exit data: " + SparkErrors.Describe(ex)
-                + ". Nothing was changed; try again, and check the server log if it keeps failing.";
+            // The runtime reports its own failures; this is the backstop an action needs, because an
+            // exception out of it disables the plugin.
+            _logger.LogWarning(
+                "Store {StoreId}: exporting its exit state failed unexpectedly ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            export = new ExitStateExportResult(null, false,
+                "The exit data could not be exported. Check the server log.");
         }
+
+        if (export.Error is { } error)
+        {
+            TempData[WellKnownTempData.ErrorMessage] = error;
+            return View("Advanced", model);
+        }
+
+        model.ExportedExitState = export.ExitState;
+        if (export.Stored)
+            model.ExitStateBackupTakenAt = await ReadBackupTakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+        else if (export.NotStoredReason is { } notStored)
+            TempData[WellKnownTempData.ErrorMessage] = notStored;
 
         return View("Advanced", model);
     }
@@ -1221,7 +1283,7 @@ public class SparkController : Controller
     /// <para>
     /// The automatic refresh means an operator never has to remember to take a backup; this is how they
     /// still <i>get</i> one off this server, which is the only thing that makes the automatic copy worth
-    /// anything. It serves whatever is stored — the same bytes the next restart will import — rather than
+    /// anything. It serves the automatic backup as stored — the wallet's own latest export — rather than
     /// exporting afresh, so what lands on disk is exactly what the plugin is holding.
     /// </para>
     /// <para>
@@ -1262,8 +1324,30 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
-        var backup = await _exitStateBackupStore.OpenReadAsync(storeId, cancellationToken)
-            .ConfigureAwait(false);
+        // Never throws. An unhandled exception out of a plugin action is what BTCPay's plugin exception
+        // handler answers by disabling the plugin and restarting the server, and this action's failures
+        // are ordinary filesystem ones — a file the process cannot open, a disk error. They become a
+        // message on the page the operator pressed the button on.
+        Stream? backup;
+        DateTimeOffset? takenAt;
+        try
+        {
+            backup = await _exitStateBackupStore.OpenReadAsync(storeId, cancellationToken)
+                .ConfigureAwait(false);
+            takenAt = backup is null
+                ? null
+                : await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The exception is a filesystem one and names a path, never the content.
+            _logger.LogWarning(ex, "Store {StoreId}: the stored exit-state backup could not be opened", storeId);
+            TempData[WellKnownTempData.ErrorMessage] =
+                "The stored exit-state backup could not be read, so nothing was downloaded. Check the server "
+                + "log for the reason; the file itself was left as it was.";
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
         if (backup is null)
         {
             TempData[WellKnownTempData.ErrorMessage] =
@@ -1271,8 +1355,6 @@ public class SparkController : Controller
                 + "wallet's leaves change; Export takes one now.";
             return RedirectToAction(nameof(Advanced), new { storeId });
         }
-
-        var takenAt = await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
 
         // The length and nothing else, as everywhere this blob is handled — and a file's length now,
         // in bytes, which is exactly the size of the artifact being handed over.
@@ -1290,16 +1372,95 @@ public class SparkController : Controller
     }
 
     /// <summary>
-    /// Stores a pasted exit-state blob, replacing whatever was there.
+    /// Downloads one backup that is waiting to be imported.
     /// </summary>
     /// <remarks>
-    /// The blob is written for the next restart to import, not imported now: an import overwrites the wallet's
-    /// view of its own chains, and doing it under a running wallet would race the SDK. Nothing here inspects
-    /// the string — whether it is a well-formed blob at all is the SDK's judgement at import time, and a
-    /// plugin-side shape check would only be a second, weaker parser in front of the real one.
+    /// The same rules as <see cref="DownloadExitStateBackup"/> — POST, not cacheable, streamed, never throws —
+    /// for the backups the automatic one is not: a paste that has not imported yet, or a stored backup whose
+    /// import failed. While one waits, the operator's own copy may be the only other one, so it can always be
+    /// taken off the server. The id comes from the form and is refused by the store unless it is one the
+    /// store generated, so it cannot name any other file.
+    /// </remarks>
+    [HttpPost("advanced/exit-state/pending/download")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> DownloadPendingExitStateBackup(
+        [FromRoute] string storeId,
+        [FromForm] string? pendingId,
+        CancellationToken cancellationToken)
+    {
+        if (!Constants.UnilateralExitEnabled)
+            return NotFound();
+
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        Stream? backup;
+        try
+        {
+            backup = string.IsNullOrEmpty(pendingId)
+                ? null
+                : await _exitStateBackupStore.OpenReadPendingAsync(storeId, pendingId, cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        catch (ArgumentException)
+        {
+            // Not an id the store ever generated: nothing to serve, and nothing worth a log line.
+            backup = null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: a queued exit-state backup could not be opened", storeId);
+            TempData[WellKnownTempData.ErrorMessage] =
+                "That backup could not be read, so nothing was downloaded. Check the server log for the reason.";
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
+        if (backup is null)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "That backup is no longer waiting to be imported — it has been imported or cleared since the page "
+                + "was loaded.";
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
+        _logger.LogInformation(
+            "Store {StoreId}: served a queued exit-state backup ({Length:N0} bytes)", storeId, backup.Length);
+
+        return new FileStreamResult(backup, "application/octet-stream")
+        {
+            FileDownloadName = $"exit-state-backup-{storeId}-pending-{pendingId}.txt"
+        };
+    }
+
+    /// <summary>
+    /// Queues a pasted exit-state blob for import and imports it into the running wallet straight away — or,
+    /// with the field empty, clears every stored backup.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Imported now, not at the next restart.</b> The deferral was justified as avoiding a race with the
+    /// running SDK, but the connect already imports into a running SDK — its import is built to merge into a
+    /// live wallet — and a backup left for a restart was one the next automatic pass could replace, with the
+    /// operator told it was safe. The paste goes to a queue no automatic pass writes, the import runs at once,
+    /// and the banner says what it did, in counts. When the wallet is not running, or the import fails, the
+    /// blob stays queued and every connect retries it.
+    /// </para>
+    /// <para>
+    /// Nothing here inspects the string — whether it is a well-formed blob at all is the SDK's judgement at
+    /// import time, and a plugin-side shape check would only be a second, weaker parser in front of the real
+    /// one.
+    /// </para>
     /// </remarks>
     [HttpPost("advanced/exit-state")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    [RequestFormLimits(
+        ValueLengthLimit = ExitStateFormLimitBytes,
+        MultipartBodyLengthLimit = ExitStateFormLimitBytes,
+        Order = BeforeAntiforgery)]
+    [RequestSizeLimit(ExitStateFormLimitBytes, Order = BeforeAntiforgery)]
     public async Task<IActionResult> SetExitStateBackup(
         [FromRoute] string storeId,
         SparkAdvancedViewModel vm,
@@ -1313,17 +1474,215 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
-        var result = await _unilateralExit
-            .SetExitStateBackupAsync(storeId, vm.ExitStateBackup, cancellationToken)
-            .ConfigureAwait(false);
+        var (pasted, refusal) = await ReadSubmittedBackupAsync(storeId, vm, cancellationToken).ConfigureAwait(false);
+        if (refusal is not null)
+        {
+            TempData[WellKnownTempData.ErrorMessage] = refusal;
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
 
-        RelayExitResult(
-            result,
-            string.IsNullOrWhiteSpace(vm.ExitStateBackup)
-                ? "No exit-state backup is stored for this store now, so a restart will not import one."
-                : "Exit-state backup stored. It is imported automatically when this store's wallet next "
-                  + "starts, so it must be one the wallet can use.");
+        UnilateralExitOpResult result;
+        try
+        {
+            result = await _unilateralExit
+                .SetExitStateBackupAsync(storeId, pasted, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The service reports its own failures as results; this is the backstop for anything it did
+            // not, because an exception out of this action disables the plugin. The type only: whatever
+            // threw was handed the pasted blob.
+            _logger.LogError(
+                "Store {StoreId}: saving an exit-state backup failed unexpectedly ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            result = new UnilateralExitOpResult(false,
+                "The exit-state backup could not be saved. Check the server log for the reason.", null);
+        }
+
+        if (!result.Success || string.IsNullOrWhiteSpace(pasted))
+        {
+            RelayExitResult(
+                result,
+                "No exit-state backup is stored or waiting for this store now. The plugin takes a fresh "
+                + "automatic backup on its next pass.");
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
+        ExitStateImportReport report;
+        try
+        {
+            report = await _storeRuntime.ImportPendingExitStateAsync(storeId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: importing a pasted exit-state backup failed unexpectedly ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            report = new ExitStateImportReport(ExitStateImportOutcome.Failed, Failed: 1);
+        }
+
+        RelayImportReport(report);
         return RedirectToAction(nameof(Advanced), new { storeId });
+    }
+
+    /// <summary>
+    /// The largest exit-state form this controller accepts, in bytes, whichever way it is posted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the action states its own form limits at all.</b> ASP.NET's defaults cap a single form value at
+    /// 4 MiB and a request body at about 30 MB, and the SDK documents a real wallet's export as reaching several
+    /// megabytes. A paste past 4 MiB therefore failed as a bare 400 long before the service's own
+    /// sixteen-million-character cap could say anything — and it failed inside the antiforgery check, which
+    /// reads the whole form before the action runs. A url-encoded post makes it worse: the export is JSON, and
+    /// every brace, quote and comma is sent as three characters.
+    /// </para>
+    /// <para>
+    /// Sixty-four MiB covers the service's cap even url-encoded, with room. The page posts multipart (so a
+    /// paste is sent as it is) and offers a file input as well. The service's character cap stays the real
+    /// bound; this only makes sure the request reaches it. Authorisation still runs first — an anonymous
+    /// request is refused before any of its body is read.
+    /// </para>
+    /// </remarks>
+    internal const int ExitStateFormLimitBytes = 64 * 1024 * 1024;
+
+    /// <summary>
+    /// Filter order for the form limits: ahead of every antiforgery filter, because antiforgery is what reads
+    /// the form first — BTCPay's global UI filter (order 0) and <see cref="AutoValidateAntiforgeryTokenAttribute"/>
+    /// on this controller (order 1000).
+    /// </summary>
+    /// <remarks>
+    /// Belt and braces: on this framework both attributes are also endpoint metadata that the form read
+    /// honours whichever filter triggers it, so the limits hold at the attributes' default order too. The
+    /// explicit order is what keeps them holding if that ever stops being true, and it costs nothing — the
+    /// filters only configure the request, and authorisation has run before any of them.
+    /// </remarks>
+    private const int BeforeAntiforgery = -10_000;
+
+    /// <summary>
+    /// The backup a save carries: the pasted text, or the chosen file's content — never both, never a file
+    /// that could be mistaken for a clear.
+    /// </summary>
+    /// <returns>The value to hand the service (null or blank means "clear"), or a refusal for the page.</returns>
+    /// <remarks>
+    /// The file is read as text exactly as a download wrote it — UTF-8, a byte-order mark dropped, nothing
+    /// trimmed — so a backup downloaded here and uploaded again is byte-for-byte the string the wallet
+    /// exported. A chosen file that turns out empty is a refusal, not a clear: clearing is what the empty
+    /// textarea means, and an operator who picked a file did not ask for everything to be deleted.
+    /// </remarks>
+    private async Task<(string? Backup, string? Refusal)> ReadSubmittedBackupAsync(
+        string storeId, SparkAdvancedViewModel vm, CancellationToken cancellationToken)
+    {
+        if (vm.ExitStateBackupFile is not { Length: > 0 } file)
+        {
+            return vm.ExitStateBackupFile is { Length: 0 }
+                ? (null, "That file is empty, so nothing was stored.")
+                : (vm.ExitStateBackup, null);
+        }
+
+        if (!string.IsNullOrWhiteSpace(vm.ExitStateBackup))
+            return (null, "Paste the backup or choose its file, not both. Nothing was stored.");
+
+        // Four bytes per character is the most UTF-8 can spend, so a file past this cannot be under the
+        // service's character cap; refused before any of it is read into memory.
+        if (file.Length > (long)SparkUnilateralExitService.MaxExitStateBackupChars * 4)
+        {
+            return (null, "That file is far larger than an exit-state backup can be, so it is not one. "
+                          + "Nothing was stored.");
+        }
+
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var content = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(content)
+                ? (null, "That file is empty, so nothing was stored.")
+                : (content, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: an uploaded exit-state backup could not be read ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            return (null, "That file could not be read, so nothing was stored.");
+        }
+    }
+
+    /// <summary>
+    /// Turns an import of the queue into the banner the operator reads after a paste.
+    /// </summary>
+    /// <remarks>
+    /// Counts only, never content. "Imported" is not reported as "your backup is in place" when it restored
+    /// nothing: that is the answer that looks like success while the wallet is exactly as un-exitable as it
+    /// was, and the one an operator most needs to hear plainly.
+    /// </remarks>
+    private void RelayImportReport(ExitStateImportReport report)
+    {
+        const string Kept =
+            " It is kept, is never replaced by the automatic backup, and is imported again every time this "
+            + "store's wallet starts until it succeeds.";
+
+        switch (report.Outcome)
+        {
+            case ExitStateImportOutcome.Imported when report.RestoredLeaves > 0:
+                TempData[WellKnownTempData.SuccessMessage] = string.Format(CultureInfo.InvariantCulture,
+                    "Exit-state backup imported into the running wallet: {0:N0} leaves restored ({1:N0} already "
+                    + "held, {2:N0} belonging to another wallet, {3:N0} conflicting).",
+                    report.RestoredLeaves, report.SkippedChains, report.ForeignLeaves, report.ConflictingLeaves);
+                break;
+
+            case ExitStateImportOutcome.Imported when report.ForeignLeaves > 0 && report.ConflictingLeaves == 0:
+                TempData[WellKnownTempData.ErrorMessage] = string.Format(CultureInfo.InvariantCulture,
+                    "The backup was imported, but none of its {0:N0} leaves belong to this store's wallet, so "
+                    + "nothing was restored. It may be another store's or another seed's; it was kept aside in "
+                    + "the plugin's exit-state directory rather than deleted.",
+                    report.ForeignLeaves);
+                break;
+
+            case ExitStateImportOutcome.Imported when report.ConflictingLeaves > 0:
+                TempData[WellKnownTempData.ErrorMessage] = string.Format(CultureInfo.InvariantCulture,
+                    "The backup was imported, but {0:N0} of its leaves disagree with exit data this wallet already "
+                    + "holds, so nothing was restored from them.",
+                    report.ConflictingLeaves);
+                break;
+
+            case ExitStateImportOutcome.Imported:
+                TempData[WellKnownTempData.SuccessMessage] = string.Format(CultureInfo.InvariantCulture,
+                    "Exit-state backup imported. This wallet already held everything in it ({0:N0} leaves), so "
+                    + "nothing needed restoring.",
+                    report.SkippedChains);
+                break;
+
+            case ExitStateImportOutcome.WalletNotRunning:
+                TempData[WellKnownTempData.SuccessMessage] =
+                    "Exit-state backup stored. This store's wallet is not running, so it will be imported when "
+                    + "the wallet next starts." + Kept;
+                break;
+
+            case ExitStateImportOutcome.Busy:
+                TempData[WellKnownTempData.SuccessMessage] =
+                    "Exit-state backup stored. Another import into this wallet was still running, so this one "
+                    + "waits for the next attempt." + Kept;
+                break;
+
+            case ExitStateImportOutcome.NothingPending:
+                // Queued and then gone before the import looked: a concurrent clear, or an import already in
+                // flight that took it.
+                TempData[WellKnownTempData.SuccessMessage] =
+                    "Exit-state backup stored; it had already been taken by another import by the time this one "
+                    + "looked.";
+                break;
+
+            default:
+                TempData[WellKnownTempData.ErrorMessage] =
+                    "The exit-state backup was stored but could not be imported now"
+                    + (report.Reason is { } reason ? ": " + reason.TrimEnd('.') + "." : ".")
+                    + Kept + " Check the server log for details.";
+                break;
+        }
     }
 
     /// <summary>
@@ -1360,19 +1719,22 @@ public class SparkController : Controller
     }
 
     /// <summary>
-    /// Records the operator's own statement that they broadcast the set and the sweep confirmed.
+    /// Completes the exit once Spark's check confirms it finished, or on the operator's own word when they say
+    /// a check cannot answer.
     /// </summary>
     /// <remarks>
-    /// Nothing here watches the chain in Phase 0, so this button is a note, not a verification — and it moves
-    /// no money either way. It exists because without it the only way a finished exit leaves the active state
-    /// is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page teaches
-    /// somebody to distrust it.
+    /// It moves no money either way. It exists because without it the only way a finished exit leaves the
+    /// active state is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page
+    /// teaches somebody to distrust it. Whether a check is needed, and what counts as finished, is the
+    /// service's judgement.
     /// </remarks>
+    /// <param name="confirmedWithoutVerdict">The page's "I confirmed the sweep myself" box.</param>
     [HttpPost("exit/complete")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> CompleteExit(
         [FromRoute] string storeId,
         string recordId,
+        bool confirmedWithoutVerdict,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1384,13 +1746,16 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .MarkCompletedAsync(storeId, recordId, cancellationToken)
+            .MarkCompletedAsync(storeId, recordId, confirmedWithoutVerdict, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(
             result,
-            "Recorded as completed. Nothing was broadcast or moved by this — it is your confirmation that the "
-            + "sweep confirmed, and it frees this store to quote another exit.");
+            result.Verdict is SparkExitVerdict.Done
+                ? "Recorded as completed: Spark's check confirmed every transaction, the sweep included, is in a "
+                  + "block. Nothing was broadcast or moved by this, and this store can quote another exit."
+                : "Recorded as completed on your confirmation that the sweep is in a block. Nothing was broadcast "
+                  + "or moved by this, and this store can quote another exit.");
         return RedirectToAction(nameof(Exit), new { storeId });
     }
 
@@ -1403,9 +1768,18 @@ public class SparkController : Controller
     /// be reached" would otherwise have to go looking for a settings screen that does not exist. A blank value
     /// clears the override; whether the string is an acceptable URL is the service's judgement, not this
     /// action's.
+    /// <para>
+    /// <b>Server administrators only, on top of the store permission.</b> The URL is not a store preference so
+    /// much as an instruction to this server to make HTTP requests to a host of the setter's choosing — on every
+    /// view of the exit page, by anyone who can view the store — and to relay what came back into the page. For
+    /// a store administrator on a shared server that is a blind request forger against the server's own network:
+    /// its LAN, its loopback services, whatever a cloud host exposes. The server's administrator is the one
+    /// person for whom pointing it at an internal esplora is a legitimate choice, so the setting is theirs.
+    /// </para>
     /// </remarks>
     [HttpPost("exit/explorer")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyServerSettings)]
     public async Task<IActionResult> SetExitExplorer(
         [FromRoute] string storeId,
         string? esploraApiUrl,
@@ -1494,7 +1868,12 @@ public class SparkController : Controller
             // said "nothing is ready" into an empty list here would change nothing — but turning a service
             // that said "I could not tell" into one would put an action block on screen for an unknown set.
             PendingBroadcast = page.PendingBroadcast,
-            EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
+            // Both links coalesced: a stored blob with an explicit "UnilateralExit": null deserialises to a null
+            // section whatever the property initialiser says, and a NullReferenceException on this GET disables
+            // the plugin and restarts BTCPay.
+            EsploraApiUrl = settings?.UnilateralExit?.EsploraApiUrl,
+            LoadError = page.LoadError,
+            StatusesReadUtc = page.StatusesReadUtc,
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };
@@ -1507,6 +1886,7 @@ public class SparkController : Controller
             // quote at rather than a field they have to fill in blind, and either way they can type another one.
             model.FeeRateSatPerVbyte = page.RecommendedFeeRateSatPerVbyte
                                        ?? SparkUnilateralExitService.DefaultFeeRateSatPerVbyte;
+            model.FeeRateSuggested = page.RecommendedFeeRateSatPerVbyte is not null;
             return model;
         }
 

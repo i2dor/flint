@@ -94,6 +94,13 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         + "broadcast by hand, the funds are locked behind timelocks measured in days, and the on-chain fees are "
         + "paid up front from a separate funding address.";
 
+    internal static readonly string FeeRateOutOfRange = string.Format(
+        CultureInfo.InvariantCulture,
+        "The fee rate has to be between {0:N0} and {1:N0} sat/vB. Every transaction in the exit is built at this one "
+        + "rate, so it also decides which leaves are worth exiting at all.",
+        MinFeeRateSatPerVbyte,
+        MaxFeeRateSatPerVbyte);
+
     internal const string OperationInFlight =
         "Another unilateral-exit operation for this store is already running. Try again in a moment.";
 
@@ -125,6 +132,58 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     internal const string LeavesGone =
         "The leaves this exit was quoted for are no longer in this wallet, so there is nothing left to force "
         + "on-chain. Abandon this exit and quote a new one.";
+
+    /// <summary>The backstop's refusal: see <see cref="GuardAsync"/>.</summary>
+    internal const string UnexpectedFailure =
+        "Something unexpected went wrong with that, so it was not completed. Nothing was broadcast. The server log "
+        + "has the detail; reload the page to see this exit's current state.";
+
+    /// <summary>The page read's backstop: the exit records could not be read at all.</summary>
+    internal const string ExitsUnreadable =
+        "This store's unilateral-exit records could not be read, so this page cannot show whether an exit is in "
+        + "progress. Nothing has been changed. The server log has the detail; try again shortly.";
+
+    /// <summary>A check of a built exit whose last build returned no transactions at all.</summary>
+    internal const string EmptySetNothingToCheck =
+        "This exit's last build returned no transactions — Spark found nothing left to sign for its leaves — so "
+        + "there is nothing here to check against the chain. If its sweep has already confirmed, the exit is "
+        + "finished and you can mark it completed. Otherwise build it again, which re-reads the chain.";
+
+    /// <summary>A check needs the wallet: see <see cref="CheckBuiltLockedAsync"/>.</summary>
+    internal const string CheckNeedsWallet =
+        "This store's Spark wallet is not running, and checking an exit against the chain needs it: the check is "
+        + "made through the wallet's own connection to the chain. The signed transactions below do not need it — "
+        + "you can keep broadcasting what you know is ready — but start the wallet to see fresh statuses.";
+
+    /// <summary>
+    /// Why an exit was not marked completed, when the operator asked the chain to confirm it.
+    /// </summary>
+    private static string DescribeNotDone(UnilateralExitOpResult check)
+    {
+        const string Override =
+            " If you have confirmed yourself that the sweep is in a block, tick the confirmation beside the button "
+            + "and mark it completed again.";
+
+        if (!check.Success)
+        {
+            return "This exit was not marked completed, because Spark could not confirm it is finished: "
+                   + (check.Error ?? "the check did not answer.") + Override;
+        }
+
+        return check.Verdict is SparkExitVerdict.Redo
+            ? "This exit was not marked completed: Spark's check says this set of transactions can no longer "
+              + "finish, so its money is not at the destination yet. Build it again rather than setting it aside."
+              + Override
+            : "This exit was not marked completed: Spark's check says it is still on track but not finished — "
+              + "something is still to be broadcast or confirmed, and completing it now would take its signed "
+              + "transactions off this page. Keep broadcasting what is ready." + Override;
+    }
+
+    /// <summary>A re-quote found every pinned leaf's exit already over on-chain.</summary>
+    internal const string AllLeavesFinished =
+        "Every leaf this exit was pinned to has already finished on-chain — its refund was swept, or its branch can "
+        + "go no further — so there is nothing left to build. Check progress to confirm the sweep, then mark this "
+        + "exit completed.";
 
     internal const string BuiltButNotSaved =
         "The exit was built, but its signed transactions could not be saved, so they are lost. Nothing was "
@@ -171,7 +230,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private readonly ILogger<SparkUnilateralExitService> _logger;
 
     /// <summary>
-    /// Where a stored exit-state backup actually lives: one owner-only file per store, outside the
+    /// Where exit-state backups actually live: the automatic backup and the import queue, as owner-only files per
+    /// store, outside the
     /// settings blob. The settings write below is gone from this path deliberately — a several-megabyte
     /// value in the store's settings is deserialized on every settings read, and storing one there
     /// tore down and reconnected the store's wallet.
@@ -215,9 +275,32 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private bool Mainnet => _network == Network.Main;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Guarded for the same reason every operation is (see <see cref="GuardAsync"/>), and this is the call that
+    /// most needs it: it runs on every GET of a page any store viewer can reload. A failure reads as a page that
+    /// says it could not read the exits — never as the quote form, which would invite a second exit beside one
+    /// the page merely failed to load.
+    /// </remarks>
     public async Task<UnilateralExitPageData> ReadAsync(
         string storeId,
         CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadCoreAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: could not read the unilateral-exit page data ({Reason})",
+                storeId, SparkErrors.Describe(ex));
+            return AbsentFeature with { LoadError = ExitsUnreadable };
+        }
+    }
+
+    private async Task<UnilateralExitPageData> ReadCoreAsync(
+        string storeId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -289,7 +372,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
         // Read back and checked here rather than anywhere above: the page renders these, and a malformed column
         // has to become an explanation on the page instead of an exception in a view.
-        var readable = TryReadTransactions(active, out var transactions);
+        var readable = TryReadTransactions(active, out var transactions, out var statusesReadUtc);
 
         // Derived here rather than left to the view. A built exit runs to a dozen rows of which at most one or
         // two are actionable at any moment, so "send these now" is the one thing the page has to say about the
@@ -316,13 +399,20 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             keyPath,
             transactions,
             !readable,
-            pending);
+            pending,
+            StatusesReadUtc: readable ? statusesReadUtc : null);
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
+    public Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
         string storeId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "acknowledging the disclosure for",
+            () => AcknowledgeDisclosureCoreAsync(storeId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> AcknowledgeDisclosureCoreAsync(
+        string storeId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -356,10 +446,17 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> SetExplorerUrlAsync(
+    public Task<UnilateralExitOpResult> SetExplorerUrlAsync(
         string storeId,
         string? esploraApiUrl,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "setting the explorer for",
+            () => SetExplorerUrlCoreAsync(storeId, esploraApiUrl, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> SetExplorerUrlCoreAsync(
+        string storeId,
+        string? esploraApiUrl,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -411,10 +508,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> CheckAsync(
+    public Task<UnilateralExitOpResult> CheckAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "checking", () => CheckCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> CheckCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -446,65 +549,95 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     record);
             }
 
+            return await CheckBuiltLockedAsync(storeId, record).ConfigureAwait(false);
+        }
+        finally
+        {
+            _running.TryRemove(storeId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Asks the chain about a built record and stores the refreshed statuses. The caller holds the store's gate.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <see cref="CheckAsync"/> and <see cref="MarkCompletedAsync"/>, which needs a fresh verdict to
+    /// complete on and must not release the gate between asking and completing. Never takes the request's
+    /// token: what it writes is the chain's answer, and a browser that went away is not a reason to drop it.
+    /// </remarks>
+    private async Task<UnilateralExitOpResult> CheckBuiltLockedAsync(string storeId, UnilateralExitRecord record)
+    {
+        {
             // The status every compare-and-set below is guarded on, read once: the row must still be Built when
             // the refreshed set lands, because anything else means the operator finished or abandoned it while the
             // chain was being asked.
             var from = record.Status;
 
-            if (!TryReadTransactions(record, out var stored) || stored is not { Count: > 0 })
+            if (!TryReadTransactions(record, out var stored) || stored is null)
             {
                 // A built row whose set cannot be read has nothing to ask the chain about, and the SDK is handed
                 // the set — so this is a refusal rather than a call that would report on an exit that is not the
-                // one stored. The page reports the same condition from the same check.
+                // one stored. The page reports the same condition from the same check, and offers a rebuild: the
+                // advice is not to abandon, because the funding may already be committed to what was signed.
                 return await FailAsync(
                         record,
                         from,
                         "This exit's stored transactions could not be read back, so there is nothing to check "
-                        + "against the chain. Abandon it and quote a new one.")
+                        + "against the chain. Build it again, which re-reads the chain and stores a fresh set.")
                     .ConfigureAwait(false);
+            }
+
+            if (stored.Count == 0)
+            {
+                // Not a failure, and not written to the row as one: the last build legitimately returned nothing.
+                // The SDK's check over an empty set can only ever answer "valid", which would read as "on track"
+                // for an exit with nothing in it, so it is not asked.
+                return new UnilateralExitOpResult(false, EmptySetNothingToCheck, record);
             }
 
             // The SDK checks a whole exit response, and the record only stores the transactions — see
             // UnilateralExitRecord. The two totals and the leaf set it echoes back are not inputs to the check,
-            // so the stored figures are passed through as they are rather than re-quoted: quoting is what this
-            // read path must not do, because a check has to work when the wallet is gone.
+            // so the stored figures are passed through as they are rather than re-quoted: the check reads the
+            // chain and nothing else, and re-quoting would make it depend on the wallet's leaves as well.
             var stored2 = new SparkExitResult(
                 record.RecoverableValueSat,
                 record.TotalFeeSat,
                 stored,
                 DeserializeLeafIds(record).Select(id => new SparkExitLeaf(id, 0)).ToArray());
 
-            // The client can be gone — the wallet failed to start, or was stopped while the exit sat built — and
-            // reporting that as a chain failure would send the operator to look at the wrong thing. A built exit
-            // is checkable from a store whose wallet is down, which is the case this feature exists for, so a null
-            // client is a refusal here rather than a silent no-op.
+            // The SDK's check reads only the chain, but it is a method on a connected SDK instance, and this plugin
+            // has one only while the store's wallet runs — there is no chain-only handle to ask instead. So a
+            // stopped wallet cannot check, and says so in its own words rather than as a chain failure, which
+            // would send the operator to look at the wrong thing. The broadcasting itself needs no wallet: the
+            // signed set on the page is complete without one.
             var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
             if (sdk is null)
-                return new UnilateralExitOpResult(false, WalletNotRunning, record);
+                return new UnilateralExitOpResult(false, CheckNeedsWallet, record);
 
             SparkExitProgress progress;
             try
             {
-                progress = await sdk.CheckUnilateralExitAsync(stored2, cancellationToken)
+                progress = await WithinDeadlineAsync(
+                        sdk.CheckUnilateralExitAsync(stored2, CancellationToken.None), CheckDeadline, "checking")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not check unilateral exit {ExitId} against the chain ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not read the chain for this exit: " + SparkErrors.Describe(ex)
+                        "Spark could not read the chain for this exit: " + DescribeSdkFailure(ex)
                         + ". The stored transactions are unchanged and nothing was broadcast.")
                     .ConfigureAwait(false);
             }
 
             // The statuses it reports replace the ones stored, which is the whole point of the call: an operator
             // reading the page afterwards sees what the chain says, not what it said when the set was built.
-            record.TransactionsJson = JsonSerializer.Serialize(progress.Transactions.ToArray(), JsonOptions);
+            record.TransactionsJson = SerializeTransactions(progress.Transactions, _timeProvider.GetUtcNow());
             record.UpdatedUtc = _timeProvider.GetUtcNow();
 
             // The verdict is not written to the row — it is derived state the SDK recomputes on every call, and a
@@ -524,19 +657,42 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
             return new UnilateralExitOpResult(true, null, record, progress.Verdict);
         }
-        finally
-        {
-            _running.TryRemove(storeId, out _);
-        }
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> SetExitStateBackupAsync(
+    /// <remarks>
+    /// <para>
+    /// <b>A pasted backup is queued for import, never written over the automatic backup.</b> The automatic
+    /// slot is the wallet's own latest export and every due pass replaces it — within two minutes of any
+    /// receive, and at once after a restart — so a paste written there was routinely gone before anything had
+    /// imported it. The queue is a slot no automatic pass writes: a queued backup leaves it only once an import
+    /// of it has returned. The caller imports it straight away when the wallet is running
+    /// (<see cref="ISparkStoreRuntime.ImportPendingExitStateAsync"/>); otherwise the next connect does.
+    /// </para>
+    /// <para>
+    /// <b>Blank clears everything the page reports</b>: the queue, the automatic backup, and the deprecated
+    /// settings slot — the last because the connect adopts from it whenever the file is empty, so a store that
+    /// still held a value there would take the blob back on its next connect under a page that says none is
+    /// stored. The automatic backup is then taken afresh by the next due pass.
+    /// </para>
+    /// </remarks>
+    public Task<UnilateralExitOpResult> SetExitStateBackupAsync(
         string storeId,
         string? exitState,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
+        // Behind the same backstop as every other operation here: a settings or file-store fault on the paste
+        // path would otherwise escape the controller, and BTCPay answers that by disabling the plugin.
+        return GuardAsync(storeId, "storing the exit-state backup for",
+            () => SetExitStateBackupCoreAsync(storeId, exitState, cancellationToken));
+    }
+
+    private async Task<UnilateralExitOpResult> SetExitStateBackupCoreAsync(
+        string storeId,
+        string? exitState,
+        CancellationToken cancellationToken)
+    {
 
         if (!Constants.UnilateralExitEnabled)
             return Refuse(FeatureDisabled);
@@ -570,78 +726,54 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             if (settings is null)
                 return Refuse(NotConfigured);
 
-            // Read the stored value only to answer "does this press change anything" — a full read of a
-            // multi-megabyte blob, on a press an operator makes rarely at most, and what it buys is that a
-            // re-paste cannot move the file's timestamp: a rewrite would report the backup as taken at a
-            // moment when nothing was actually learned about the wallet. A failed read is not a refusal —
-            // "unchanged" has to be earned from a read that answered, so this press just proceeds to its
-            // own write, which is the same failure or success the comparison was guarding.
-            string? current = null;
-            var compared = false;
-            try
-            {
-                current = await _backups.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-                compared = true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Store {StoreId}: its stored exit-state backup could not be read before a save, so the "
-                    + "write proceeded without comparing to what was there",
-                    storeId);
-            }
-
-            // A clear never takes this shortcut. "Nothing stored" is what the file answers for a store whose
-            // deprecated settings slot still holds a blob — upgraded while the feature was off, or not yet
-            // reconnected since, or a file write that failed during adoption — and the press that empties
-            // one location has to empty the other with it.
-            if (compared && normalised is not null &&
-                string.Equals(current, normalised, StringComparison.Ordinal))
-            {
-                // No write for a press that changes nothing, and the comparison is by value rather than
-                // by reference so a re-paste of the same blob is also a no-op. This used to be required
-                // because a settings write reconnected the wallet; it is kept because a write that moves
-                // the TakenAt of a backup that did not change lies about the backup, not just about cost.
-                return new UnilateralExitOpResult(true, null, null);
-            }
-
             // The subject and the log's description deliberately say nothing about the value: it discloses
-            // the store's balance and history, and this method is one of the two places in the plugin
-            // that handles it.
+            // the store's balance and history, and this method is one of the places in the plugin that
+            // handles it.
             try
             {
                 if (normalised is null)
                 {
+                    // The queue first: it is the one slot holding data the wallet may not have, so a clear that
+                    // stopped part way is better stopped with the automatic copy still in place.
+                    foreach (var queued in await _backups.ListPendingAsync(storeId, cancellationToken)
+                                 .ConfigureAwait(false))
+                    {
+                        await _backups.DeletePendingAsync(storeId, queued.Id, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
                     await _backups.DeleteAsync(storeId, cancellationToken).ConfigureAwait(false);
 
-                    // Both locations, or the word "cleared" is a promise the next connect breaks:
-                    // RestoreExitStateAsync adopts from the deprecated slot whenever the file is empty, so a
-                    // store that still holds a value there takes back the blob this press removed — under a
-                    // banner telling the operator a restart will import nothing.
+                    // Both locations, or the word "cleared" is a promise the next connect breaks.
                     await _settingsStore.ClearExitStateBackupSlotAsync(storeId).ConfigureAwait(false);
 
                     _logger.LogInformation(
-                        "Store {StoreId}: the stored exit-state backup was cleared", storeId);
+                        "Store {StoreId}: the stored and queued exit-state backups were cleared", storeId);
                 }
                 else
                 {
-                    await _backups.WriteAsync(storeId, normalised, cancellationToken).ConfigureAwait(false);
+                    // Deduplicated by the store: a save pressed twice, or a page reloaded with the value still
+                    // in the textarea, queues one copy, not two multi-megabyte files.
+                    await _backups.AddPendingAsync(storeId, normalised, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation(
-                        "Store {StoreId}: stored an exit-state backup from the page ({Length} characters)",
+                        "Store {StoreId}: queued an exit-state backup from the page for import ({Length} characters)",
                         storeId, normalised.Length);
                 }
             }
             catch (Exception ex)
             {
+                // The exception is the store's own — filesystem or settings — and never carries the value.
                 _logger.LogError(ex,
-                    "Store {StoreId}: could not store {What} ({Reason})",
+                    "Store {StoreId}: could not {What}",
                     storeId,
                     normalised is null
-                        ? "the unilateral-exit state backup being cleared"
-                        : "a unilateral-exit state backup",
-                    SparkErrors.Describe(ex));
+                        ? "clear the unilateral-exit state backups"
+                        : "queue a unilateral-exit state backup");
 
-                return Refuse($"The exit-state backup could not be saved: {SparkErrors.Describe(ex)}");
+                return Refuse(normalised is null
+                    ? "The exit-state backups could not all be cleared. Check the server log for the reason."
+                    : "The exit-state backup could not be stored, so nothing will be imported. Check the server "
+                      + "log for the reason.");
             }
 
             return new UnilateralExitOpResult(true, null, null);
@@ -653,11 +785,19 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> QuoteAsync(
+    public Task<UnilateralExitOpResult> QuoteAsync(
         string storeId,
         long feeRateSatPerVbyte,
         string destinationAddress,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "quoting",
+            () => QuoteCoreAsync(storeId, feeRateSatPerVbyte, destinationAddress, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> QuoteCoreAsync(
+        string storeId,
+        long feeRateSatPerVbyte,
+        string destinationAddress,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -676,14 +816,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return Refuse(DisclosureRequired);
 
         if (feeRateSatPerVbyte is < MinFeeRateSatPerVbyte or > MaxFeeRateSatPerVbyte)
-        {
-            return Refuse(string.Format(
-                CultureInfo.InvariantCulture,
-                "The fee rate has to be between {0:N0} and {1:N0} sat/vB. Every transaction in the exit is built "
-                + "at this one rate, so it also decides which leaves are worth exiting at all.",
-                MinFeeRateSatPerVbyte,
-                MaxFeeRateSatPerVbyte));
-        }
+            return Refuse(FeeRateOutOfRange);
 
         if (!TryParseDestination(destinationAddress, out var destination, out var destinationError))
             return Refuse(destinationError);
@@ -728,19 +861,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             SparkExitQuote quote;
             try
             {
-                quote = await sdk
-                    .PrepareUnilateralExitAsync(
-                        (ulong)feeRateSatPerVbyte, destination, leafIds: null, cancellationToken)
+                quote = await WithinDeadlineAsync(
+                        sdk.PrepareUnilateralExitAsync(
+                            (ulong)feeRateSatPerVbyte, destination, leafIds: null, cancellationToken),
+                        QuoteDeadline,
+                        "quoting")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not quote a unilateral exit ({Reason})",
-                    storeId, SparkErrors.Describe(ex));
+                    storeId, DescribeSdkFailure(ex));
 
                 return Refuse(
-                    "Spark could not quote a unilateral exit: " + SparkErrors.Describe(ex)
+                    "Spark could not quote a unilateral exit: " + DescribeSdkFailure(ex)
                     + ". Nothing has been recorded, so trying again is safe.");
             }
 
@@ -826,11 +961,45 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// that top-up ignored — selection would keep picking the smaller output that satisfied the stale figure, and
     /// the veto would keep refusing it, for ever. So this re-quotes first, persists the fresh requirement so that
     /// the number on the page is the number that will be judged, and only then selects.
+    /// <para>
+    /// <b>A rebuild funds differently from a first build, and that difference is the SDK's contract.</b> Once a
+    /// build has succeeded, the outputs it was given are recorded (<see cref="UnilateralExitRecord.FundingUtxosJson"/>)
+    /// and every later build passes them back, with anything else confirmed on the funding address alongside —
+    /// the SDK's documented "funding a second attempt". It follows each outpoint to whatever an earlier attempt
+    /// turned it into, so a Redo, a rebuild after an unverified status, or a fee bump spends the money already
+    /// committed instead of demanding a second full funding and stranding the first on per-branch outputs.
+    /// </para>
+    /// <para>
+    /// <b>A new fee rate is how a stalled exit is sped up, and it is the SDK's only way to do it.</b> Its guidance
+    /// for an exit that stopped confirming is to quote again at the higher rate, naming the same leaves, and build
+    /// again: what has confirmed stays, and what has not is rebuilt at the new rate and replaces the earlier
+    /// version on the network. So <paramref name="feeRateSatPerVbyte"/> re-prices this build and, when it
+    /// succeeds, becomes the record's rate. For a built exit it may not go <em>down</em>: a replacement has to pay
+    /// a higher rate than what it replaces to relay, so a lower one would sign children that can never displace
+    /// the ones already in mempools. The same rate is allowed, because that is the plain rebuild a Redo or an
+    /// unverified status asks for.
+    /// </para>
     /// </remarks>
-    public async Task<UnilateralExitOpResult> BuildAsync(
+    public Task<UnilateralExitOpResult> BuildAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        long? feeRateSatPerVbyte,
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "building",
+            () => BuildCoreAsync(storeId, recordId, feeRateSatPerVbyte, cancellationToken));
+
+    /// <inheritdoc />
+    public Task<UnilateralExitOpResult> BuildAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken = default) =>
+        BuildAsync(storeId, recordId, null, cancellationToken);
+
+    private async Task<UnilateralExitOpResult> BuildCoreAsync(
+        string storeId,
+        string recordId,
+        long? requestedFeeRate,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -851,6 +1020,9 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         if (!exitSettings.DisclosureAcknowledged)
             return Refuse(DisclosureRequired);
 
+        if (requestedFeeRate is < MinFeeRateSatPerVbyte or > MaxFeeRateSatPerVbyte)
+            return Refuse(FeeRateOutOfRange);
+
         if (!_running.TryAdd(storeId, 0))
             return Refuse(OperationInFlight);
 
@@ -865,6 +1037,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 return new UnilateralExitOpResult(
                     false,
                     "This exit is finished. Quote a new one rather than building this one again.",
+                    record);
+            }
+
+            if (record.Status is UnilateralExitStatus.Built && requestedFeeRate < record.FeeRateSatPerVbyte)
+            {
+                // Not written to the row: nothing about the exit is wrong, the request was. See the remarks on
+                // this method for why a built exit's rate may only stay or rise.
+                return new UnilateralExitOpResult(
+                    false,
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "This exit was built at {0:N0} sat/vB, and a rebuild cannot go lower: a replacement has to "
+                        + "pay a higher rate than the transactions it replaces, so a cheaper set could never displace "
+                        + "anything already broadcast. Build again at {0:N0} sat/vB or higher.",
+                        record.FeeRateSatPerVbyte),
                     record);
             }
 
@@ -884,6 +1071,10 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                         + "one.")
                     .ConfigureAwait(false);
             }
+
+            // The rate this attempt prices and signs at. It only becomes the record's rate when it is written with
+            // the figures that belong to it: in step two for a first build, and with the signed set otherwise.
+            var feeRate = requestedFeeRate ?? record.FeeRateSatPerVbyte;
 
             var leafIds = DeserializeLeafIds(record);
             if (leafIds.Count == 0)
@@ -922,7 +1113,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     .ConfigureAwait(false);
             }
 
-            if (!SparkExitFundingExplorer.TryResolveBaseUrl(exitSettings, Mainnet, out var baseUrl, out var urlError))
+            // What this exit has already committed to signed transactions. Empty for a first build; set by every
+            // successful one — see UnilateralExitRecord.FundingUtxosJson and the remarks on this method.
+            if (!TryReadCommittedFunding(record, funding.PubkeyHex, out var committedFunding))
+                return await FailAsync(record, from, DescribeCommittedFundingUnreadable(record)).ConfigureAwait(false);
+
+            var following = committedFunding.Count > 0;
+
+            // Only a first build writes a fresh quote's figures over the row before it succeeds. A built row's
+            // figures describe the transaction set stored beside them, and a failed rebuild must not leave the page
+            // showing a fee and a total that belong to transactions nobody signed.
+            var awaiting = from is UnilateralExitStatus.AwaitingFunding;
+
+            // The explorer is how a first build finds the output the operator sent, so without one it cannot
+            // start. A rebuild already holds the outpoints it committed, and the SDK follows those through its own
+            // chain service — so for a rebuild the explorer only adds any fresh top-up, and its absence is not a
+            // reason to refuse.
+            var haveExplorer = SparkExitFundingExplorer.TryResolveBaseUrl(
+                exitSettings, Mainnet, out var baseUrl, out var urlError);
+            if (!haveExplorer && !following)
                 return await FailAsync(record, from, urlError!).ConfigureAwait(false);
 
             // Step one: re-quote the record's own leaves. This happens before funding is even looked at, because
@@ -930,90 +1139,155 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             SparkExitQuote fresh;
             try
             {
-                fresh = await sdk
-                    .PrepareUnilateralExitAsync(
-                        (ulong)record.FeeRateSatPerVbyte,
-                        record.DestinationAddress,
-                        leafIds,
-                        cancellationToken)
+                fresh = await WithinDeadlineAsync(
+                        sdk.PrepareUnilateralExitAsync(
+                            (ulong)feeRate,
+                            record.DestinationAddress,
+                            leafIds,
+                            cancellationToken),
+                        QuoteDeadline,
+                        "re-pricing")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not re-quote unilateral exit {ExitId} ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not re-price this exit: " + SparkErrors.Describe(ex)
+                        "Spark could not re-price this exit: " + DescribeSdkFailure(ex)
                         + ". Nothing was signed, so trying again is safe.")
                     .ConfigureAwait(false);
             }
 
-            if (fresh.IsEmpty)
-            {
-                return await FailAsync(record, from, LeavesGone).ConfigureAwait(false);
-            }
+            // The pinned leaves have to still be the exit. The SDK skips a named leaf that is missing from its
+            // local storage without saying so — a payment, a sweep, a Stable Balance conversion or its own leaf
+            // optimisation can have spent or reshaped it since the quote — so a quote that covers fewer leaves
+            // than were pinned is a smaller exit than the one the operator funded, and building it would commit
+            // that funding to recovering less. Refused here, before any funding is looked at, so nothing is
+            // committed. A leaf the chain shows as finished is the one legitimate absence.
+            if (DescribeCoverage(record, fresh, leafIds) is { } coverage)
+                return await FailAsync(record, from, coverage).ConfigureAwait(false);
 
             if (fresh.RecoverableValueSat <= fresh.TotalFeeSat)
             {
                 return await FailAsync(record, from, DescribeUneconomic(fresh)).ConfigureAwait(false);
             }
 
-            // Step two: persist the fresh figures before selecting against them, so the requirement the operator
-            // reads on the page and the requirement the selection uses are the same number. Written even though
-            // the build may still fail — especially then, because a failed attempt's whole value to the operator
-            // is telling them what to fund.
-            ApplyQuote(record, fresh);
-            record.LastError = null;
-            record.UpdatedUtc = _timeProvider.GetUtcNow();
-
-            if (!await _records.UpdateAsync(record, from, cancellationToken).ConfigureAwait(false))
-                return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
-
-            var required = fresh.SingleUtxoFundingSat;
-
-            var lookup = await _explorer
-                .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (lookup.Utxos is not { } confirmed)
-                return await FailAsync(record, from, lookup.Error!).ConfigureAwait(false);
-
-            var largest = confirmed.Count == 0 ? 0 : confirmed.Max(utxo => utxo.ValueSat);
-
-            // One output, not a sum. CPFP funding spends a single P2WPKH outpoint, so two outputs each half the
-            // required size do not fund the exit however encouraging their total looks — which is exactly why the
-            // funding instructions say "as one output" and why the check is not against the balance.
-            //
-            // The smallest output that suffices, so an operator who over-funded (or funded twice) keeps the larger
-            // one intact for a later attempt rather than having it committed to this one.
-            var chosen = confirmed
-                .Where(utxo => utxo.ValueSat >= required)
-                .OrderBy(utxo => utxo.ValueSat)
-                .FirstOrDefault();
-
-            if (chosen is null)
+            if (awaiting)
             {
-                return await FailAsync(
-                        record,
-                        from,
-                        DescribeShortfall(required, record.FundingAddress, confirmed))
+                // Step two, for a first build: persist the fresh figures before selecting against them, so the
+                // requirement the operator reads on the page and the requirement the selection uses are the same
+                // number. Written even though the build may still fail — especially then, because a failed
+                // attempt's whole value to the operator is telling them what to fund.
+                ApplyQuote(record, fresh);
+                record.FeeRateSatPerVbyte = feeRate;
+                record.LastError = null;
+                record.UpdatedUtc = _timeProvider.GetUtcNow();
+
+                if (!await _records.UpdateAsync(record, from, cancellationToken).ConfigureAwait(false))
+                    return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
+            }
+
+            IReadOnlyList<SparkExitFundingUtxo> inputs;
+            SparkExitFundingUtxo? chosen = null;
+            long largest = 0;
+            var explorerMissed = false;
+
+            if (following)
+            {
+                // Step three, for a rebuild: hand back what the last build committed, and let the SDK follow it.
+                // This is the SDK's own documented second attempt ("pass back the funding inputs the stored
+                // response carries"): an outpoint an earlier attempt spent is not an error, the SDK walks it to
+                // whatever it became — fan-out outputs, CPFP change, several steps of both — and keeps an outpoint
+                // spent only by an unconfirmed transaction, because that is this exit's own in-flight child and a
+                // rebuild replaces it. Listing the address instead cannot see any of that: an output spent by an
+                // in-flight child is not unspent, and a fan-out's per-branch outputs are each below a whole-exit
+                // requirement, so every Redo would have demanded a second full funding and stranded the first.
+                //
+                // Anything else confirmed on the address is added alongside, which is how a top-up reaches the
+                // exit — the funding address belongs to this exit alone, so everything on it was sent for it. The
+                // SDK de-duplicates by outpoint, so an output that is both listed and reached by following (a
+                // confirmed fan-out output, say) is counted once; the list is de-duplicated here as well so the
+                // record stores each outpoint once.
+                var added = new List<SparkExitFundingUtxo>();
+                if (haveExplorer)
+                {
+                    var lookup = await _explorer
+                        .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (lookup.Utxos is { } listed)
+                    {
+                        added.AddRange(listed.Where(utxo =>
+                            committedFunding.All(existing => existing.OutPoint != utxo.OutPoint)));
+                    }
+                    else
+                    {
+                        explorerMissed = true;
+                        _logger.LogWarning(
+                            "Store {StoreId}: rebuilding unilateral exit {ExitId} from its committed funding alone, "
+                            + "because the funding address could not be listed ({Reason})",
+                            storeId, record.Id, lookup.Error);
+                    }
+                }
+                else
+                {
+                    explorerMissed = true;
+                }
+
+                inputs = committedFunding.Concat(added).ToArray();
+            }
+            else
+            {
+                var required = fresh.SingleUtxoFundingSat;
+
+                var lookup = await _explorer
+                    .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
                     .ConfigureAwait(false);
+
+                if (lookup.Utxos is not { } confirmed)
+                    return await FailAsync(record, from, lookup.Error!).ConfigureAwait(false);
+
+                largest = confirmed.Count == 0 ? 0 : confirmed.Max(utxo => utxo.ValueSat);
+
+                // One output, not a sum, for a first build. The quote's requirement is sized for exactly one
+                // funding input, so two outputs each half of it are short by the second input's weight — and
+                // the funding instructions say "as one output" so the rule the page states is the rule applied.
+                //
+                // The smallest output that suffices, so an operator who over-funded (or funded twice) keeps the
+                // larger one out of this build. It is not lost to a later one either way: once this build has
+                // committed an output, a rebuild follows it and adds whatever else is on the address.
+                chosen = confirmed
+                    .Where(utxo => utxo.ValueSat >= required)
+                    .OrderBy(utxo => utxo.ValueSat)
+                    .FirstOrDefault();
+
+                if (chosen is null)
+                {
+                    return await FailAsync(
+                            record,
+                            from,
+                            DescribeShortfall(required, record.FundingAddress, confirmed))
+                        .ConfigureAwait(false);
+                }
+
+                inputs = [chosen];
             }
 
             SparkExitResult result;
             SparkExitQuote? committed = null;
             try
             {
-                result = await sdk
+                result = await WithinDeadlineAsync(sdk
                     .UnilateralExitAsync(
-                        (ulong)record.FeeRateSatPerVbyte,
+                        (ulong)feeRate,
                         record.DestinationAddress,
                         leafIds,
-                        [chosen],
+                        inputs,
                         funding.Secret,
                         second =>
                         {
@@ -1024,13 +1298,18 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                             // then persisted by the catch below.
                             committed = second;
 
-                            if (second.IsEmpty)
-                                return LeavesGone;
+                            // Again against the build's own quote: the tree can move between the two.
+                            if (DescribeCoverage(record, second, leafIds) is { } coverage)
+                                return coverage;
 
                             if (second.RecoverableValueSat <= second.TotalFeeSat)
                                 return DescribeUneconomic(second);
 
-                            if (second.SingleUtxoFundingSat > chosen.ValueSat)
+                            // A first build is judged here against its one output. A rebuild is not: what its
+                            // funding is worth is only known once the SDK has followed it, and the SDK's own
+                            // shortfall is the answer to that — a plugin-side guess would refuse funding that is
+                            // in fact sufficient.
+                            if (chosen is not null && second.SingleUtxoFundingSat > chosen.ValueSat)
                             {
                                 return string.Format(
                                     CultureInfo.InvariantCulture,
@@ -1043,21 +1322,31 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
                             return null;
                         },
-                        cancellationToken)
+                        cancellationToken),
+                        BuildDeadline,
+                        "building")
                     .ConfigureAwait(false);
             }
             catch (SparkExitRefusedException refused)
             {
-                // The veto above. Already written for a merchant, so it is passed through verbatim — and the
-                // quote it judged by is persisted, so the next attempt selects against the same requirement the
-                // operator was just asked to fund.
-                ApplyQuote(record, committed);
+                // The veto above. Already written for a merchant, so it is passed through verbatim — and, for a
+                // first build, the quote it judged by is persisted, so the next attempt selects against the same
+                // requirement the operator was just asked to fund.
+                if (awaiting)
+                    ApplyQuote(record, committed);
                 return await FailAsync(record, from, refused.Reason).ConfigureAwait(false);
             }
             catch (SparkExitFundingShortfallException shortfall)
             {
-                ApplyQuote(record, committed);
-                return await FailAsync(record, from, shortfall.Message).ConfigureAwait(false);
+                if (awaiting)
+                    ApplyQuote(record, committed);
+                return await FailAsync(
+                        record,
+                        from,
+                        following
+                            ? DescribeFollowedShortfall(shortfall.RequiredSat, record.FundingAddress, explorerMissed)
+                            : shortfall.Message)
+                    .ConfigureAwait(false);
             }
             // No catch for a funding conflict, and its absence is the 0.25 change: the SDK removed
             // FundingUtxoConflict entirely, because a spent funding output is no longer an error — it follows
@@ -1067,14 +1356,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not build unilateral exit {ExitId} ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
-                ApplyQuote(record, committed);
+                if (awaiting)
+                    ApplyQuote(record, committed);
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not build this exit: " + SparkErrors.Describe(ex)
-                        + ". Nothing was signed or broadcast, so trying again is safe.")
+                        ex is SparkExitDeadlineException
+                            // Worded apart from the others because "nothing was signed" is not something a
+                            // timeout can promise: the SDK may still be signing. What it can promise is the part
+                            // that matters — nothing is broadcast by the SDK, ever, so whatever it signs is inert.
+                            ? "Spark could not build this exit: " + DescribeSdkFailure(ex)
+                              + ". Nothing was broadcast and nothing was stored; building again is safe."
+                            : "Spark could not build this exit: " + DescribeSdkFailure(ex)
+                              + ". Nothing was signed or broadcast, so trying again is safe.")
                     .ConfigureAwait(false);
             }
 
@@ -1084,17 +1380,24 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // able to skip the write that saves them.
             record.Status = UnilateralExitStatus.Built;
             record.UpdatedUtc = _timeProvider.GetUtcNow();
+            // The rate the stored set was signed at, which after a fee bump is the new one.
+            record.FeeRateSatPerVbyte = feeRate;
             record.RecoverableValueSat = result.RecoverableValueSat;
             record.TotalFeeSat = result.TotalFeeSat;
             record.SingleUtxoFundingSat = committed?.SingleUtxoFundingSat ?? record.SingleUtxoFundingSat;
-            record.FundingUtxosJson = JsonSerializer.Serialize(new[] { chosen }, JsonOptions);
+            // Everything this build was handed, which is exactly what the SDK echoes back as the response's
+            // funding inputs (breez-sdk core unilateral_exit.rs: `funding_inputs: supplied_funding`) and what its
+            // documented second attempt passes back. A superset of what was stored before, never a replacement, so
+            // no outpoint the signed set may spend is ever forgotten.
+            record.FundingUtxosJson = JsonSerializer.Serialize(inputs.ToArray(), JsonOptions);
             // Replaced with exactly what the SDK returned, however short that is. Since 0.25 the build continues
             // from confirmed chain state, so a partial set is the normal result of a resumed attempt and an empty
             // one means everything it planned has already been seen on-chain. Merging the previous set back in
             // would be actively wrong: a transaction missing from the new set is one the SDK has already observed
             // confirm, or one its own re-plan dropped, and keeping a stale copy of it next to the new set invites
             // an operator to broadcast a transaction the SDK has already superseded.
-            record.TransactionsJson = JsonSerializer.Serialize(result.Transactions.ToArray(), JsonOptions);
+            // Stamped with the build's own time, because a build reads every status from the chain too.
+            record.TransactionsJson = SerializeTransactions(result.Transactions, _timeProvider.GetUtcNow());
             // Cleared, not left in place: a build that got further must not show the failed attempt's complaint
             // next to its own transactions.
             record.LastError = null;
@@ -1140,10 +1443,35 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> MarkCompletedAsync(
+    /// <remarks>
+    /// <b>Completing on the chain's word, not only the operator's.</b> Completing an exit takes it off the page,
+    /// and the page is the only place its signed transactions are shown — so completing one early is how an
+    /// operator loses sight of the steps still to broadcast. The SDK can tell a finished exit from an unfinished
+    /// one, so this asks it first and completes only on <see cref="SparkExitVerdict.Done"/>. The operator can still
+    /// complete on their own word, with <paramref name="confirmedWithoutVerdict"/>, for the cases a check cannot
+    /// answer — a wallet that will not start, a chain service that will not respond, an empty set — and the log
+    /// records which of the two it was.
+    /// </remarks>
+    public Task<UnilateralExitOpResult> MarkCompletedAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        bool confirmedWithoutVerdict,
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "completing",
+            () => MarkCompletedCoreAsync(storeId, recordId, confirmedWithoutVerdict, cancellationToken));
+
+    /// <inheritdoc />
+    public Task<UnilateralExitOpResult> MarkCompletedAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken = default) =>
+        MarkCompletedAsync(storeId, recordId, false, cancellationToken);
+
+    private async Task<UnilateralExitOpResult> MarkCompletedCoreAsync(
+        string storeId,
+        string recordId,
+        bool confirmedWithoutVerdict,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -1177,22 +1505,46 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     record);
             }
 
+            SparkExitVerdict? verdict = null;
+            if (!confirmedWithoutVerdict)
+            {
+                var check = await CheckBuiltLockedAsync(storeId, record).ConfigureAwait(false);
+                if (!check.Success || check.Verdict is not SparkExitVerdict.Done)
+                {
+                    return new UnilateralExitOpResult(
+                        false, DescribeNotDone(check), check.Record ?? record, check.Verdict);
+                }
+
+                verdict = check.Verdict;
+                record = check.Record ?? record;
+            }
+
             record.Status = UnilateralExitStatus.Completed;
             record.UpdatedUtc = _timeProvider.GetUtcNow();
 
             if (!await _records
-                    .UpdateAsync(record, UnilateralExitStatus.Built, cancellationToken)
+                    .UpdateAsync(record, UnilateralExitStatus.Built, CancellationToken.None)
                     .ConfigureAwait(false))
             {
                 return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
             }
 
-            _logger.LogInformation(
-                "Store {StoreId}: unilateral exit {ExitId} marked completed by the operator. The plugin watches "
-                + "no chain, so this is their statement rather than an observation",
-                storeId, record.Id);
+            if (verdict is SparkExitVerdict.Done)
+            {
+                _logger.LogInformation(
+                    "Store {StoreId}: unilateral exit {ExitId} marked completed; Spark's check confirmed every "
+                    + "transaction, the sweep included, is in a block",
+                    storeId, record.Id);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Store {StoreId}: unilateral exit {ExitId} marked completed on the operator's word, without a "
+                    + "check confirming it finished",
+                    storeId, record.Id);
+            }
 
-            return new UnilateralExitOpResult(true, null, record);
+            return new UnilateralExitOpResult(true, null, record, verdict);
         }
         finally
         {
@@ -1201,10 +1553,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> AbandonAsync(
+    public Task<UnilateralExitOpResult> AbandonAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "abandoning", () => AbandonCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> AbandonCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -1254,6 +1612,40 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         {
             _running.TryRemove(storeId, out _);
         }
+    }
+
+    /// <summary>
+    /// Why a fresh quote is not the exit that was pinned, or null when it is.
+    /// </summary>
+    /// <remarks>
+    /// Three answers. Every pinned leaf is gone: <see cref="LeavesGone"/>. Some are: the exit has shrunk under the
+    /// operator, and building it would spend their funding on less than they were quoted for. None are missing but
+    /// nothing is left to build either: every leaf has finished on-chain, which is success, not a fault — the
+    /// words send the operator to confirm it rather than to abandon it.
+    /// </remarks>
+    private string? DescribeCoverage(
+        UnilateralExitRecord record,
+        SparkExitQuote quote,
+        IReadOnlyList<string> pinned)
+    {
+        var uncovered = quote.UncoveredOf(pinned);
+
+        if (uncovered.Count == 0)
+            return quote.IsEmpty ? AllLeavesFinished : null;
+
+        if (quote.IsEmpty && uncovered.Count == pinned.Count)
+            return LeavesGone;
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "{0:N0} of the {1:N0} leaves this exit was pinned to are no longer in this wallet's exit data — a "
+            + "payment, a sweep, a Stable Balance conversion or Spark's own leaf optimisation has spent or reshaped "
+            + "them since the quote — so building now would recover less than the exit you funded. Nothing was "
+            + "signed. Abandon this exit and quote a new one for what the wallet holds now; anything on the funding "
+            + "address is recoverable from this store's recovery phrase at {2}.",
+            uncovered.Count,
+            pinned.Count,
+            DescribeKeyPath(record) ?? "the exit's funding key path");
     }
 
     private static string DescribeUneconomic(SparkExitQuote quote) => string.Format(
@@ -1460,6 +1852,96 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
     private static UnilateralExitOpResult Refuse(string error) => new(false, error, null);
 
+    /// <summary>How long a quote (prepare) may take before the request stops waiting for it.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why any of these exist: the store's gate is held for the whole call, and the SDK's exit calls take no
+    /// cancellation.</b> Preparing an exit starts with a best-effort refresh from the Spark operators
+    /// (<c>refresh_before_exit</c>) — the one step that needs them — and an operator that accepts a connection
+    /// and never answers holds that call, the request thread and this store's exit gate with it. The binding has
+    /// no token to cancel it by, so the request stops <em>waiting</em> instead: the gate is released and the
+    /// operator gets an answer, while the native call finishes or fails on its own and is observed and dropped.
+    /// </para>
+    /// <para>
+    /// Safe because nothing here broadcasts. A dropped quote recorded nothing; a dropped build may still sign,
+    /// but what it signs is inert and never stored, and a later build starts from the chain as usual. The
+    /// figures are generous — an exit is dozens of chain lookups and signatures — because the failure they guard
+    /// against is a hang, not slowness. Settable for tests only.
+    /// </para>
+    /// </remarks>
+    internal TimeSpan QuoteDeadline { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>How long a build may take before the request stops waiting. See <see cref="QuoteDeadline"/>.</summary>
+    internal TimeSpan BuildDeadline { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How long a chain check may take before the request stops waiting. See <see cref="QuoteDeadline"/>.</summary>
+    internal TimeSpan CheckDeadline { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Waits for one SDK exit call for at most <paramref name="deadline"/>, then gives up waiting.
+    /// </summary>
+    /// <remarks>
+    /// The abandoned call is not cancelled — it cannot be — so its eventual fault is observed here rather than
+    /// left to surface as an unobserved task exception long after the request that started it.
+    /// </remarks>
+    private static async Task<T> WithinDeadlineAsync<T>(Task<T> call, TimeSpan deadline, string what)
+    {
+        try
+        {
+            return await call.WaitAsync(deadline).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _ = call.ContinueWith(
+                abandoned => _ = abandoned.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw new SparkExitDeadlineException(what, deadline);
+        }
+    }
+
+    /// <summary>A failure from an SDK exit call, in merchant-facing words, including a missed deadline.</summary>
+    private static string DescribeSdkFailure(Exception exception) =>
+        exception is SparkExitDeadlineException deadline ? deadline.Message : SparkErrors.Describe(exception);
+
+    /// <summary>
+    /// Runs one operation, turning anything it failed to anticipate into a refusal instead of an exception.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every public operation goes through this, and it is not tidiness.</b> These methods are called straight
+    /// from request handlers, and BTCPay 2.4's plugin exception handler answers an unhandled exception from a
+    /// plugin's request by <em>disabling the plugin and restarting the server</em> — so a database blip, a row
+    /// someone edited by hand, or a shape the SDK has never returned before would take every store's Lightning
+    /// down over one exit page. The anticipated failures are all handled where they happen, with wording for
+    /// the case; this is the backstop for the ones nobody anticipated, and it words them generically on purpose.
+    /// </para>
+    /// <para>
+    /// Safe because of the class's first rule: nothing here broadcasts, so an exception anywhere in an operation
+    /// has moved no coins. The one place an exception could cost something — after a successful build, before
+    /// its transactions are stored — is handled inside the build itself, where the txids are logged.
+    /// </para>
+    /// </remarks>
+    /// <param name="operation">A gerund for the log line, e.g. "building".</param>
+    private async Task<UnilateralExitOpResult> GuardAsync(
+        string storeId,
+        string operation,
+        Func<Task<UnilateralExitOpResult>> body)
+    {
+        try
+        {
+            return await body().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: unexpected failure while {Operation} a unilateral exit ({Reason})",
+                storeId, operation, SparkErrors.Describe(ex));
+            return Refuse(UnexpectedFailure);
+        }
+    }
+
     /// <summary>
     /// Why the funding on the address does not fund this exit, in terms an operator can act on.
     /// </summary>
@@ -1503,6 +1985,117 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 largest)
         };
     }
+
+    /// <summary>
+    /// Why a rebuild came up short once the SDK had followed the funding, in terms an operator can act on.
+    /// </summary>
+    /// <remarks>
+    /// The opposite instruction to <see cref="DescribeShortfall"/>, deliberately. A first build funds from one
+    /// output, so topping up does not help there; a rebuild hands the SDK everything this exit committed plus
+    /// everything else on the address, and the SDK sums what that has become — so here more funding of any shape
+    /// does help, and saying "the full amount again as one output" would overstate what is needed while still
+    /// being safe. Both are said: the minimum, and the amount that always suffices.
+    /// </remarks>
+    private static string DescribeFollowedShortfall(long required, string fundingAddress, bool explorerMissed) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "Spark followed the funding this exit already committed to whatever it has become, and together with "
+            + "any other output on the funding address it does not cover what is left to build: Spark needs at "
+            + "least {0:N0} sat available in total. Send more to {1} — a new output of {0:N0} sat always "
+            + "suffices, and whatever is not spent on fees is swept to your destination with the recovered coins — "
+            + "and build again once it confirms. The earlier funding is not wasted: the next build follows it "
+            + "again.{2}",
+            required,
+            fundingAddress,
+            explorerMissed
+                ? " The block explorer could not be read this time, so any new output already on the address was "
+                  + "not included; that may be the whole shortfall."
+                : string.Empty);
+
+    private string DescribeCommittedFundingUnreadable(UnilateralExitRecord record) =>
+        "This exit's record of the funding it has already committed could not be read, so a rebuild cannot hand "
+        + "it back to Spark to follow — and building without it would ask you to fund the exit a second time. "
+        + "Nothing was signed. Anything left on the funding address is recoverable from this store's recovery "
+        + $"phrase at {DescribeKeyPath(record) ?? "the exit's funding key path"}; abandon this exit and quote a "
+        + "new one, which picks the leaves up from wherever they are on-chain.";
+
+    /// <summary>
+    /// The funding outputs a previous build committed, re-tagged with the funding key's public key.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Empty — and true — for a record no build has succeeded on yet. False only for a column that is present
+    /// but unusable: that is a row the service did not write, and guessing at its contents would hand the SDK
+    /// outpoints this exit may never have committed.
+    /// </para>
+    /// <para>
+    /// The public key is re-attached from the derivation rather than trusted from the column, for the reason
+    /// <see cref="SparkExitFundingExplorer.ListConfirmedAsync"/> gives: an output tagged with the wrong key fails
+    /// deep inside the SDK's witness construction. The caller has already established that the derivation
+    /// produces this record's funding address, so the key is the right one for every output that pays it.
+    /// </para>
+    /// </remarks>
+    private bool TryReadCommittedFunding(
+        UnilateralExitRecord record,
+        string pubkeyHex,
+        out IReadOnlyList<SparkExitFundingUtxo> committed)
+    {
+        committed = [];
+
+        if (string.IsNullOrWhiteSpace(record.FundingUtxosJson))
+            return true;
+
+        SparkExitFundingUtxo?[]? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<SparkExitFundingUtxo?[]>(record.FundingUtxosJson, JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: unilateral exit {ExitId} has an unreadable committed-funding column",
+                record.StoreId, record.Id);
+            return false;
+        }
+
+        if (parsed is null ||
+            parsed.Any(utxo => utxo is null || !SparkExitTransaction.IsTxid(utxo.Txid) || utxo.ValueSat <= 0))
+        {
+            _logger.LogError(
+                "Store {StoreId}: unilateral exit {ExitId} has a committed-funding column that parsed but is not "
+                + "usable",
+                record.StoreId, record.Id);
+            return false;
+        }
+
+        committed = parsed
+            .Select(utxo => utxo! with { PubkeyHex = pubkeyHex })
+            .DistinctBy(utxo => utxo.OutPoint)
+            .ToArray();
+        return true;
+    }
+
+    /// <summary>
+    /// What <see cref="UnilateralExitRecord.TransactionsJson"/> holds: the signed set, and when its statuses were
+    /// last read from the chain.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The time travels with the statuses because nothing else refreshes them.</b> They are read from the chain
+    /// by a build and by a check, and by nothing between — no background task watches an exit — so a page rendered
+    /// a day later shows yesterday's "Ready" as if it were current, and a step's watchtower version becomes valid
+    /// about fifty blocks (roughly eight hours) after the step itself. Written in the same value as the set, so
+    /// the time can never describe a different write than the statuses beside it.
+    /// </para>
+    /// <para>
+    /// A set stored before this envelope existed is a bare array, and still reads — with no time, which the page
+    /// renders as "not recorded" rather than inventing one.
+    /// </para>
+    /// </remarks>
+    private sealed record StoredTransactionSet(DateTimeOffset? StatusesReadUtc, SparkExitTransaction[]? Transactions);
+
+    private static string SerializeTransactions(IEnumerable<SparkExitTransaction> transactions, DateTimeOffset readAt) =>
+        JsonSerializer.Serialize(new StoredTransactionSet(readAt, transactions.ToArray()), JsonOptions);
 
     /// <summary>
     /// The leaf ids this exit was pinned to, or an empty list when the column cannot be read.
@@ -1554,13 +2147,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// </remarks>
     /// <returns>
     /// False when a built record's column could not be read as a well-formed set. True — with a null
-    /// <paramref name="transactions"/> — when there is simply nothing built yet.
+    /// <paramref name="transactions"/> — when there is simply nothing built yet, and true with an empty one when
+    /// the last build returned no transactions at all.
     /// </returns>
     private bool TryReadTransactions(
         UnilateralExitRecord? record,
-        out IReadOnlyList<SparkExitTransaction>? transactions)
+        out IReadOnlyList<SparkExitTransaction>? transactions) =>
+        TryReadTransactions(record, out transactions, out _);
+
+    /// <param name="statusesReadUtc">
+    /// When the stored statuses were last read from the chain, or null for a set written before that was
+    /// recorded. See <see cref="StoredTransactionSet"/>.
+    /// </param>
+    private bool TryReadTransactions(
+        UnilateralExitRecord? record,
+        out IReadOnlyList<SparkExitTransaction>? transactions,
+        out DateTimeOffset? statusesReadUtc)
     {
         transactions = null;
+        statusesReadUtc = null;
 
         if (record?.TransactionsJson is not { } json || string.IsNullOrWhiteSpace(json))
             return true;
@@ -1568,7 +2173,19 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         SparkExitTransaction[]? parsed;
         try
         {
-            parsed = JsonSerializer.Deserialize<SparkExitTransaction[]>(json, JsonOptions);
+            // Two shapes: the bare array every set was stored as before the read time was recorded, and the
+            // envelope written since. Told apart by the first character rather than by trying one and catching,
+            // so a malformed envelope is reported as malformed instead of as "not an array".
+            if (json.TrimStart().StartsWith('{'))
+            {
+                var envelope = JsonSerializer.Deserialize<StoredTransactionSet>(json, JsonOptions);
+                parsed = envelope?.Transactions;
+                statusesReadUtc = envelope?.StatusesReadUtc;
+            }
+            else
+            {
+                parsed = JsonSerializer.Deserialize<SparkExitTransaction[]>(json, JsonOptions);
+            }
         }
         catch (JsonException ex)
         {
@@ -1578,7 +2195,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return false;
         }
 
-        if (parsed is null || parsed.Length == 0 || parsed.Any(IsMalformed))
+        if (parsed is null || parsed.Any(IsMalformed))
         {
             _logger.LogError(
                 "Store {StoreId}: unilateral exit {ExitId} has a transaction set that parsed but is not usable",
@@ -1586,14 +2203,29 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return false;
         }
 
+        // An empty array is a readable answer, not a broken one. The build writes exactly what the SDK returned
+        // however short it is (see BuildAsync), and an empty set is one of those answers — Spark found nothing
+        // left to sign for these leaves. Calling it unreadable told the operator their only copy of the exit was
+        // damaged, and the page's own branch for an empty set could never render.
         transactions = parsed;
         return true;
 
+        // Status is checked for null before it is dereferenced, and it is the member most likely to arrive null:
+        // SparkExitTxStatus is a reference record, and System.Text.Json fills a missing or explicit-null member of
+        // a positional record with null whatever the declared nullability says. An exception here is not a page
+        // error — it escapes a request, and BTCPay disables the plugin and restarts the server over it.
+        //
+        // The hex and the txids are checked for what they are, not only for being present: the page pastes the hex
+        // into a shell command for the operator to run (see SparkExitTransaction.IsTxid), so a row whose "hex"
+        // could carry a quote must never reach it.
         static bool IsMalformed(SparkExitTransaction? transaction) =>
             transaction is null
-            || string.IsNullOrWhiteSpace(transaction.Txid)
-            || string.IsNullOrWhiteSpace(transaction.TxHex)
+            || !SparkExitTransaction.IsTxid(transaction.Txid)
+            || !SparkExitTransaction.IsTransactionHex(transaction.TxHex)
+            || (transaction.CpfpTxHex is not null && !SparkExitTransaction.IsTransactionHex(transaction.CpfpTxHex))
             || transaction.DependsOn is null
+            || transaction.DependsOn.Any(parent => !SparkExitTransaction.IsTxid(parent))
+            || transaction.Status is null
             || !Enum.IsDefined(transaction.Kind)
             || !Enum.IsDefined(transaction.Status.Readiness);
     }
@@ -1622,5 +2254,27 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         destination = candidate!.Trim();
         error = string.Empty;
         return true;
+    }
+}
+
+/// <summary>
+/// An SDK exit call that did not answer inside its deadline, so the request stopped waiting for it.
+/// </summary>
+/// <remarks>
+/// A <see cref="TimeoutException"/> so a caller that only knows the base type still reads it as one. Its message
+/// is written for a merchant, and names the one step of an exit that needs the Spark operators, because that is
+/// the usual reason: see <see cref="SparkUnilateralExitService.QuoteDeadline"/>.
+/// </remarks>
+internal sealed class SparkExitDeadlineException : TimeoutException
+{
+    public SparkExitDeadlineException(string what, TimeSpan deadline)
+        : base(string.Format(
+            CultureInfo.InvariantCulture,
+            "Spark did not finish {0} this exit within {1:N0} seconds. Preparing an exit first tries to refresh the "
+            + "wallet from the Spark operators, and that can hang while they are unreachable; the wait was abandoned "
+            + "so this store is not held up behind it",
+            what,
+            deadline.TotalSeconds))
+    {
     }
 }

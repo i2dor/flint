@@ -17,15 +17,6 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// </remarks>
 public static class StablecoinAmounts
 {
-    /// <summary>
-    /// The most a uniqueness nudge may add to an asked amount, in steps of the prompt's smallest unit.
-    /// </summary>
-    /// <remarks>
-    /// 999 millionths: under a tenth of a cent, on the one quote in a thousand that needs it. Past this many live
-    /// quotes for one exact amount on one route, the next is refused rather than nudged further.
-    /// </remarks>
-    public const int MaxUniquenessSteps = 999;
-
     /// <summary><c>10^exponent</c>, exactly.</summary>
     public static BigInteger Pow10(int exponent)
     {
@@ -86,38 +77,6 @@ public static class StablecoinAmounts
         var step = Pow10(decimals - divisibility);
         var remainder = BigInteger.Remainder(baseUnits, step);
         return remainder.IsZero ? baseUnits : baseUnits - remainder + step;
-    }
-
-    /// <summary>
-    /// The smallest amount at or above <paramref name="rounded"/>, in the prompt's smallest steps, that no other
-    /// live quote on the route is asking for — or null when the first <see cref="MaxUniquenessSteps"/> are all taken.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>This is what makes an exactly-paid receive attributable.</b> The payment that arrives names the amount the
-    /// payer deposited but not the address they deposited to, so two live quotes asking for the same amount on the
-    /// same route could not be told apart by the one who pays exactly — and paying exactly is what wallets do
-    /// with the EIP-681 URI or a copied amount. Nudging the second quote up by a millionth keeps every live ask on
-    /// a route distinct, for the price of that millionth.
-    /// </para>
-    /// <para>
-    /// Only needed when two quotes would otherwise ask the same: the SDK sizes each deposit from a live estimate,
-    /// so equal asks happen mostly when equal invoices are quoted inside one fiat-cache window. The common case is
-    /// no nudge at all.
-    /// </para>
-    /// </remarks>
-    public static BigInteger? UniqueAsk(BigInteger rounded, int decimals, int divisibility, IReadOnlySet<BigInteger> taken)
-    {
-        ArgumentNullException.ThrowIfNull(taken);
-        var step = decimals > divisibility ? Pow10(decimals - divisibility) : BigInteger.One;
-        for (var i = 0; i <= MaxUniquenessSteps; i++)
-        {
-            var candidate = rounded + step * i;
-            if (!taken.Contains(candidate))
-                return candidate;
-        }
-
-        return null;
     }
 
     /// <summary>A route amount as the payer should read it: the exact decimal, no trailing zeros.</summary>

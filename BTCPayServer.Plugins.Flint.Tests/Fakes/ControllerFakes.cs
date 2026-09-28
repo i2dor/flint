@@ -23,6 +23,49 @@ public sealed class FakeSparkStoreRuntime : ISparkStoreRuntime
 
     public Task<ISparkSdkClient?> GetSdkClientAsync(string storeId) =>
         Task.FromResult(Clients.TryGetValue(storeId, out var client) ? client : null);
+
+    /// <summary>What an import of the queue reports. Nothing queued, unless a test says otherwise.</summary>
+    public ExitStateImportReport NextImportReport { get; set; } = ExitStateImportReport.NothingPending;
+
+    /// <summary>Every store an import of the queue was asked for, in order.</summary>
+    public List<string> ImportRequests { get; } = [];
+
+    /// <summary>
+    /// Where an export from the page is stored when it succeeds; null stores nothing. The production rules
+    /// for when it is stored live in <c>SparkService</c> and are tested there.
+    /// </summary>
+    public IExitStateBackupStore? Backups { get; set; }
+
+    public Task<ExitStateImportReport> ImportPendingExitStateAsync(
+        string storeId, CancellationToken cancellationToken = default)
+    {
+        ImportRequests.Add(storeId);
+        return Task.FromResult(NextImportReport);
+    }
+
+    public async Task<ExitStateExportResult> ExportExitStateAsync(
+        string storeId, CancellationToken cancellationToken = default)
+    {
+        if (!Clients.TryGetValue(storeId, out var client))
+            return new ExitStateExportResult(null, false, "This store's Spark wallet is not running.");
+
+        try
+        {
+            var exported = await client.ExportUnilateralExitStateAsync(cancellationToken);
+            if (exported.Length > 0 && Backups is not null)
+            {
+                await Backups.WriteAsync(storeId, exported, null, cancellationToken);
+                return new ExitStateExportResult(exported, true);
+            }
+
+            return new ExitStateExportResult(exported, false);
+        }
+        catch (Exception ex)
+        {
+            return new ExitStateExportResult(null, false,
+                "Spark could not export this wallet's exit data: " + SparkErrors.Describe(ex));
+        }
+    }
 }
 
 /// <summary>Returns a fixed hot-wallet seed answer.</summary>

@@ -90,8 +90,13 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
     /// </summary>
     public string? AlwaysDeclineWith { get; set; }
 
+    /// <summary>Thrown by every <see cref="GetAsync"/> when set: the settings could not be read at all.</summary>
+    public Exception? FailGetsWith { get; set; }
+
     public Task<SparkSettings?> GetAsync(string storeId) =>
-        Task.FromResult(Settings.TryGetValue(storeId, out var settings) ? settings : null);
+        FailGetsWith is { } failure
+            ? Task.FromException<SparkSettings?>(failure)
+            : Task.FromResult(Settings.TryGetValue(storeId, out var settings) ? settings : null);
 
     public async Task<SparkSettingsApplied> SetAsync(string storeId, SparkSettings? settings)
     {

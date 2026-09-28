@@ -61,7 +61,11 @@ public class StablecoinActiveQuote
     /// <summary>The exact amount to send, as a decimal string in the token's own units.</summary>
     public string Amount { get; set; } = null!;
 
-    /// <summary>EIP-681 on an EVM chain, the bare address elsewhere — what the QR code encodes.</summary>
+    /// <summary>
+    /// EIP-681 on an EVM chain, the bare address elsewhere: the QR code, the "Pay in wallet" link and the Greenfield
+    /// payment link. Never what the copy button copies, which is always <see cref="DepositAddress"/> (see the
+    /// checkout component on why).
+    /// </summary>
     public string PaymentRequest { get; set; } = null!;
 
     public string? ContractAddress { get; set; }

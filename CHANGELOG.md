@@ -7,6 +7,22 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Upgrading — read before installing
+
+- **This release cannot be rolled back to 1.1.0 or earlier.** Breez Spark SDK 0.26 migrates every wallet's
+  local storage forward (four new storage migrations), and the SDK inside 1.1.0 refuses storage that is ahead
+  of it: after such a downgrade every store's wallet fails to start with `DatabaseTooFarAhead` and Lightning
+  is unavailable server-wide until this version or newer is installed again. Funds are not affected — they
+  are on Spark, and reinstalling this version brings every wallet back. This was seen on a test host, not
+  predicted: an automatic job reinstalled 1.1.0 over a 0.26 build and every store stayed down for three days.
+  If you want a real rollback path, snapshot `<DataDir>/Plugins/Flint` (the per-store SDK storage) before
+  upgrading; putting back an older plugin without that snapshot does not work.
+- **Disabling the plugin now affects more than Lightning on open invoices.** An invoice created while USDC and
+  USDT were switched on carries those two payment methods, and BTCPay cannot render the checkout of an invoice
+  whose payment method has no handler — so while Flint is disabled, removed or rolled back, those invoices'
+  checkout pages fail entirely, Lightning included, until it is back. BTCPay disables a plugin on its own after
+  an unhandled error, so this is worth knowing even if you never disable it by hand.
+
 ### Security
 
 - **A header credential on any line but the last is now redacted.** The scrubber's
@@ -33,11 +49,62 @@ All notable changes to this plugin are recorded here. The format follows
   customer, so an exactly paid invoice settles exactly. Each network is shown with its icon — on its button, in the
   middle of the QR code and on the address line — as the payer's check that they are on the right network; only
   networks the plugin has an icon for are offered. Mainnet only; built on Breez Spark SDK 0.26's cross-chain
-  receive through Orchestra. Payments are matched to invoices by quote, with every live ask kept unique per
-  network, and credited exactly once through the same reconciliation discipline as Lightning. See
+  receive through Orchestra. Payments are matched to invoices by the figures the provider fixed for each quote,
+  and no two open quotes on a network are allowed to share them — so a payer or exchange rounding the amount still
+  credits the right invoice, and anything that cannot be told apart is left for a person rather than guessed. On EVM
+  networks the QR code is a token-transfer (EIP-681) link, so a scanning wallet fills in the amount, but clicking it
+  copies only the bare deposit address — the link names the token contract first, and pasted where only an address
+  is read, the contract would become the recipient. After a partial payment
+  the checkout stops offering the old address and asks for a new one for the rest. Payments are credited exactly
+  once through the same reconciliation discipline as Lightning, and money that reaches the wallet but lands on no
+  invoice is listed on the store's Flint page. The plugin's default USDC/USDT rate rules cover exact pairs only,
+  so they never reprice another store's `BTC_USDT`. See
   [Accepting USDC and USDT](docs/stablecoin-payments.md), and the new provider in the
   [trust model](docs/trust-model.md).
 - **`GET`/`PUT /api/v1/stores/{storeId}/spark/stablecoins`**, the same switch through the Greenfield API.
+- **Experimental: a unilateral exit, behind `FLINT_EXPERIMENTAL_UNILATERAL_EXIT`.** With the environment
+  variable set to `1`, the Advanced page gains a way to take a store's balance on chain *without* Spark's
+  operators — the recovery path for operators that refuse or are gone. It is built on the SDK's exit API: an
+  exit is quoted and built from data the SDK holds locally, so it works without the operators, but only for
+  leaves whose data was collected while they were still reachable (which is what the exit-state backup below
+  is for). The plugin quotes, funds and signs; it **never broadcasts** — the operator pushes every
+  transaction by hand through a node with package relay. Fees are paid from a separate on-chain output the
+  operator funds, on an address derived from the store's seed at `m/84'/{coin}'/4607060'/0/{index}` (a
+  hardened account no wallet uses, so it cannot collide with BTCPay's own hot wallet). Funding discovery and
+  the default fee rate come from a block explorer (mempool.space on mainnet unless a server administrator sets
+  another), which learns the funding address. While an exit is in progress Flint refuses its own sweeps for that
+  store (`ExitInProgress` in the sweep history), and a build refuses rather than silently shrinking when the
+  leaves it was quoted for have moved. Packages need Bitcoin Core 29 or later. With the variable unset nothing of this runs, and every exit route answers 404. See
+  [Known limitations](docs/limitations.md).
+- **An exit-state backup, on the Advanced page** (with the exit enabled). The SDK can now export the wallet's unilateral-exit data
+  and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
+  wallet's own storage while the operators are gone. Flint keeps an automatic copy per store, refreshed when the
+  SDK reports the wallet's exit data changed, and the page downloads it. A pasted or uploaded backup (several
+  megabytes is normal) is imported into the running wallet at once, with the result shown; one that has not
+  imported yet waits in its own slot, is retried at every start, and is never overwritten by the automatic copy.
+  The automatic copy is imported back only when a wallet starts with empty storage, since importing an
+  out-of-date one makes spent leaves look spendable until the next sync. Backups are set aside, not deleted, when
+  a store is removed or moves to a new phrase. The blob is sensitive — it discloses the balance, how it is split
+  and the history — so it is never logged or rendered on the page.
+- **A "Check progress" control on the exit page.** Asks the chain how far a built exit has got and refreshes
+  every transaction's status. It reports whether the set is on track, finished (with a pointer to marking it
+  completed), or can no longer finish — in which case it says plainly that the money is not lost and that the
+  fix is to build again from the same leaves. It broadcasts and signs nothing; it needs the store's wallet
+  running, and the page shows when statuses were last read. Marking an exit completed follows Spark's own "done"
+  verdict, unless the operator explicitly confirms the sweep themselves. Building again hands Spark the funding
+  earlier builds committed (so a retry never needs a second full funding) and may raise the fee rate, which is
+  how a stalled exit is sped up.
+- **A "send these now" list above the transaction table**, naming exactly which transactions can be
+  broadcast at this moment and the command to run for each, so an operator opening the page a day later does
+  not have to read the whole set to find the actionable row.
+
+- **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
+  a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
+  out of the leaf rather than paid by the funding UTXO, so a step left unsent for more than those ~8 hours pays part of
+  its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
+  page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
+  tells the operator that following the Status column is what matters, since broadcasting an already-sent
+  transaction is harmless.
 
 ### Changed
 
@@ -53,40 +120,9 @@ All notable changes to this plugin are recorded here. The format follows
   more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
   unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
   so it cannot read as stuck and invite a second claim.
-- **A unilateral exit no longer needs Spark's operators to be reachable.** The experimental
-  unilateral exit is rebuilt on the SDK's exit API, which inverted the flow — an exit is now quoted
-  into a prepared request that is passed back into the build, `CheckUnilateralExit` reports progress
-  against the chain, and the SDK can export and import the wallet's exit data — and the plugin's
-  exit surface follows it. On the old API, pricing and building an exit talked to the operators, so
-  the flow only helped against operators who *refused*; against operators that were gone it could do
-  nothing. An exit is now quoted and built from data the SDK holds locally. The caveat is the point
-  of the next entry: this works for leaves whose data was collected while the operators *were*
-  reachable, and only for those.
-
-### Added
-
-- **An exit-state backup, on the Advanced page.** The SDK can now export the wallet's unilateral-exit data
-  and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
-  wallet's own storage while the operators are gone. The page exports a fresh blob for copying and stores a
-  pasted one, which a restart imports automatically. The blob is sensitive — it carries every leaf and its
-  transactions, so it discloses the balance, how it is split and the history — so it is never rendered back
-  out of storage, and the page says so.
-- **A "Check progress" control on the exit page.** Asks the chain how far a built exit has got and refreshes
-  every transaction's status. It reports whether the set is on track, finished (with a pointer to marking it
-  completed), or can no longer finish — in which case it says plainly that the money is not lost and that the
-  fix is to build again from the same leaves. It broadcasts and signs nothing, and it works with the store's
-  wallet stopped.
-- **A "send these now" list above the transaction table**, naming exactly which transactions can be
-  broadcast at this moment and the command to run for each, so an operator opening the page a day later does
-  not have to read the whole set to find the actionable row.
-
-- **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
-  a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
-  out of the leaf rather than paid by the funding UTXO, so a step left unsent for a day or more pays part of
-  its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
-  page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
-  tells the operator that following the Status column is what matters, since broadcasting an already-sent
-  transaction is harmless.
+- **A wallet whose storage a newer plugin already migrated is reported as that.** The start failure used to say
+  the store's configuration needed correcting; it now says the wallet's storage was written by a newer version,
+  that installing that version or newer fixes it, and that the funds are not affected.
 
 ### Fixed
 

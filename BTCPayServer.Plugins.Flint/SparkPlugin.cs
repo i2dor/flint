@@ -282,12 +282,31 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
         // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora
         // instance. Short timeout: a request thread is waiting on it while the exit page renders.
-        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, client =>
+        //
+        // Redirects are off on both: the URL is an operator setting, and a public host answering 3xx could
+        // otherwise send the server to an internal address the checks on that setting never saw. The direct
+        // client also refuses link-local, unspecified and multicast addresses at connect time, whatever the
+        // hostname resolved to; an onion explorer goes through BTCPay's SOCKS endpoint instead.
+        void ConfigureExplorerClient(HttpClient client)
         {
             client.Timeout = SparkExitFundingExplorer.RequestTimeout;
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
-        });
+        }
+
+        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = SparkExitFundingExplorer.ConnectFilteredAsync
+            });
+        services.AddHttpClient(SparkExitFundingExplorer.OnionHttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(provider =>
+            {
+                var handler = ActivatorUtilities.CreateInstance<BTCPayServer.Services.Socks5HttpClientHandler>(provider);
+                handler.AllowAutoRedirect = false;
+                return handler;
+            });
         services.AddSingleton<SparkExitFundingExplorer>();
         services.AddSingleton(provider =>
         {
@@ -378,6 +397,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("spark-setup-post-body", "Spark/SparkStablecoinSetupStep");
         services.AddUIExtension("checkout-end", "Spark/StablecoinCheckout");
         services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
+        // And, on the status page, the USDC/USDT money that is on no invoice — which otherwise only the server log knew.
+        services.AddUIExtension("spark-status-post-body", "Spark/StablecoinAttention");
 
         base.Execute(services);
     }
@@ -397,9 +418,10 @@ public class SparkPlugin : BaseBTCPayServerPlugin
     /// <b>Rates.</b> A prompt is denominated in the coin, so BTCPay needs <c>USDC_X</c> and <c>USDT_X</c> for
     /// every invoice currency. Both coins are taken at dollar parity — exactly as the SDK sizes the quote — and
     /// crossed through bitcoin for anything else, so a store needs no rate configuration of its own: the preferred
-    /// exchange that already prices <c>BTC_X</c> prices these too. The exact <c>_USD</c> rule outranks the store's
-    /// catch-all, so a dollar invoice asks for exactly its price rather than for a bid/ask spread's worth more. A
-    /// store on custom rate scripting has to add these itself, which the docs say.
+    /// exchange that already prices <c>BTC_X</c> prices these too. The rules are exact pairs, one per fiat currency,
+    /// because default rules are server-wide and a pattern rule would reprice other stores' <c>BTC_USDT</c>
+    /// (<see cref="StablecoinRateRules"/>). A store on custom rate scripting has to add these itself, which the docs
+    /// say.
     /// </para>
     /// </remarks>
     private static void AddStablecoinPayments(IServiceCollection services)
@@ -447,12 +469,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 Symbol = null,
                 Crypto = true
             });
-            services.AddSingleton(new DefaultRules(
-            [
-                $"{asset.Symbol}_USD = 1",
-                $"{asset.Symbol}_X = {asset.Symbol}_BTC * BTC_X",
-                $"{asset.Symbol}_BTC = 1 / BTC_USD"
-            ]));
+            // Exact pairs only, so they price these prompts and nothing else on the server: see StablecoinRateRules.
+            services.AddSingleton(StablecoinRateRules.For(asset));
         }
 
         // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the

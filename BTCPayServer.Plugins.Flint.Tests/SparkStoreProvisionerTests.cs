@@ -31,7 +31,7 @@ public class SparkStoreProvisionerTests
         WriteLog Writes,
         CapturingLogger<SparkStoreProvisioner> Log);
 
-    private static Harness Create(bool storeExists = true)
+    private static Harness Create(bool storeExists = true, IExitStateBackupStore? exitStateBackups = null)
     {
         // One shared log across both fakes, because the ordering between them is the invariant that matters and
         // two separate call counters cannot express it.
@@ -48,7 +48,7 @@ public class SparkStoreProvisionerTests
         var log = new CapturingLogger<SparkStoreProvisioner>();
 
         return new Harness(
-            new SparkStoreProvisioner(settings, wiring, protector, log),
+            new SparkStoreProvisioner(settings, wiring, protector, log, exitStateBackups),
             settings, config, protector, writes, log);
     }
 
@@ -292,6 +292,38 @@ public class SparkStoreProvisionerTests
         Assert.Equal(original!.PaymentKey, h.Settings.Settings[StoreId]!.PaymentKey);
         // And the wiring still carries the string those settings agree with.
         Assert.Equal(originalWiring, h.Config.Stores[StoreId].ConnectionString);
+    }
+
+    [Fact]
+    public async Task A_seed_change_keeps_the_old_wallet_s_deprecated_backup_aside_instead_of_carrying_it()
+    {
+        // An earlier version kept the exit-state backup in the settings. Carried to a new seed, the new
+        // wallet's connect would adopt the old wallet's blob as its own.
+        var backups = new FakeExitStateBackupStore();
+        var h = Create(exitStateBackups: backups);
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "old-wallet-legacy-blob";
+
+        var replacement = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, replacement, SeedSource.Imported)).Succeeded);
+
+        Assert.Null(h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup);
+        Assert.Equal([(StoreId, ExitStateBackupSetAside.OtherWallet)], backups.SetAsides);
+        Assert.DoesNotContain("old-wallet-legacy-blob", h.Log.AllText);
+    }
+
+    [Fact]
+    public async Task Re_provisioning_the_same_seed_keeps_its_deprecated_backup_for_the_connect_to_adopt()
+    {
+        var backups = new FakeExitStateBackupStore();
+        var h = Create(exitStateBackups: backups);
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "same-wallet-legacy-blob";
+
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Imported)).Succeeded);
+
+        Assert.Equal("same-wallet-legacy-blob", h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup);
+        Assert.Empty(backups.SetAsides);
     }
 
     [Fact]

@@ -162,8 +162,18 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 _ => null
             },
             statusFilter: query.CompletedOnly ? [Breez.Sdk.Spark.PaymentStatus.Completed] : null,
-            assetFilter: null,
-            paymentDetailsFilter: null,
+            // A token payment is one with token metadata. The SDK's Token details filter cannot say that on its own
+            // (alone it reads "not a Spark transfer", which Lightning and deposits also are), so it goes by asset.
+            assetFilter: query.Method switch
+            {
+                null or SparkPaymentMethod.Spark => null,
+                SparkPaymentMethod.Token => new AssetFilter.Token(null),
+                var other => throw new ArgumentOutOfRangeException(
+                    nameof(query), other, "Payments can only be listed by kind for Spark transfers and token payments.")
+            },
+            paymentDetailsFilter: query.Method is SparkPaymentMethod.Spark
+                ? [new PaymentDetailsFilter.Spark(null, null)]
+                : null,
             fromTimestamp: query.From is null ? null : (ulong)Math.Max(0, query.From.Value.ToUnixTimeSeconds()),
             toTimestamp: null,
             offset: (uint)Math.Max(0, query.Offset),
@@ -1287,7 +1297,34 @@ public sealed class SparkSdkClient : ISparkSdkClient
                     .Select(branch => new SparkExitBranchFunding(branch.leafId, ToLong(branch.fundingSat)))
                     .ToList(),
             prepared.feeRateSatPerVbyte,
-            prepared.destination);
+            prepared.destination,
+            MapFinishedLeafIds(prepared.exitChainState));
+    }
+
+    /// <summary>
+    /// The leaves the prepare's chain read shows as finished: a refund that was swept, or a branch the exit can
+    /// no longer continue.
+    /// </summary>
+    /// <remarks>
+    /// These are exactly the leaves the SDK drops from a quote even when they are named
+    /// (<c>drop_finished_leaves</c>), so they are what lets a caller tell "done" apart from "missing from local
+    /// storage" when a pinned leaf does not come back. Every level is null-tolerant: the binding's records are
+    /// reference types a future SDK may leave unset, and this runs on a request path.
+    /// </remarks>
+    internal static IReadOnlyList<string> MapFinishedLeafIds(ExitChainState? state)
+    {
+        if (state is null)
+            return [];
+
+        var swept = (state.refunds ?? [])
+            .Where(refund => refund?.state is ExitRefundState.Swept)
+            .Select(refund => refund.leafId);
+
+        return swept
+            .Concat(state.stoppedLeafIds ?? [])
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
     }
 
     private static IReadOnlyList<SparkExitLeaf> MapExitLeaves(UnilateralExitLeaf[]? leaves) =>

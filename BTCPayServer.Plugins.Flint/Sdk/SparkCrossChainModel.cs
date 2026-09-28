@@ -173,8 +173,11 @@ public enum SparkConversionStatus
 /// provider reports delivery — which, again, arrives through no event.
 /// </param>
 /// <param name="AssetAmountIn">
-/// On a <b>receive</b>, what the payer actually deposited on <paramref name="Chain"/>, in the external asset's
-/// base units (<paramref name="AssetDecimals"/>). On a send, the Spark amount expressed in the external asset.
+/// On a <b>receive</b>, the provider order's <c>amountIn</c> on <paramref name="Chain"/>, in the external asset's
+/// base units (<paramref name="AssetDecimals"/>) — or, when the order omits it, the SDK's quote-time deposit,
+/// which it falls back to silently. So a value equal to the quoted deposit is not evidence of what was sent; see
+/// <c>StablecoinPaymentService</c> for how crediting reads it. On a send, the Spark amount expressed in the
+/// external asset.
 /// </param>
 /// <param name="EstimatedOut">
 /// Frozen at quote time. On a receive this is in Spark-side units (sats, or token base units) and equals the

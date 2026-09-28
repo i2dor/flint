@@ -178,7 +178,9 @@ public abstract class UnilateralExitRecordStoreContractTests
         Assert.Equal("""[{"Kind":"Fanout","Txid":"bb"}]""", read.TransactionsJson);
         Assert.Equal(Destination, read.DestinationAddress);
         Assert.Equal("""["leaf-a","leaf-b"]""", read.LeafIdsJson);
-        Assert.Equal(12, read.FeeRateSatPerVbyte);
+        // The one column an operator's later decision may change: a fee bump re-prices the exit at a higher rate
+        // and writes it with the figures it produced.
+        Assert.Equal(400, read.FeeRateSatPerVbyte);
         Assert.Equal(Origin, read.CreatedUtc);
         Assert.Equal(0, read.FundingKeyIndex);
     }
