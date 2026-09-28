@@ -121,6 +121,17 @@ public sealed class BTCPayStablecoinInvoiceGateway : IStablecoinInvoiceGateway
         }
 
         var details = ParseDetails(handler, prompt) ?? new StablecoinPromptDetails();
+
+        // A reused quote the prompt already shows: nothing to write, nobody to wake. Rewriting it on every click
+        // rewrote the invoice and re-added its address as a search term each time.
+        if (details.Quote?.QuoteId == quote.QuoteId
+            && prompt.Destination == quote.DepositAddress
+            && prompt.PaymentMethodFee == quote.Fee)
+        {
+            return;
+        }
+
+        var addressIsNew = prompt.Destination != quote.DepositAddress;
         details.Quote = quote;
 
         prompt.Destination = quote.DepositAddress;
@@ -134,7 +145,8 @@ public sealed class BTCPayStablecoinInvoiceGateway : IStablecoinInvoiceGateway
         await _invoiceRepository
             .UpdatePrompt(invoiceId, prompt, [quote.DepositAddress])
             .ConfigureAwait(false);
-        await _invoiceRepository.AddSearchTerms(invoiceId, [quote.DepositAddress]).ConfigureAwait(false);
+        if (addressIsNew)
+            await _invoiceRepository.AddSearchTerms(invoiceId, [quote.DepositAddress]).ConfigureAwait(false);
 
         // What wakes a checkout listening on the invoice's websocket, so it refetches and shows the new due.
         _eventAggregator.Publish(new InvoiceNewPaymentDetailsEvent(invoiceId, details, paymentMethodId));

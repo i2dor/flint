@@ -520,16 +520,31 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
-    public async Task Any_other_refusal_reaches_the_payer_in_the_providers_words()
+    public async Task Any_other_refusal_reaches_the_payer_in_the_plugins_words_and_the_log_in_the_providers()
     {
+        // The checkout is anonymous; the provider's and the SDK's error text is for whoever runs the server.
         var setup = Create();
         Invoice(setup);
-        setup.Sdk.FailCrossChainReceiveWith = new SdkException.NetworkException("@v1=provider timed out");
+        setup.Sdk.FailCrossChainReceiveWith = new SdkException.NetworkException("@v1=provider timed out at 10.0.0.7");
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
 
         Assert.Null(result.Quote);
-        Assert.Contains("provider timed out", result.Error);
+        Assert.Equal("USDC on Ethereum cannot take this payment right now. Try again shortly, or choose another network.", result.Error);
+        Assert.Contains(setup.Harness.Log.Lines, line => line.Contains("provider timed out"));
+    }
+
+    [Fact]
+    public async Task The_stores_switch_answers_rather_than_throws_when_its_configuration_cannot_be_read()
+    {
+        // The Flint pages call these inside BTCPay's request, where an escaped exception restarts the server.
+        var setup = Create();
+        setup.Harness.StoreConfig.FailWith = new InvalidOperationException("database unavailable");
+
+        Assert.False(await setup.Service.IsEnabledAsync(StoreId, Ct));
+        Assert.Null(await setup.Service.TryReadEnabledAsync(StoreId, Ct));
+        Assert.False(await setup.Service.SetEnabledAsync(StoreId, true, Ct));
+        Assert.False(await setup.Service.SetEnabledAsync(StoreId, false, Ct));
     }
 
     [Fact]

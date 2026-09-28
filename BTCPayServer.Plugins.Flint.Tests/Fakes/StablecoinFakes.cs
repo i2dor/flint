@@ -331,11 +331,20 @@ public sealed class FakeStablecoinStoreConfig : IStablecoinStoreConfig
     public HashSet<string> KnownStores { get; } = [];
     public HashSet<string> Enabled { get; } = [];
 
-    public Task<bool?> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default) =>
-        Task.FromResult<bool?>(KnownStores.Count > 0 && !KnownStores.Contains(storeId) ? null : Enabled.Contains(storeId));
+    /// <summary>Thrown by both methods: the store repository's database is down.</summary>
+    public Exception? FailWith { get; set; }
+
+    public Task<bool?> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (FailWith is not null)
+            throw FailWith;
+        return Task.FromResult<bool?>(KnownStores.Count > 0 && !KnownStores.Contains(storeId) ? null : Enabled.Contains(storeId));
+    }
 
     public Task<bool> SetEnabledAsync(string storeId, bool enabled, CancellationToken cancellationToken = default)
     {
+        if (FailWith is not null)
+            throw FailWith;
         if (KnownStores.Count > 0 && !KnownStores.Contains(storeId))
             return Task.FromResult(false);
         if (enabled)

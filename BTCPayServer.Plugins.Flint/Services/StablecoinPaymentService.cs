@@ -155,13 +155,36 @@ public sealed class StablecoinPaymentService
 
     #region The store's switch
 
-    /// <summary>Whether the store offers USDC and USDT at checkout. False for a store that does not exist.</summary>
+    /// <summary>
+    /// Whether the store offers USDC and USDT at checkout. False for a store that does not exist — and for one whose
+    /// configuration cannot be read right now, which is logged.
+    /// </summary>
+    /// <remarks>
+    /// Never throws, because the Flint pages call it inside BTCPay's request, where an exception from plugin code
+    /// disables the plugin and restarts the server. A caller that must tell "off" from "could not tell" uses
+    /// <see cref="TryReadEnabledAsync"/>.
+    /// </remarks>
     public async Task<bool> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default) =>
-        await _storeConfig.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+        await TryReadEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+
+    /// <summary>Whether the store offers USDC and USDT at checkout, or null when that cannot be read right now.</summary>
+    public async Task<bool?> TryReadEnabledAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _storeConfig.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not read whether USDC and USDT payments are on", storeId);
+            return null;
+        }
+    }
 
     /// <summary>
     /// Turns USDC and USDT on or off for a store. Turning them on is refused off mainnet, where no invoice could
-    /// ever offer them; turning them off always goes through.
+    /// ever offer them; turning them off always goes through. False when nothing was changed, including when the
+    /// store's configuration could not be written, which is logged rather than thrown (see <see cref="IsEnabledAsync"/>).
     /// </summary>
     public async Task<bool> SetEnabledAsync(string storeId, bool enabled, CancellationToken cancellationToken = default)
     {
@@ -169,7 +192,18 @@ public sealed class StablecoinPaymentService
         if (enabled && !Available)
             return false;
 
-        var updated = await _storeConfig.SetEnabledAsync(storeId, enabled, cancellationToken).ConfigureAwait(false);
+        bool updated;
+        try
+        {
+            updated = await _storeConfig.SetEnabledAsync(storeId, enabled, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not turn USDC and USDT payments {State}",
+                storeId, enabled ? "on" : "off");
+            return false;
+        }
+
         if (updated)
         {
             _logger.LogInformation(
@@ -622,8 +656,9 @@ public sealed class StablecoinPaymentService
             _logger.LogInformation(
                 "Store {StoreId}: could not quote {Asset} on {Chain} for invoice {InvoiceId} ({Reason})",
                 invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId, reason);
-            // The two typed refusals get the payer's own sentence; the provider's words, written for the integrator,
-            // are in the log line above. Anything else is relayed, scrubbed, as the provider put it.
+            // The payer only ever reads the plugin's own sentences; the provider's words are in the log line above.
+            // They are written for the integrator, and relaying even a scrubbed error to an anonymous checkout hands
+            // whoever holds an invoice link the provider's and the SDK's internals.
             return (null, StablecoinQuoteResult.Refused(
                 SparkErrors.AmountOutOfRange(ex) is { } range
                     ? OutOfRange(asset, network.Name, range, (int)route.Decimals, amount)
@@ -631,7 +666,7 @@ public sealed class StablecoinPaymentService
                         ? temporary
                             ? $"{asset.Symbol} on {network.Name} is unavailable right now. Try again shortly, or choose another network."
                             : $"{asset.Symbol} on {network.Name} can't take this payment. Choose another network."
-                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}"));
+                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now. Try again shortly, or choose another network."));
         }
     }
 
