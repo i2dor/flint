@@ -282,12 +282,31 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
         // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora
         // instance. Short timeout: a request thread is waiting on it while the exit page renders.
-        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, client =>
+        //
+        // Redirects are off on both: the URL is an operator setting, and a public host answering 3xx could
+        // otherwise send the server to an internal address the checks on that setting never saw. The direct
+        // client also refuses link-local, unspecified and multicast addresses at connect time, whatever the
+        // hostname resolved to; an onion explorer goes through BTCPay's SOCKS endpoint instead.
+        void ConfigureExplorerClient(HttpClient client)
         {
             client.Timeout = SparkExitFundingExplorer.RequestTimeout;
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
-        });
+        }
+
+        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = SparkExitFundingExplorer.ConnectFilteredAsync
+            });
+        services.AddHttpClient(SparkExitFundingExplorer.OnionHttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(provider =>
+            {
+                var handler = ActivatorUtilities.CreateInstance<BTCPayServer.Services.Socks5HttpClientHandler>(provider);
+                handler.AllowAutoRedirect = false;
+                return handler;
+            });
         services.AddSingleton<SparkExitFundingExplorer>();
         services.AddSingleton(provider =>
         {

@@ -104,6 +104,60 @@ public sealed class SparkExitFundingExplorer
     public const string HttpClientName = "spark-exit-funding-explorer";
 
     /// <summary>
+    /// The same client routed through BTCPay's SOCKS endpoint, used for a <c>.onion</c> explorer.
+    /// </summary>
+    /// <remarks>
+    /// BTCPay only proxies the clients it names itself (webhooks, payjoin), so without a second registration an
+    /// onion explorer — the privacy-preserving choice the settings copy points an operator towards — could never
+    /// be reached. Clearnet explorers deliberately stay on the direct client, where the address filter in
+    /// <see cref="ConnectFilteredAsync"/> applies; through a proxy the resolved address is the proxy's to see.
+    /// </remarks>
+    public const string OnionHttpClientName = HttpClientName + "-onion";
+
+    /// <summary>
+    /// The direct client's connect step: resolve the host and refuse any address that is never an explorer.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryNormaliseApiUrl"/> refuses such addresses written as literals, but a hostname can resolve to
+    /// one — the cloud metadata service at 169.254.169.254 is the target that matters — and only the connect step
+    /// sees the address actually dialled. Redirects are off on this client for the same reason (see
+    /// <c>SparkPlugin</c>), so a public host cannot bounce the request somewhere the filter never looked.
+    /// Loopback and private ranges stay reachable on purpose: a self-hosted or regtest esplora lives there.
+    /// </remarks>
+    internal static async ValueTask<Stream> ConnectFilteredAsync(
+        SocketsHttpConnectionContext context,
+        CancellationToken cancellationToken)
+    {
+        var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, cancellationToken)
+            .ConfigureAwait(false);
+        var allowed = addresses.Where(address => !IsNeverAnExplorer(address)).ToArray();
+        if (allowed.Length == 0)
+        {
+            throw new HttpRequestException(
+                "The explorer's host resolves only to addresses that are never a block explorer.");
+        }
+
+        var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            await socket.ConnectAsync(allowed, context.DnsEndPoint.Port, cancellationToken).ConfigureAwait(false);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Which named client serves <paramref name="url"/>: the SOCKS one for an onion host.</summary>
+    internal static string ClientNameFor(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && uri.DnsSafeHost.EndsWith(".onion", StringComparison.OrdinalIgnoreCase)
+            ? OnionHttpClientName
+            : HttpClientName;
+
+    /// <summary>
     /// The default explorer, used on mainnet when the store has configured no override.
     /// </summary>
     /// <remarks>
@@ -517,7 +571,7 @@ public sealed class SparkExitFundingExplorer
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken, deadline.Token);
 
-            var client = _httpClientFactory.CreateClient(HttpClientName);
+            var client = _httpClientFactory.CreateClient(ClientNameFor(url));
 
             using var response = await client
                 .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, bounded.Token)
@@ -596,7 +650,7 @@ public sealed class SparkExitFundingExplorer
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken, deadline.Token);
 
-            var client = _httpClientFactory.CreateClient(HttpClientName);
+            var client = _httpClientFactory.CreateClient(ClientNameFor(url));
 
             using var response = await client
                 .GetAsync(url, HttpCompletionOption.ResponseHeadersRead, bounded.Token)
