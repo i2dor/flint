@@ -803,6 +803,68 @@ public class SparkExitPageTests
     }
 
     /// <summary>
+    /// A backup file the process cannot open is a message on the page, never an exception out of the action.
+    /// </summary>
+    /// <remarks>
+    /// BTCPay's plugin exception handler answers an unhandled exception during a request by disabling the
+    /// plugin and restarting the server, so a permissions fault on one file — or an open racing a
+    /// concurrent clear — would have taken every store's Lightning down with it.
+    /// </remarks>
+    [Fact]
+    public async Task A_download_whose_file_cannot_be_opened_redirects_with_a_reason_instead_of_throwing()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", CancellationToken.None);
+        h.ExitStateBackups.FailReadWith = new UnauthorizedAccessException("permission denied");
+
+        var redirect = Assert.IsType<RedirectToActionResult>(
+            await h.Mvc.DownloadExitStateBackup(Store, CancellationToken.None));
+
+        Assert.Equal(nameof(h.Mvc.Advanced), redirect.ActionName);
+        var message = Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
+        Assert.Contains("could not be read", message);
+    }
+
+    /// <summary>
+    /// A save that throws becomes an error on the page, not an exception out of the action.
+    /// </summary>
+    [Fact]
+    public async Task A_backup_save_that_throws_redirects_with_an_error_instead_of_throwing()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService { ThrowFromSetExitState = new InvalidOperationException("boom") };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var redirect = Assert.IsType<RedirectToActionResult>(await h.Mvc.SetExitStateBackup(
+            Store, new SparkAdvancedViewModel { ExitStateBackup = "pasted-secret" }, CancellationToken.None));
+
+        Assert.Equal(nameof(h.Mvc.Advanced), redirect.ActionName);
+        var message = Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
+        Assert.Contains("could not be saved", message);
+        Assert.DoesNotContain("pasted-secret", message);
+    }
+
+    /// <summary>
+    /// The Advanced page still renders when the backup's timestamp cannot be read.
+    /// </summary>
+    [Fact]
+    public async Task The_advanced_page_renders_when_the_backup_timestamp_cannot_be_read()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", CancellationToken.None);
+        h.ExitStateBackups.FailReadWith = new IOException("disk error");
+
+        var view = Assert.IsType<ViewResult>(await h.Mvc.Advanced(Store, CancellationToken.None));
+        var model = Assert.IsType<SparkAdvancedViewModel>(view.Model);
+        Assert.Null(model.ExitStateBackupTakenAt);
+    }
+
+    /// <summary>
     /// Runs the controller's caching filter where MVC runs it — as an action filter, before the action.
     /// </summary>
     /// <remarks>
@@ -961,6 +1023,9 @@ public class SparkExitPageTests
 
         public UnilateralExitOpResult Result { get; set; } = new(true, null, null);
 
+        /// <summary>Thrown by the exit-state save when set: the backstop an action must still survive.</summary>
+        public Exception? ThrowFromSetExitState { get; set; }
+
         /// <summary>Every call, in order, with the arguments that came off the form.</summary>
         public List<string> Calls { get; } = [];
 
@@ -1019,7 +1084,9 @@ public class SparkExitPageTests
             string storeId, string? exitState, CancellationToken cancellationToken = default)
         {
             Calls.Add($"ExitState:{exitState ?? "(null)"}");
-            return Task.FromResult(Result);
+            return ThrowFromSetExitState is { } failure
+                ? Task.FromException<UnilateralExitOpResult>(failure)
+                : Task.FromResult(Result);
         }
 
         public Task<UnilateralExitOpResult> SetExplorerUrlAsync(

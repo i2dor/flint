@@ -62,7 +62,9 @@ public sealed class FakeExitStateBackupStore : IExitStateBackupStore
     }
 
     public Task<DateTimeOffset?> TakenAtAsync(string storeId, CancellationToken cancellationToken = default) =>
-        Task.FromResult(Stored(storeId) is null ? null : TakenAt);
+        FailReadWith is { } failure
+            ? Task.FromException<DateTimeOffset?>(failure)
+            : Task.FromResult(Stored(storeId) is null ? null : TakenAt);
 
     public Task WriteAsync(string storeId, string backup, CancellationToken cancellationToken = default)
     {

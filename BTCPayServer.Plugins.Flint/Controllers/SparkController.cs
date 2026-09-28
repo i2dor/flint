@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -858,9 +859,32 @@ public class SparkController : Controller
             // because the plugin refreshes this file on its own as the wallet's leaves change — this page is
             // showing the operator how current the automation is, not asking whether they want a backup.
             ExitStateBackupTakenAt = Constants.UnilateralExitEnabled
-                ? await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
+                ? await ReadBackupTakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
                 : null
         };
+    }
+
+    /// <summary>
+    /// When the stored exit-state backup was written, or null when none is — or when that cannot be read.
+    /// </summary>
+    /// <remarks>
+    /// Never throws: every Advanced-page action renders through <see cref="BuildAdvancedViewModel"/>, and a
+    /// filesystem fault reading one timestamp must not take the page — or, through BTCPay's plugin
+    /// exception handler, the plugin — down with it. A read that failed is logged and shown as "none
+    /// stored", which the Download action then re-checks for itself.
+    /// </remarks>
+    private async Task<DateTimeOffset?> ReadBackupTakenAtAsync(string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: could not read when its exit-state backup was written", storeId);
+            return null;
+        }
     }
 
     #endregion
@@ -1262,8 +1286,30 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
-        var backup = await _exitStateBackupStore.OpenReadAsync(storeId, cancellationToken)
-            .ConfigureAwait(false);
+        // Never throws. An unhandled exception out of a plugin action is what BTCPay's plugin exception
+        // handler answers by disabling the plugin and restarting the server, and this action's failures
+        // are ordinary filesystem ones — a file the process cannot open, a disk error. They become a
+        // message on the page the operator pressed the button on.
+        Stream? backup;
+        DateTimeOffset? takenAt;
+        try
+        {
+            backup = await _exitStateBackupStore.OpenReadAsync(storeId, cancellationToken)
+                .ConfigureAwait(false);
+            takenAt = backup is null
+                ? null
+                : await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The exception is a filesystem one and names a path, never the content.
+            _logger.LogWarning(ex, "Store {StoreId}: the stored exit-state backup could not be opened", storeId);
+            TempData[WellKnownTempData.ErrorMessage] =
+                "The stored exit-state backup could not be read, so nothing was downloaded. Check the server "
+                + "log for the reason; the file itself was left as it was.";
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
         if (backup is null)
         {
             TempData[WellKnownTempData.ErrorMessage] =
@@ -1271,8 +1317,6 @@ public class SparkController : Controller
                 + "wallet's leaves change; Export takes one now.";
             return RedirectToAction(nameof(Advanced), new { storeId });
         }
-
-        var takenAt = await _exitStateBackupStore.TakenAtAsync(storeId, cancellationToken).ConfigureAwait(false);
 
         // The length and nothing else, as everywhere this blob is handled — and a file's length now,
         // in bytes, which is exactly the size of the artifact being handed over.
@@ -1313,9 +1357,24 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
-        var result = await _unilateralExit
-            .SetExitStateBackupAsync(storeId, vm.ExitStateBackup, cancellationToken)
-            .ConfigureAwait(false);
+        UnilateralExitOpResult result;
+        try
+        {
+            result = await _unilateralExit
+                .SetExitStateBackupAsync(storeId, vm.ExitStateBackup, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The service reports its own failures as results; this is the backstop for anything it did
+            // not, because an exception out of this action disables the plugin. The type only: whatever
+            // threw was handed the pasted blob.
+            _logger.LogError(
+                "Store {StoreId}: saving an exit-state backup failed unexpectedly ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            result = new UnilateralExitOpResult(false,
+                "The exit-state backup could not be saved. Check the server log for the reason.", null);
+        }
 
         RelayExitResult(
             result,
