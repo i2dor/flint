@@ -556,6 +556,24 @@
                     Nothing has broadcast them and nothing will. Copy them somewhere safe before you start.
                 </div>
 
+                @*
+                    When the statuses below were last read from the chain. Nothing refreshes them between a build
+                    or a check — no background task watches an exit — so a "Ready" from yesterday reads exactly
+                    like one from a minute ago unless the page says which it is.
+                *@
+                <p class="text-secondary" id="SparkExitStatusesReadAt">
+                    @if (Model.StatusesReadUtc is { } readAt)
+                    {
+                        <span>Statuses below were read from the chain at <strong>@readAt.ToString("u")</strong>, by
+                        the last build or check. They do not update on their own.</span>
+                    }
+                    else
+                    {
+                        <span>When the statuses below were last read from the chain was not recorded. Press
+                        <em>Check progress</em> to refresh them before acting on them.</span>
+                    }
+                </p>
+
                 <div class="alert alert-warning" role="alert" id="SparkExitBroadcastOrder">
                     <p>
                         <strong>Follow the Status column.</strong> Every row tells you whether it may go out yet,
@@ -565,21 +583,25 @@
                     </p>
                     <p>
                         <strong>You need a node that can accept packages</strong> —
-                        <code>bitcoin-cli submitpackage</code>. A plain <code>sendrawtransaction</code> rejects
-                        the tree transactions: they pay zero fee on their own and are only acceptable together
-                        with the child that funds them.
+                        <code>bitcoin-cli submitpackage</code>, on <strong>Bitcoin Core 29 or later</strong>. A
+                        plain <code>sendrawtransaction</code> rejects the tree transactions: they pay zero fee on
+                        their own and are only acceptable together with the child that funds them. Each also
+                        carries a zero-value pay-to-anchor (P2A) output for that child to spend, and older nodes
+                        refuse to relay those, so a package that fails with a dust or standardness error on an older
+                        node is not a broken exit — it needs a newer node.
                     </p>
                     <p>
-                        <strong>Check this page every day, not at the end.</strong> Roughly 50 blocks — about
-                        eight hours — after a step becomes valid, a second version of that same step becomes
-                        valid too. Spark's watchtowers hold it as a safety net for a wallet that goes offline
+                        <strong>Check this page every few hours while steps are becoming valid, not once a
+                        day.</strong> Roughly 50 blocks — about eight hours — after a step becomes valid, a second
+                        version of that same step becomes valid too. Spark's watchtowers hold it as a safety net for a wallet that goes offline
                         part-way through, and they can send it once it unlocks. Both versions move the same
                         money to the same place; they differ only in who pays the mining fee. The version this
                         plugin builds is paid for by the funding UTXO, at the rate you were quoted. The
                         watchtower's version has its fee built in and takes it out of the leaf, so it comes off
                         what arrives at your destination, at a rate you have no say in. <strong>A step left
-                        unbroadcast for a day or more can therefore end up paying for parts of itself out of the
-                        money it is recovering.</strong>
+                        unbroadcast for more than about eight hours after it became ready can therefore end up
+                        paying for parts of itself out of the money it is recovering.</strong> The statuses on this
+                        page do not update on their own — press <em>Check progress</em> to refresh them.
                     </p>
                     <ol class="mb-0">
                         <li>
@@ -901,8 +923,9 @@
                             <strong>It broadcasts nothing and signs nothing</strong>, so it is safe to press as
                             often as you like. It needs this store's Spark wallet running — the check goes
                             through the wallet's connection to the chain — though the transactions themselves do
-                            not. Checking daily is the point: a step left unsent for a day or more
-                            can start paying its own fee out of the money it is recovering.
+                            not. Press it after each broadcast and every few hours while steps are maturing: a
+                            step left unsent for more than about eight hours after it became ready can start
+                            paying its own fee out of the money it is recovering.
                         </div>
                     </form>
                 </div>

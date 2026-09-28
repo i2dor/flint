@@ -1512,6 +1512,7 @@ public class SparkController : Controller
             // the plugin and restarts BTCPay.
             EsploraApiUrl = settings?.UnilateralExit?.EsploraApiUrl,
             LoadError = page.LoadError,
+            StatusesReadUtc = page.StatusesReadUtc,
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };

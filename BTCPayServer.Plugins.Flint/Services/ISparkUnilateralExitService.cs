@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -251,6 +252,11 @@ public sealed record UnilateralExitOpResult(
 /// a built exit runs to a dozen rows of which at most one or two are actionable at any moment. Null when
 /// there is no built set, or when the set read back was empty.
 /// </param>
+/// <param name="StatusesReadUtc">
+/// When the statuses in <paramref name="Transactions"/> were last read from the chain — by the build that stored
+/// them or by the last check. Nothing refreshes them between presses, so the page states this beside them. Null for
+/// a set stored before the time was recorded, and when there is no readable set.
+/// </param>
 /// <param name="LoadError">
 /// Set when the read itself failed — the exit records could not be loaded — and every other member is then the
 /// empty page. The view renders this instead of any form: an empty page with a quote form beside it would read
@@ -270,4 +276,5 @@ public sealed record UnilateralExitPageData(
     IReadOnlyList<SparkExitTransaction>? Transactions,
     bool TransactionsUnreadable,
     IReadOnlyList<SparkExitTransaction>? PendingBroadcast,
-    string? LoadError = null);
+    string? LoadError = null,
+    DateTimeOffset? StatusesReadUtc = null);

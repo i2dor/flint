@@ -688,7 +688,7 @@ public class SparkUnilateralExitServiceTests
 
         // Default serializer options both ways, so any reader deserialising the seam records plainly gets them
         // back — which is what the exit page does with this column.
-        var transactions = JsonSerializer.Deserialize<SparkExitTransaction[]>(stored.TransactionsJson!)!;
+        var transactions = StoredSet(stored.TransactionsJson);
         Assert.Equal(4, transactions.Length);
         Assert.Equal(SparkExitTxKind.Fanout, transactions[0].Kind);
         Assert.Equal(SparkExitTxKind.Sweep, transactions[^1].Kind);
@@ -1058,7 +1058,7 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(UnilateralExitStatus.Built, stored.Status);
         // An empty array rather than null: "built, with nothing left to broadcast" and "never built" are
         // different states and the page renders them differently.
-        Assert.Equal("[]", stored.TransactionsJson);
+        Assert.Empty(StoredSet(stored.TransactionsJson));
         // The previous attempt's complaint does not sit next to a successful build.
         Assert.Null(stored.LastError);
 
@@ -1099,8 +1099,7 @@ public class SparkUnilateralExitServiceTests
         harness.Explorer(Utxo(10_000));
 
         Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
-        var first = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var first = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
         Assert.Equal(4, first.Length);
         Assert.Contains(first, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
 
@@ -1110,8 +1109,7 @@ public class SparkUnilateralExitServiceTests
 
         Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
 
-        var second = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var second = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
 
         Assert.Equal(3, second.Length);
         Assert.DoesNotContain(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
@@ -1539,8 +1537,7 @@ public class SparkUnilateralExitServiceTests
         Assert.True(result.Success, result.Error);
         Assert.Single(harness.Sdk.ExitCheckCalls);
 
-        var refreshed = JsonSerializer.Deserialize<SparkExitTransaction[]>(
-            harness.Records.Records[record.Id].TransactionsJson!)!;
+        var refreshed = StoredSet(harness.Records.Records[record.Id].TransactionsJson);
         Assert.All(
             refreshed,
             tx => Assert.Equal(SparkExitTxReadiness.Waiting, tx.Status.Readiness));
@@ -1954,6 +1951,63 @@ public class SparkUnilateralExitServiceTests
 
     #endregion
 
+    #region When the statuses were read
+
+    /// <summary>
+    /// The page says when the statuses it shows were last read from the chain, and a check moves that time on.
+    /// </summary>
+    /// <remarks>
+    /// Nothing refreshes the stored statuses between presses, and a step's watchtower version becomes valid about
+    /// fifty blocks after the step itself — so "Ready" as of yesterday is a different instruction from "Ready" as
+    /// of a minute ago, and the page could not tell them apart. The time is stored in the same value as the set,
+    /// so it cannot describe a different write than the statuses beside it.
+    /// </remarks>
+    [Fact]
+    public async Task The_page_reports_when_the_statuses_were_last_read_from_the_chain()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+
+        var built = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.Equal(harness.Now, built.StatusesReadUtc);
+
+        harness.Time.Advance(TimeSpan.FromHours(9));
+        Assert.True((await harness.Service.CheckAsync(StoreId, record.Id, Ct)).Success);
+
+        var checkedPage = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.Equal(harness.Now.AddHours(9), checkedPage.StatusesReadUtc);
+        Assert.NotNull(checkedPage.Transactions);
+        Assert.False(checkedPage.TransactionsUnreadable);
+    }
+
+    /// <summary>
+    /// A set stored as a bare array, before the read time was recorded, still reads — with no time rather than
+    /// an invented one.
+    /// </summary>
+    [Fact]
+    public async Task A_set_stored_before_the_read_time_was_recorded_still_reads()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var legacy = JsonSerializer.Serialize(StoredSet(harness.Records.Records[record.Id].TransactionsJson));
+        harness.Records.Records[record.Id].TransactionsJson = legacy;
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.False(page.TransactionsUnreadable);
+        Assert.NotNull(page.Transactions);
+        Assert.NotEmpty(page.Transactions);
+        Assert.Null(page.StatusesReadUtc);
+
+        // And checking it writes the envelope, time included.
+        Assert.True((await harness.Service.CheckAsync(StoreId, record.Id, Ct)).Success);
+        Assert.StartsWith("{", harness.Records.Records[record.Id].TransactionsJson);
+    }
+
+    #endregion
+
     #region Deadlines on the SDK's exit calls
 
     /// <summary>
@@ -2318,6 +2372,8 @@ public class SparkUnilateralExitServiceTests
     [Theory]
     [InlineData("not json at all")]
     [InlineData("[{}]")]
+    [InlineData("""{"StatusesReadUtc":"2026-08-20T12:00:00+00:00"}""")]
+    [InlineData("""{"StatusesReadUtc":"2026-08-20T12:00:00+00:00","Transactions":[{}]}""")]
     // Present but not what Bitcoin would produce. The page pastes the hex into a shell command, so a "hex" that
     // could carry a quote must be refused here rather than rendered.
     [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
@@ -2785,6 +2841,20 @@ public class SparkUnilateralExitServiceTests
         var built = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
         Assert.True(built.Success, built.Error);
         return record;
+    }
+
+    /// <summary>
+    /// The signed set a record stores, read the way the service reads it: the envelope carrying the time its
+    /// statuses were read from the chain, or a bare array from before that was recorded.
+    /// </summary>
+    private static SparkExitTransaction[] StoredSet(string? json)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(json), "the record holds no transaction set");
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind is JsonValueKind.Array
+            ? JsonSerializer.Deserialize<SparkExitTransaction[]>(json)!
+            : JsonSerializer.Deserialize<SparkExitTransaction[]>(
+                document.RootElement.GetProperty("Transactions").GetRawText())!;
     }
 
     /// <summary>One confirmed entry of an esplora <c>/address/{address}/utxo</c> response, at a txid of the test's own.</summary>

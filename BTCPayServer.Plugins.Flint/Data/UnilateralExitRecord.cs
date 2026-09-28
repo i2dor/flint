@@ -24,8 +24,8 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// the one they funded.
 /// </para>
 /// <para>
-/// The three JSON columns are plain <c>text</c> holding the seam DTOs (<c>SparkExitFundingUtxo[]</c>,
-/// <c>SparkExitTransaction[]</c>) and a bare <c>string[]</c> of leaf ids. Serialisation is deliberately the
+/// The three JSON columns are plain <c>text</c> holding the seam DTOs (<c>SparkExitFundingUtxo[]</c>, and the
+/// <c>SparkExitTransaction[]</c> with the time its statuses were read) and a bare <c>string[]</c> of leaf ids. Serialisation is deliberately the
 /// caller's job rather than this entity's: the data layer stays free of the seam types, so nothing here has to
 /// change when the SDK's exit shapes move under the next version bump. Exactly one caller does it — the exit
 /// service — so the write format has a single owner and no other layer reads the blobs.
@@ -193,7 +193,9 @@ public class UnilateralExitRecord
     public string? FundingUtxosJson { get; set; }
 
     /// <summary>
-    /// The signed transactions from the build, as a JSON <c>SparkExitTransaction[]</c>. Null until the build runs.
+    /// The signed transactions from the build, as JSON: an object holding the <c>SparkExitTransaction[]</c> and
+    /// the time its statuses were last read from the chain. Null until the build runs. Rows written before the
+    /// time was recorded hold the bare array, which still reads.
     /// </summary>
     /// <remarks>
     /// <b>The valuable column.</b> Nothing broadcasts these — not the plugin, not the SDK — so this text is the

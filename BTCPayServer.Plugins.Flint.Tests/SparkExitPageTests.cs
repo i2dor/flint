@@ -611,6 +611,33 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task The_page_says_when_its_statuses_were_read_and_how_soon_to_look_again()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var readAt = new DateTimeOffset(2026, 9, 1, 8, 30, 0, TimeSpan.Zero);
+        var exit = new StubExitService
+        {
+            Page = Page(disclosureAcknowledged: true, activeRecord: Built(), transactions: SignedExit()) with
+            {
+                StatusesReadUtc = readAt
+            }
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+        Assert.Equal(readAt, model.StatusesReadUtc);
+
+        var view = ExitTemplate();
+        Assert.Contains("id=\"SparkExitStatusesReadAt\"", view);
+        Assert.Contains("Model.StatusesReadUtc is { } readAt", view);
+        // A watchtower's version of a step becomes valid ~50 blocks (~8 h) after the step, so "every day" is too
+        // slow; and the zero-value anchors need a node recent enough to relay them.
+        Assert.DoesNotContain("every day", view);
+        Assert.Contains("Bitcoin Core 29 or later", view);
+    }
+
+    [Fact]
     public async Task A_fee_bump_reaches_the_service_with_its_rate()
     {
         using var gate = FeatureGate(enabled: true);

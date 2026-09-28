@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Data;
@@ -173,6 +174,14 @@ public class SparkExitViewModel
     /// </summary>
     [ValidateNever]
     public string? LoadError { get; set; }
+
+    /// <summary>
+    /// When the transaction statuses on the page were last read from the chain, or null when that was not
+    /// recorded — see <c>UnilateralExitPageData.StatusesReadUtc</c>. Shown beside them, because nothing refreshes
+    /// them between a build or a check and a stale "Ready" reads exactly like a fresh one.
+    /// </summary>
+    [ValidateNever]
+    public DateTimeOffset? StatusesReadUtc { get; set; }
 
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;

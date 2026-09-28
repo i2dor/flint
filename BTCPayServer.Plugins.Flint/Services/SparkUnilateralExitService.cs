@@ -371,7 +371,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
         // Read back and checked here rather than anywhere above: the page renders these, and a malformed column
         // has to become an explanation on the page instead of an exception in a view.
-        var readable = TryReadTransactions(active, out var transactions);
+        var readable = TryReadTransactions(active, out var transactions, out var statusesReadUtc);
 
         // Derived here rather than left to the view. A built exit runs to a dozen rows of which at most one or
         // two are actionable at any moment, so "send these now" is the one thing the page has to say about the
@@ -398,7 +398,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             keyPath,
             transactions,
             !readable,
-            pending);
+            pending,
+            StatusesReadUtc: readable ? statusesReadUtc : null);
     }
 
     /// <inheritdoc />
@@ -635,7 +636,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
             // The statuses it reports replace the ones stored, which is the whole point of the call: an operator
             // reading the page afterwards sees what the chain says, not what it said when the set was built.
-            record.TransactionsJson = JsonSerializer.Serialize(progress.Transactions.ToArray(), JsonOptions);
+            record.TransactionsJson = SerializeTransactions(progress.Transactions, _timeProvider.GetUtcNow());
             record.UpdatedUtc = _timeProvider.GetUtcNow();
 
             // The verdict is not written to the row — it is derived state the SDK recomputes on every call, and a
@@ -1391,7 +1392,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // would be actively wrong: a transaction missing from the new set is one the SDK has already observed
             // confirm, or one its own re-plan dropped, and keeping a stale copy of it next to the new set invites
             // an operator to broadcast a transaction the SDK has already superseded.
-            record.TransactionsJson = JsonSerializer.Serialize(result.Transactions.ToArray(), JsonOptions);
+            // Stamped with the build's own time, because a build reads every status from the chain too.
+            record.TransactionsJson = SerializeTransactions(result.Transactions, _timeProvider.GetUtcNow());
             // Cleared, not left in place: a build that got further must not show the failed attempt's complaint
             // next to its own transactions.
             record.LastError = null;
@@ -2070,6 +2072,28 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <summary>
+    /// What <see cref="UnilateralExitRecord.TransactionsJson"/> holds: the signed set, and when its statuses were
+    /// last read from the chain.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The time travels with the statuses because nothing else refreshes them.</b> They are read from the chain
+    /// by a build and by a check, and by nothing between — no background task watches an exit — so a page rendered
+    /// a day later shows yesterday's "Ready" as if it were current, and a step's watchtower version becomes valid
+    /// about fifty blocks (roughly eight hours) after the step itself. Written in the same value as the set, so
+    /// the time can never describe a different write than the statuses beside it.
+    /// </para>
+    /// <para>
+    /// A set stored before this envelope existed is a bare array, and still reads — with no time, which the page
+    /// renders as "not recorded" rather than inventing one.
+    /// </para>
+    /// </remarks>
+    private sealed record StoredTransactionSet(DateTimeOffset? StatusesReadUtc, SparkExitTransaction[]? Transactions);
+
+    private static string SerializeTransactions(IEnumerable<SparkExitTransaction> transactions, DateTimeOffset readAt) =>
+        JsonSerializer.Serialize(new StoredTransactionSet(readAt, transactions.ToArray()), JsonOptions);
+
+    /// <summary>
     /// The leaf ids this exit was pinned to, or an empty list when the column cannot be read.
     /// </summary>
     /// <remarks>
@@ -2124,9 +2148,20 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// </returns>
     private bool TryReadTransactions(
         UnilateralExitRecord? record,
-        out IReadOnlyList<SparkExitTransaction>? transactions)
+        out IReadOnlyList<SparkExitTransaction>? transactions) =>
+        TryReadTransactions(record, out transactions, out _);
+
+    /// <param name="statusesReadUtc">
+    /// When the stored statuses were last read from the chain, or null for a set written before that was
+    /// recorded. See <see cref="StoredTransactionSet"/>.
+    /// </param>
+    private bool TryReadTransactions(
+        UnilateralExitRecord? record,
+        out IReadOnlyList<SparkExitTransaction>? transactions,
+        out DateTimeOffset? statusesReadUtc)
     {
         transactions = null;
+        statusesReadUtc = null;
 
         if (record?.TransactionsJson is not { } json || string.IsNullOrWhiteSpace(json))
             return true;
@@ -2134,7 +2169,19 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         SparkExitTransaction[]? parsed;
         try
         {
-            parsed = JsonSerializer.Deserialize<SparkExitTransaction[]>(json, JsonOptions);
+            // Two shapes: the bare array every set was stored as before the read time was recorded, and the
+            // envelope written since. Told apart by the first character rather than by trying one and catching,
+            // so a malformed envelope is reported as malformed instead of as "not an array".
+            if (json.TrimStart().StartsWith('{'))
+            {
+                var envelope = JsonSerializer.Deserialize<StoredTransactionSet>(json, JsonOptions);
+                parsed = envelope?.Transactions;
+                statusesReadUtc = envelope?.StatusesReadUtc;
+            }
+            else
+            {
+                parsed = JsonSerializer.Deserialize<SparkExitTransaction[]>(json, JsonOptions);
+            }
         }
         catch (JsonException ex)
         {
