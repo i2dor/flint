@@ -156,9 +156,9 @@
   the wallet on-chain](deposits.md). Closing this properly would mean the plugin doing all the claiming itself,
   which trades an overpayment risk for a worse one — a claim loop that stops means no deposit ever arrives —
   and is not something to ship without mainnet evidence behind it.
-- **The unilateral exit is experimental, manual, and narrower than the name suggests.** It exists behind an
-  environment gate (`FLINT_EXPERIMENTAL_UNILATERAL_EXIT`) on the Advanced page and carries four limits that
-  do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
+- **The unilateral exit is manual, and narrower than the name suggests.** It is linked from every store's
+  Advanced page, refuses to quote or build until an operator has accepted its disclosure, and carries four
+  limits that do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
   operator pushes every transaction out by hand, package by package, through a node that supports package
   relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
   from data the SDK holds **locally**, so on the pinned SDK (0.26.0) it does not need the Spark operators to
@@ -184,7 +184,20 @@
   Spark's own leaf optimisation are not paused and can invalidate the exit — building then refuses, and the
   exit has to be quoted again. Funding discovery also asks a block explorer (mempool.space by default on
   mainnet) about the funding address, which discloses that address to a third party unless an own instance
-  is configured; only a server administrator can set that override.
+  is configured; only a server administrator can set that override. The explorer is contacted only from the
+  exit page, and only once the disclosure has been accepted: for a suggested fee rate while the quote form is
+  shown (cached for five minutes), for the funding address's balance each time the page is opened while an
+  exit awaits funding, and for its outputs when an exit is built. Opening the page to read the disclosure,
+  quoting, checking progress, the Advanced page, the exit-state backups and every background task contact no
+  explorer.
+- **Every store now has exit-state backups on disk, and sweeps check for exits.** The automatic exit-state
+  backup runs for every running store: each wallet's exit data is exported once after each wallet start, again
+  when money moves or the SDK reports the exit data changed (debounced to two minutes), and at least hourly, and
+  written to `<DataDir>/Plugins/Flint/exit-state/<storeId>.txt` (owner-only) only when it has changed. A file
+  can run to several megabytes on a busy wallet. A copy on the server's own disk does not survive that disk, so
+  download it from the Advanced page and keep it elsewhere, encrypted. Every sweep and sweep preview also looks
+  up whether the store has an exit in progress, and refuses (`ExitInProgress`, or "could not be read" if the
+  lookup fails) rather than spend leaves an exit is pinned to.
 - **Neither post-MVP feature can be tested off mainnet.** Cross-chain sending is hard-gated — the SDK throws
   at connect on any other network — and Stable Balance is *accepted* on regtest and then never converts,
   because USDB does not exist there. So the unit tests run against a fake built to model the real SDK's

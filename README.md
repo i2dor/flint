@@ -24,9 +24,10 @@ holds it. One switch on the Flint page, off by default.
 **What you are trusting, in one paragraph.** Spark is a 2-of-3 statechain operated by Lightspark, Breez
 and Flashnet. A balance sitting on it is not in your sole custody the way an on-chain UTXO or a channel
 you own is: every Lightning receive rides Lightspark's service provider, and every automated flow in this plugin performs
-**cooperative exits only** — the sole unilateral-exit path is an experimental, environment-gated flow on the
-Advanced page whose transactions the operator broadcasts by hand, and which needs an exit-state backup taken
-while the operators were still reachable to work without them. Sweeping is
+**cooperative exits only** — the sole unilateral-exit path is a manual last-resort flow linked from the
+Advanced page, refused until the operator accepts its disclosure, whose transactions the operator broadcasts
+by hand, and which needs an exit-state backup taken while the operators were still reachable to work without
+them. Sweeping is
 the only thing that reduces that exposure, which is why the sweep threshold is the most important setting
 on the plugin. Stable Balance and cross-chain sweeps each add a further counterparty of a different kind:
 a regulated stablecoin issuer whose token metadata says it can **freeze** the balance, and a bridge

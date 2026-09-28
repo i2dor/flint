@@ -14,10 +14,10 @@ operators build and broadcast one Bitcoin transaction for a flat fee, and it lan
 threshold according to how much you are willing to have depend on those operators; sweeping is the only thing
 that reduces it.
 
-There is now an **experimental unilateral exit**, and it is deliberately hard to reach: it appears on the
-store's Advanced page only when the server operator sets `FLINT_EXPERIMENTAL_UNILATERAL_EXIT=1` in BTCPay's
-environment, and without that variable the page shows nothing and the routes do not exist. Read what it is
-before counting on it:
+There is also a **unilateral exit**, linked from every store's Advanced page. Opening it shows a disclosure
+first, and nothing can be quoted or built until someone with store-settings rights has accepted it; that
+acceptance is stored and re-checked on the server before every quote and build. Read what it is before
+counting on it:
 
 - **The plugin never broadcasts.** It asks the SDK to build and sign the statechain's timelocked transaction
   tree and then shows you the raw transactions; pushing them, in dependency order, with `submitpackage` where
@@ -39,6 +39,21 @@ before counting on it:
   eight hours after it became ready pays part of its own cost out of the money being recovered. The exit page
   reports each step's readiness as of the last check or build, and the operator is expected to check it every
   few hours while steps mature.
+- **Broadcasting needs Bitcoin Core 29 or later.** The packages carry zero-value P2A anchors, which older
+  nodes will not relay.
+- **A block explorer learns about it, and only while you use the page.** Flint asks an esplora API
+  (mempool.space by default on mainnet; a server administrator can point it at an own instance) three things,
+  all from the exit page and all after the disclosure has been accepted: a suggested fee rate when the quote
+  form is shown, what has arrived on the funding address each time the page is opened while an exit waits for
+  funding, and the funding address's outputs when an exit is built. The last two disclose the funding address,
+  and with it that this server is running an exit. Nothing else contacts it: not opening the page to read the
+  disclosure, not quoting, checking progress, abandoning or completing, not the Advanced page or the exit-state
+  backups, and no background or scheduled task. Off mainnet there is no default and nothing is asked until an
+  explorer is set.
+- **The exit-state backup is sensitive.** Flint writes one automatically for every store under
+  `<DataDir>/Plugins/Flint/exit-state/`, owner-only. Treat it as a secret: it carries every leaf of the wallet
+  and the transactions under them, so anyone who reads it learns the balance, how it is split and the store's
+  history. Download it and keep it off the server, encrypted — a copy that dies with the machine is not a backup.
 
 So it is a last resort that costs days and attention, not a second sweep destination. If the operators
 became unavailable and this path did not get you out, recovering funds still means using the store's recovery
