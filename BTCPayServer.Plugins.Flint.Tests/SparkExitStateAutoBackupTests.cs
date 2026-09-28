@@ -29,12 +29,7 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// therefore carries half a minute of slack against the milliseconds of real time a test spends, so
 /// wall-clock drift between the two clocks cannot decide a test that is about minutes.
 /// </para>
-/// <para>
-/// Serialized with every other test that toggles the feature-gate environment variable, as the exit
-/// tests are.
-/// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkExitStateAutoBackupTests
 {
     private const string StoreId = "store-auto-backup";
@@ -50,7 +45,6 @@ public class SparkExitStateAutoBackupTests
     [Fact(Timeout = 60_000)]
     public async Task The_first_due_pass_exports_a_running_store_and_stores_it()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -63,24 +57,41 @@ public class SparkExitStateAutoBackupTests
         Assert.DoesNotContain("exit-state-blob", h.Log.AllText);
     }
 
+    /// <summary>
+    /// The pass runs on a server that has never heard of the old switch.
+    /// </summary>
+    /// <remarks>
+    /// Through 1.2.0 this whole pass returned early unless <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c> was set,
+    /// so a host that never set it had no automatic backup at all. The variable is cleared here rather than
+    /// assumed absent, so a developer who still exports it in their shell cannot make this pass for the wrong
+    /// reason. Clearing it needs no serialisation: nothing in the plugin reads it any more, which is what this
+    /// pins.
+    /// </remarks>
     [Fact(Timeout = 60_000)]
-    public async Task With_the_feature_off_the_whole_pass_is_inert()
+    public async Task With_no_environment_variable_set_the_automatic_backup_is_taken()
     {
-        // Gate deliberately absent: with the experiment off there is no exit feature for a backup to
-        // serve, and touching a wallet's export path anyway is acting on a secret for nobody.
-        using var h = await StartedAsync(new StubTimeProvider(Base));
+        const string retired = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
+        var previous = Environment.GetEnvironmentVariable(retired);
+        Environment.SetEnvironmentVariable(retired, null);
+        try
+        {
+            using var h = await StartedAsync(new StubTimeProvider(Base));
 
-        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+            await h.Service.TakeDueExitStateBackupsAsync(Ct);
 
-        Assert.Empty(h.Sdk.Clients[StoreId].ExitExportCalls);
-        Assert.Null(await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+            Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+            Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(retired, previous);
+        }
     }
 
     [Fact(Timeout = 60_000)]
     public async Task An_unchanged_state_is_not_written_again()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -103,7 +114,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_changed_state_replaces_the_stored_backup()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -120,7 +130,6 @@ public class SparkExitStateAutoBackupTests
     public async Task An_export_failure_leaves_the_previous_backup_intact_and_the_pass_does_not_throw()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -145,7 +154,6 @@ public class SparkExitStateAutoBackupTests
         const string healthyStore = "store-healthy";
 
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create(timeProvider: clock);
         h.SeedStore(brokenStore, SparkServiceHarness.MnemonicFor(1));
         h.SeedStore(healthyStore, SparkServiceHarness.MnemonicFor(2));
@@ -166,7 +174,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_claimed_deposit_event_debounces_before_the_next_backup_is_taken()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         // A first pass, so the pass that answers "not yet" below answers about the event's request
@@ -175,7 +182,10 @@ public class SparkExitStateAutoBackupTests
         Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
 
         Emit(h, StoreId, SparkEventKind.ClaimedDeposits, payment: null);
-        await WaitFor(() => h.Log.AllText.Contains("Spark claimed an on-chain deposit"),
+        // On the request as well as the log line: the consumer logs first and requests the refresh after, so a
+        // wait on the line alone can run the passes below before the request lands.
+        await WaitFor(() => h.Log.AllText.Contains("Spark claimed an on-chain deposit")
+                            && h.BackupScheduler.PendingSince(StoreId) is not null,
             "the claimed-deposit event was never consumed");
 
         // Requested, not yet due: the export the event earned lands after the debounce, not on the
@@ -192,7 +202,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_new_deposit_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -218,7 +227,6 @@ public class SparkExitStateAutoBackupTests
     public async Task An_exit_state_change_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -243,7 +251,6 @@ public class SparkExitStateAutoBackupTests
     public async Task An_inbound_payment_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -253,7 +260,8 @@ public class SparkExitStateAutoBackupTests
         // returns early, before any invoice wiring. The refresh is requested once, past the direction
         // filter, so this early-returning branch is covered by the same call site.
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-auto-1"));
-        await WaitFor(() => h.Log.AllText.Contains("on-chain deposit"),
+        await WaitFor(() => h.Log.AllText.Contains("on-chain deposit")
+                            && h.BackupScheduler.PendingSince(StoreId) is not null,
             "the deposit payment was never consumed");
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -268,7 +276,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_refresh_requested_while_an_export_runs_stays_pending_after_the_pass()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
         var wallet = h.Sdk.Clients[StoreId];
 
@@ -296,7 +303,6 @@ public class SparkExitStateAutoBackupTests
     public async Task The_safety_net_takes_a_fresh_backup_although_no_event_ever_arrived()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -313,7 +319,6 @@ public class SparkExitStateAutoBackupTests
     [Fact(Timeout = 60_000)]
     public async Task An_empty_export_stores_nothing()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
         h.Sdk.Clients[StoreId].ExitStateToExport = "   ";
 
@@ -328,7 +333,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_store_that_always_exports_empty_is_asked_again_only_at_the_safety_net()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
         h.Sdk.Clients[StoreId].ExitStateToExport = "";
 
@@ -356,7 +360,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_pending_request_keeps_asking_on_every_pass_rather_than_the_safety_net()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
         h.Sdk.Clients[StoreId].ExitStateToExport = "";
 
@@ -389,7 +392,6 @@ public class SparkExitStateAutoBackupTests
     public async Task After_a_restart_the_first_pass_learns_from_the_file_instead_of_rewriting_it()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         var first = await StartedAsync(clock);
         SparkServiceHarness? h = null;
         try
@@ -422,7 +424,6 @@ public class SparkExitStateAutoBackupTests
     [Fact(Timeout = 60_000)]
     public async Task A_write_through_the_store_moves_the_scheduler_s_belief_with_the_write()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
 
         // One manual writer: the page's export, a paste, an adoption all write through this same
@@ -442,7 +443,6 @@ public class SparkExitStateAutoBackupTests
     public async Task A_cleared_backup_is_written_afresh_by_the_next_due_pass()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -467,10 +467,7 @@ public class SparkExitStateAutoBackupTests
     // ------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// One configured store, started, on the harness's real file store over a temp data dir. The
-    /// feature gate is the caller's, held for the whole test — the connect path's warm-up runs
-    /// <c>RestoreExitStateAsync</c>, which is gated too, so a helper-scoped gate would be off again
-    /// before the assertions ran.
+    /// One configured store, started, on the harness's real file store over a temp data dir.
     /// </summary>
     private static async Task<SparkServiceHarness> StartedAsync(TimeProvider clock)
     {
@@ -529,20 +526,4 @@ public class SparkExitStateAutoBackupTests
         }
     }
 
-    private static IDisposable FeatureGate() => new EnvironmentSwitch("FLINT_EXPERIMENTAL_UNILATERAL_EXIT");
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, "1");
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
-    }
 }

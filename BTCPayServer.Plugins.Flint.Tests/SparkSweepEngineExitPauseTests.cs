@@ -18,16 +18,10 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// exit that could no longer be built or finished. The sweep is the one leaf-spender the plugin fully controls, so
 /// it is the one that stops; the exit page says which others it cannot stop.
 /// </para>
-/// <para>
-/// In the exit collection because the pause is gated on the same process-wide switch as the feature: with the
-/// switch off a stale active record would otherwise pause sweeps with no page left to lift the pause from.
-/// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkSweepEngineExitPauseTests
 {
     private const string StoreId = "store-1";
-    private const string Gate = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
 
     private static readonly DateTimeOffset Origin = new(2026, 8, 4, 12, 0, 0, TimeSpan.Zero);
 
@@ -40,7 +34,6 @@ public class SparkSweepEngineExitPauseTests
     public async Task An_exit_in_progress_pauses_sweeping_with_a_recorded_reason(
         UnilateralExitStatus status, SweepTrigger trigger)
     {
-        using var gate = new Switch("1");
         var h = Create();
         await h.Exits.CreateAsync(Exit(status), Ct);
 
@@ -62,7 +55,6 @@ public class SparkSweepEngineExitPauseTests
     [Fact]
     public async Task Repeated_automatic_passes_fold_onto_one_refusal()
     {
-        using var gate = new Switch("1");
         var h = Create();
         await h.Exits.CreateAsync(Exit(UnilateralExitStatus.Built), Ct);
 
@@ -77,7 +69,6 @@ public class SparkSweepEngineExitPauseTests
     [Fact]
     public async Task A_finished_exit_lets_sweeping_resume()
     {
-        using var gate = new Switch("1");
         var h = Create();
         var exit = Exit(UnilateralExitStatus.Built);
         await h.Exits.CreateAsync(exit, Ct);
@@ -91,24 +82,8 @@ public class SparkSweepEngineExitPauseTests
     }
 
     [Fact]
-    public async Task With_the_feature_off_a_leftover_exit_does_not_pause_sweeping()
-    {
-        // The exit page is gone with the switch off, so nobody could complete or abandon the record — honouring it
-        // would pause this store's sweeps until someone edited the database.
-        using var gate = new Switch(null);
-        var h = Create();
-        await h.Exits.CreateAsync(Exit(UnilateralExitStatus.Built), Ct);
-
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
-
-        Assert.NotEqual(SparkSweepEngine.UnilateralExitInProgress, result.Reason);
-        Assert.NotEmpty(h.Sdk.OnchainSendCalls);
-    }
-
-    [Fact]
     public async Task An_exit_store_that_cannot_be_read_is_not_taken_as_no_exit()
     {
-        using var gate = new Switch("1");
         var h = Create();
         h.Exits.FailReadsWith = new InvalidOperationException("the database is not answering");
 
@@ -170,13 +145,4 @@ public class SparkSweepEngineExitPauseTests
         LeafIdsJson = """["leaf-a"]""",
         FundingAddress = "bcrt1qluxw544vs8huwqyxvwqx4x75x5v7mgfkamt2pd"
     };
-
-    private sealed class Switch : IDisposable
-    {
-        private readonly string? _previous = Environment.GetEnvironmentVariable(Gate);
-
-        public Switch(string? value) => Environment.SetEnvironmentVariable(Gate, value);
-
-        public void Dispose() => Environment.SetEnvironmentVariable(Gate, _previous);
-    }
 }

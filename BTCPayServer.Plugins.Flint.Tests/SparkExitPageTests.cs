@@ -19,17 +19,15 @@ using Xunit;
 namespace BTCPayServer.Plugins.Flint.Tests;
 
 /// <summary>
-/// The unilateral-exit page: the feature gate, the disclosure-first ordering, and what the controller and the
-/// template make of the service's typed page data.
+/// The unilateral-exit page: that it is there on every server, the disclosure-first ordering, and what the
+/// controller and the template make of the service's typed page data.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The first thing being pinned here is not about exits at all: a feature behind an environment switch is
-/// <em>invisible</em> when the switch is off. Every action, the GET included, answers <c>NotFound</c> from
-/// inside the action, because a redirect or a validation error on one of them is already an admission that the
-/// route exists. (The filters in front of the action still answer first — an unauthenticated caller gets the
-/// pipeline's 401 whether the feature is on or off — which is why the controller's remarks say the gate hides
-/// the flow from callers already entitled to be on this controller, not the route prefix from the world.)
+/// The first thing being pinned here is that the page and the Advanced page's backup actions answer with no
+/// environment variable set — through 1.2.0 every one of them was a 404 unless the host had set
+/// <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c> — and that being reachable does not make them reachable for
+/// another store's id.
 /// </para>
 /// <para>
 /// The second is that the controller reads nothing. It used to deserialise the record's JSON columns itself,
@@ -45,60 +43,73 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// <c>CanModifyStoreSettings</c>, the funding shortfall is judged by the largest single output rather than the
 /// total, and no state of the page is a dead end whose only control is the one its own copy forbids.
 /// </para>
-/// <para>
-/// <b>One class, in the serialised collection.</b> The gate is an environment variable, which is process-wide
-/// state that xUnit's per-class parallelism would let two tests fight over. Every test here restores it in a
-/// <c>finally</c>, and the class joins <see cref="UnilateralExitTestCollection"/> — the same collection
-/// <see cref="SparkUnilateralExitServiceTests"/> uses — so the two classes that read the variable cannot run
-/// at the same time as each other or as anything else.
-/// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkExitPageTests
 {
     private const string Store = SparkSurfaceHarness.AttackerStore;
-    private const string Gate = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
 
     /// <summary>A regtest address, so a destination in a test reads like one a merchant would type.</summary>
     private const string Destination = "bcrt1qt8hufshrz62z5vj4q40uqx6c6ytlujy5s03gwm";
 
-    #region The gate
+    #region Reachability
 
+    /// <summary>
+    /// With no environment variable set, the exit page and every backup action on the Advanced page answer.
+    /// </summary>
+    /// <remarks>
+    /// The variable is cleared rather than assumed absent, so a developer who still exports it cannot make this
+    /// pass for the wrong reason; and clearing it needs no serialisation against the rest of the suite, because
+    /// nothing in the plugin reads it any more. Each answer is checked for what it is, not only for not being a
+    /// 404: the page renders its model, the Advanced page carries the stored backup's stamp, the download hands
+    /// over the file, the export renders the Advanced page, and a paste goes to the import.
+    /// </remarks>
     [Fact]
-    public async Task With_the_feature_off_every_exit_route_is_not_found()
+    public async Task With_no_environment_variable_set_the_exit_page_and_backup_actions_answer()
     {
-        using var gate = FeatureGate(enabled: false);
+        const string retired = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
+        var previous = Environment.GetEnvironmentVariable(retired);
+        Environment.SetEnvironmentVariable(retired, null);
+        try
+        {
+            var exit = new StubExitService { Page = Page(disclosureAcknowledged: false, balanceSats: 1_000) };
+            var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+            var takenAt = new DateTimeOffset(2026, 9, 28, 9, 0, 0, TimeSpan.Zero);
+            await h.ExitStateBackups.WriteAsync(Store, "stored-backup", null, CancellationToken.None);
+            h.ExitStateBackups.TakenAt = takenAt;
 
-        // Deliberately a service that would answer happily. What must produce the 404 is the gate, not an
-        // absent dependency — otherwise the test would pass on a build where the gate had been deleted.
-        var exit = new StubExitService();
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+            var page = Assert.IsType<ViewResult>(await h.Mvc.Exit(Store, CancellationToken.None));
+            Assert.Equal(Store, Assert.IsType<SparkExitViewModel>(page.Model).StoreId);
 
-        Assert.IsType<NotFoundResult>(await h.Mvc.Exit(Store, CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.AcknowledgeExit(Store, CancellationToken.None));
-        Assert.IsType<NotFoundResult>(
-            await h.Mvc.QuoteExit(
-                Store,
-                new SparkExitViewModel { FeeRateSatPerVbyte = 10, DestinationAddress = Destination },
-                CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", null, CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(Store, "some-record", CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", false, CancellationToken.None));
-        Assert.IsType<NotFoundResult>(
-            await h.Mvc.SetExitExplorer(Store, "https://esplora.example/api", CancellationToken.None));
+            var advanced = Assert.IsType<ViewResult>(await h.Mvc.Advanced(Store, CancellationToken.None));
+            Assert.Equal(takenAt, Assert.IsType<SparkAdvancedViewModel>(advanced.Model).ExitStateBackupTakenAt);
 
-        // And nothing reached the service, so a gate that 404'd after acting would still fail this.
-        Assert.Empty(exit.Calls);
+            Assert.IsType<FileStreamResult>(await h.Mvc.DownloadExitStateBackup(Store, CancellationToken.None));
+
+            var export = Assert.IsType<ViewResult>(await h.Mvc.ExportExitState(Store, CancellationToken.None));
+            Assert.Equal("Advanced", export.ViewName);
+
+            await h.Mvc.SetExitStateBackup(
+                Store, new SparkAdvancedViewModel { ExitStateBackup = "pasted-backup" }, CancellationToken.None);
+            Assert.Equal([Store], h.Runtime.ImportRequests);
+
+            // Reaching the page is not starting an exit: nothing above asked the service to acknowledge, quote
+            // or build, which stays behind the stored disclosure acknowledgement.
+            Assert.DoesNotContain(exit.Calls, call => call is "Acknowledge"
+                || call.StartsWith("Quote", StringComparison.Ordinal)
+                || call.StartsWith("Build", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(retired, previous);
+        }
     }
 
     [Fact]
-    public async Task With_the_feature_on_the_exit_routes_still_refuse_another_stores_id()
+    public async Task The_exit_routes_refuse_another_stores_id()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // The store the request was authorised for is the attacker's; the id on the route is the victim's. The
         // same hole the rest of this controller is guarded against (see SparkControllerStoreScopeTests), and a
-        // feature gate is no substitute for the guard — an exit built for another store's leaves would send its
+        // reachable page is no licence to skip the guard — an exit built for another store's leaves would send its
         // balance to an address this caller chose.
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(unilateralExit: exit);
@@ -127,8 +138,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_page_leads_with_the_disclosure_until_it_has_been_acknowledged()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService
         {
             Page = Page(disclosureAcknowledged: false, balanceSats: 250_000)
@@ -149,8 +158,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_acknowledged_store_with_nothing_in_flight_gets_the_quote_form()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Page = Page(balanceSats: 900_000) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -185,8 +192,6 @@ public class SparkExitPageTests
     public async Task The_quote_form_opens_at_the_recommended_rate_or_the_plugin_floor(
         long? recommended, long expected)
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Page = Page(recommendedFeeRateSatPerVbyte: recommended) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -196,8 +201,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_record_awaiting_funding_carries_the_quote_the_funding_figures_and_the_key_path()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var record = AwaitingFunding();
         var exit = new StubExitService
         {
@@ -237,8 +240,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_unreachable_explorer_reaches_the_page_as_unknown_rather_than_as_zero()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var record = AwaitingFunding();
         var exit = new StubExitService
         {
@@ -258,8 +259,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_explorer_input_shows_what_is_stored_and_the_page_knows_its_network()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Page = Page() };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
         h.Settings.Settings[Store]!.UnilateralExit.EsploraApiUrl = "http://localhost:3002/api";
@@ -280,8 +279,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_page_read_that_failed_reaches_the_view_as_an_error_and_nothing_else()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // What the service hands back when the exit records could not be read at all. The view must render the
         // error and not the quote form beside it: an empty page with a form reads as "no exit is in progress"
         // when the truth is "this page could not tell".
@@ -307,8 +304,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_settings_read_that_throws_does_not_take_the_exit_page_down()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // The controller reads the store's settings once more for the explorer box. On BTCPay 2.4 an exception
         // escaping this GET disables the plugin and restarts the server, so a failed read costs the box, not that.
         var exit = new StubExitService { Page = Page(disclosureAcknowledged: true) };
@@ -323,8 +318,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task On_mainnet_the_page_says_so_and_starts_with_no_override()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Page = Page() };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, mainnet: true, unilateralExit: exit);
 
@@ -341,8 +334,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_built_record_reaches_the_page_as_transactions_to_broadcast()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // No JSON anywhere in this test. The service deserialises the record's column and hands over typed
         // transactions; the controller's only job is to carry them across without inventing an empty list.
         var record = Built();
@@ -380,8 +371,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_unreadable_transaction_column_is_carried_through_rather_than_smoothed_over()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var record = Built();
         var exit = new StubExitService
         {
@@ -403,8 +392,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_built_record_with_no_transactions_is_distinguishable_from_an_unreadable_one()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var record = Built();
         var exit = new StubExitService
         {
@@ -432,8 +419,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_actionable_slice_of_a_built_exit_reaches_the_page_in_order()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var record = Built();
         var transactions = SignedExit();
         var exit = new StubExitService
@@ -599,8 +584,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task Completing_on_the_operator_s_own_word_is_a_separate_deliberate_tick()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // Completing takes the signed set off the page, so the plain press asks the chain first and the override
         // is a box the operator has to tick — never pre-ticked, never hidden in the button.
         var view = ExitTemplate();
@@ -644,8 +627,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_page_says_when_its_statuses_were_read_and_how_soon_to_look_again()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var readAt = new DateTimeOffset(2026, 9, 1, 8, 30, 0, TimeSpan.Zero);
         var exit = new StubExitService
         {
@@ -692,8 +673,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_recommended_rate_is_labelled_as_the_explorer_s_suggestion()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService
         {
             Page = Page(disclosureAcknowledged: true, recommendedFeeRateSatPerVbyte: 9)
@@ -714,8 +693,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_fee_bump_reaches_the_service_with_its_rate()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -743,8 +720,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_acknowledgement_reports_success_and_returns_to_the_page()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -760,8 +735,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_refused_quote_is_relayed_verbatim_and_returns_to_the_page()
     {
-        using var gate = FeatureGate(enabled: true);
-
         const string refusal = "Nothing is worth exiting at 400 sat/vB.";
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
@@ -785,8 +758,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_failed_build_is_relayed_and_the_record_id_reaches_the_service()
     {
-        using var gate = FeatureGate(enabled: true);
-
         const string refusal = "The funding address holds 900 sats; this exit needs 4,300 in one UTXO.";
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
@@ -801,8 +772,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task Abandoning_says_out_loud_that_it_cancels_nothing()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -820,8 +789,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task Marking_an_exit_completed_says_it_moved_nothing()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -841,8 +808,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_refused_completion_is_relayed_like_any_other_refusal()
     {
-        using var gate = FeatureGate(enabled: true);
-
         const string refusal = "This exit has not been built yet, so there is nothing to mark completed.";
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
@@ -856,8 +821,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_explorer_url_reaches_the_service_exactly_as_typed()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -874,8 +837,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task Clearing_the_explorer_says_what_clearing_it_costs()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -892,8 +853,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_refused_explorer_url_is_relayed_verbatim()
     {
-        using var gate = FeatureGate(enabled: true);
-
         const string refusal = "That is not an absolute http or https URL.";
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
@@ -907,8 +866,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_failure_with_no_reason_still_produces_a_banner()
     {
-        using var gate = FeatureGate(enabled: true);
-
         // A service that fails without saying why is a bug, but a silent redirect looks exactly like success —
         // so the controller substitutes a sentence rather than leaving the merchant to guess.
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, null, null) };
@@ -946,8 +903,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_download_returns_the_stored_bytes_and_the_response_is_not_cacheable()
     {
-        using var gate = FeatureGate(enabled: true);
-
         const string secret = "exit-state-blob-that-must-not-be-logged-2f7c";
         var takenAt = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
 
@@ -988,8 +943,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_download_with_nothing_stored_redirects_with_the_reason()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
 
         var redirect = Assert.IsType<RedirectToActionResult>(
@@ -1017,8 +970,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_download_whose_file_cannot_be_opened_redirects_with_a_reason_instead_of_throwing()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
         await h.ExitStateBackups.WriteAsync(Store, "stored-backup", null, CancellationToken.None);
         h.ExitStateBackups.FailReadWith = new UnauthorizedAccessException("permission denied");
@@ -1042,8 +993,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_paste_is_imported_at_once_and_the_banner_reports_the_counts()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
         h.Runtime.NextImportReport = new ExitStateImportReport(
@@ -1065,8 +1014,6 @@ public class SparkExitPageTests
     public async Task A_paste_that_could_not_be_imported_now_says_it_is_kept_and_retried(
         ExitStateImportOutcome outcome, string expected)
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
         h.Runtime.NextImportReport = new ExitStateImportReport(outcome, Failed: 1, Reason: "Spark said no.");
@@ -1083,8 +1030,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task An_uploaded_backup_file_is_saved_as_its_text_and_an_empty_one_clears_nothing()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -1110,8 +1055,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_save_carrying_both_a_paste_and_a_file_is_refused_rather_than_choosing_one()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
         var bytes = Encoding.UTF8.GetBytes("from-the-file");
@@ -1129,8 +1072,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_clear_does_not_ask_for_an_import()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService();
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -1147,8 +1088,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_backup_waiting_to_be_imported_can_be_downloaded_by_its_id_and_by_nothing_else()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
         var id = await h.ExitStateBackups.AddPendingAsync(Store, "waiting-backup", CancellationToken.None);
 
@@ -1169,8 +1108,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_advanced_page_lists_the_backups_waiting_to_be_imported()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
         await h.ExitStateBackups.AddPendingAsync(Store, "waiting-backup", CancellationToken.None);
 
@@ -1186,8 +1123,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task A_backup_save_that_throws_redirects_with_an_error_instead_of_throwing()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var exit = new StubExitService { ThrowFromSetExitState = new InvalidOperationException("boom") };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
@@ -1206,8 +1141,6 @@ public class SparkExitPageTests
     [Fact]
     public async Task The_advanced_page_renders_when_the_backup_timestamp_cannot_be_read()
     {
-        using var gate = FeatureGate(enabled: true);
-
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
         await h.ExitStateBackups.WriteAsync(Store, "stored-backup", null, CancellationToken.None);
         h.ExitStateBackups.FailReadWith = new IOException("disk error");
@@ -1329,32 +1262,6 @@ public class SparkExitPageTests
         new(SparkExitTxKind.TreeNode, "node-1", "bb22", "nodehex", "cpfphex", 144u, ["aa11"],
             new SparkExitTxStatus(SparkExitTxReadiness.Waiting, SpendableAtHeight: 812_345))
     ];
-
-    /// <summary>
-    /// Sets the feature switch for one test and puts back whatever was there.
-    /// </summary>
-    /// <remarks>
-    /// The variable is process-wide, and <see cref="Constants.UnilateralExitEnabled"/> is a property precisely so
-    /// that this works — a cached <c>static readonly</c> would freeze whichever value the first test to load the
-    /// class happened to see. Restoring the previous value rather than clearing it keeps a developer who exported
-    /// the variable in their own shell from watching later tests behave differently.
-    /// </remarks>
-    private static IDisposable FeatureGate(bool enabled) => new EnvironmentSwitch(Gate, enabled ? "1" : null);
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name, string? value)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, value);
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
-    }
 
     /// <summary>
     /// The exit service the page talks to: whatever <see cref="Page"/> says, whatever <see cref="Result"/> says,

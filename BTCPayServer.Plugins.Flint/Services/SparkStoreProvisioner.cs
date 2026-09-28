@@ -312,8 +312,8 @@ public sealed class SparkStoreProvisioner
     /// <remarks>
     /// <para>
     /// <b>The deprecated backup belongs to a wallet, not to the store.</b> An earlier version kept a store's
-    /// exit-state backup in this settings section, and a store that has not connected with the feature on
-    /// since still holds it there. Carried across a seed change, it would be adopted by the <em>new</em>
+    /// exit-state backup in this settings section, and a store whose wallet has not connected since may still
+    /// hold it there. Carried across a seed change, it would be adopted by the <em>new</em>
     /// wallet's connect — imported (every leaf foreign) and, before adoption learned to tell, written as the
     /// new wallet's own backup. So on a seed change it is kept aside as the previous wallet's file, and only
     /// then dropped from the new settings; if it cannot be kept aside it is carried as before, because the

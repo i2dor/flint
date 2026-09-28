@@ -26,11 +26,8 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// cancellation, because no SDK call can be cancelled — see <see cref="FakeSparkSdkClientFactory"/>.
 /// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkServiceStartupTests
 {
-    private const string Gate = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
-
     /// <summary>
     /// How long startup may take before it is treated as hung.
     /// </summary>
@@ -370,7 +367,6 @@ public class SparkServiceStartupTests
     [Fact]
     public async Task A_stored_exit_state_backup_is_imported_when_the_wallet_starts()
     {
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
         await WithExitStateBackup(h, BackupStore, "the-stored-backup-blob");
@@ -392,15 +388,12 @@ public class SparkServiceStartupTests
     /// <remarks>
     /// The other half of the guard above, and the one that catches an import wired to the wrong place: an
     /// implementation that imported on every connect regardless of whether a backup existed would pass the
-    /// first test while quietly sending an empty or absent value to the SDK for every store on the server.
-    /// <b>The gate is on for this test deliberately.</b> With it off, nothing imports and the assertion would
-    /// pass against an implementation that imported for every store, which is precisely the bug it exists to
-    /// catch.
+    /// first test while quietly sending an empty or absent value to the SDK for every store on the server —
+    /// and now that the restore runs on every host, that would be every store on every server.
     /// </remarks>
     [Fact]
     public async Task A_store_with_no_backup_imports_nothing_on_start()
     {
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(HealthyStore, SparkServiceHarness.MnemonicFor(1));
 
@@ -428,7 +421,6 @@ public class SparkServiceStartupTests
     {
         const string secret = "blob-that-must-not-be-logged-9f3a";
 
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
         await WithExitStateBackup(h, BackupStore, secret);
@@ -459,7 +451,6 @@ public class SparkServiceStartupTests
     {
         const string legacySecret = "legacy-blob-that-must-not-be-logged-4c1b";
 
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
 
@@ -487,7 +478,6 @@ public class SparkServiceStartupTests
         Assert.DoesNotContain(legacySecret, h.Log.AllText);
     }
 
-
     /// <summary>
     /// An adopted backup leaves no copy reachable from the settings cache either.
     /// </summary>
@@ -512,7 +502,6 @@ public class SparkServiceStartupTests
     {
         const string legacySecret = "legacy-blob-that-must-not-be-logged-7d22";
 
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create();
         h.SeedStore(BackupStore, SparkServiceHarness.MnemonicFor(1));
 
@@ -533,32 +522,6 @@ public class SparkServiceStartupTests
         var cached = await h.Service.Get(BackupStore);
         Assert.NotNull(cached);
         Assert.Null(cached.UnilateralExit!.ExitStateBackup);
-    }
-
-    /// <summary>
-    /// Turns the experimental-exit gate on for the duration of a test.
-    /// </summary>
-    /// <remarks>
-    /// The import is behind <see cref="Constants.UnilateralExitEnabled"/>, so a test that did not set this
-    /// would be asserting against a feature that was off and would pass for the wrong reason. The variable is
-    /// process-wide, which is why this class joins <see cref="UnilateralExitTestCollection"/>: xUnit's
-    /// per-class parallelism would otherwise let two classes read it while another is mid-swap.
-    /// </remarks>
-    private static IDisposable FeatureGate() => new EnvironmentSwitch(Gate);
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, "1");
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
     }
 
     /// <summary>

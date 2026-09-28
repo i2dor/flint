@@ -50,7 +50,6 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// controller's collaborators are the surface harness's fakes.
 /// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkExitStateFormLimitTests
 {
     private const string Store = SparkSurfaceHarness.AttackerStore;
@@ -61,7 +60,6 @@ public class SparkExitStateFormLimitTests
     [Fact(Timeout = 120_000)]
     public async Task A_six_megabyte_multipart_paste_reaches_the_action_intact()
     {
-        using var gate = FeatureGate();
         await using var site = await Site.StartAsync();
 
         using var form = new MultipartFormDataContent
@@ -79,7 +77,6 @@ public class SparkExitStateFormLimitTests
     [Fact(Timeout = 120_000)]
     public async Task A_six_megabyte_url_encoded_paste_reaches_the_action_intact()
     {
-        using var gate = FeatureGate();
         await using var site = await Site.StartAsync();
 
         using var form = new FormUrlEncodedContent(
@@ -97,7 +94,6 @@ public class SparkExitStateFormLimitTests
     [Fact(Timeout = 120_000)]
     public async Task The_same_backup_uploaded_as_a_file_reaches_the_action_intact()
     {
-        using var gate = FeatureGate();
         await using var site = await Site.StartAsync();
 
         var file = new ByteArrayContent(Encoding.UTF8.GetBytes(SixMegabyteBackup));
@@ -118,7 +114,6 @@ public class SparkExitStateFormLimitTests
     public async Task A_post_without_an_antiforgery_token_is_still_refused()
     {
         // The limits widen what the form read accepts; they must not have moved the check out of the way.
-        using var gate = FeatureGate();
         await using var site = await Site.StartAsync();
 
         using var form = new MultipartFormDataContent
@@ -140,23 +135,6 @@ public class SparkExitStateFormLimitTests
             builder.Append(chunk);
         builder.Length = length;
         return builder.ToString();
-    }
-
-    private static IDisposable FeatureGate() => new EnvironmentSwitch("FLINT_EXPERIMENTAL_UNILATERAL_EXIT");
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, "1");
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
     }
 
     /// <summary>

@@ -105,21 +105,14 @@ namespace BTCPayServer.Plugins.Flint.Tests.LocalRegtest;
 /// operator would see), and the tag helpers are MVC's.
 /// </para>
 /// <para>
-/// <b>One class, in the serialised collection.</b> The exit feature is behind a process-wide environment
-/// switch and the Advanced page's backup section only renders behind it, so the class joins
-/// <see cref="UnilateralExitTestCollection"/> and every test restores the variable in a <c>finally</c>.
-/// </para>
-/// <para>
 /// Run it with <c>dotnet test --filter "FullyQualifiedName~RenderExitScreensTests"</c>; the files land in
 /// <see cref="ExitScreenRenderer.OutputDirectory"/> and are inert (they link BTCPay's own stylesheets by
 /// absolute URL, so they want the server this repo's checkout already runs).
 /// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class RenderExitScreensTests
 {
     private const string Store = SparkSurfaceHarness.AttackerStore;
-    private const string Gate = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
 
     /// <summary>A regtest address, so a destination in a screen reads like one a merchant would type.</summary>
     private const string Destination = "bcrt1qt8hufshrz62z5vj4q40uqx6c6ytlujy5s03gwm";
@@ -134,8 +127,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_disclosure_screen_renders()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderExitScreenAsync(
             Page(disclosureAcknowledged: false, balanceSats: 250_000));
 
@@ -148,8 +139,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_quote_form_renders_at_the_recommended_rate()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderExitScreenAsync(
             Page(balanceSats: 900_000, recommendedFeeRateSatPerVbyte: 3));
 
@@ -163,8 +152,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_quote_form_renders_without_a_recommendation()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderExitScreenAsync(
             Page(balanceSats: 900_000, recommendedFeeRateSatPerVbyte: null));
 
@@ -179,8 +166,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_nothing_worth_exiting_screen_renders()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderExitScreenAsync(
             Page(balanceSats: 900_000, recommendedFeeRateSatPerVbyte: 3),
             errorMessage: SparkUnilateralExitService.NothingWorthExiting);
@@ -200,8 +185,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_awaiting_funding_screen_renders()
     {
-        using var gate = FeatureGate();
-
         var record = AwaitingFunding();
         var html = await RenderExitScreenAsync(
             Page(
@@ -230,8 +213,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_built_screen_renders()
     {
-        using var gate = FeatureGate();
-
         var record = AwaitingFunding();
         record.Status = UnilateralExitStatus.Built;
         var fanout = FakeSparkSdkClient.ExitTxid("fanout");
@@ -271,8 +252,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_advanced_backup_screen_renders_when_one_is_stored()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderAdvancedScreenAsync(storedBackup: true);
 
         WriteScreen("06-advanced-backup.html", html);
@@ -282,8 +261,6 @@ public class RenderExitScreensTests
     [Fact]
     public async Task The_advanced_backup_screen_renders_when_none_is_stored()
     {
-        using var gate = FeatureGate();
-
         var html = await RenderAdvancedScreenAsync(storedBackup: false);
 
         WriteScreen("07-advanced-backup-none.html", html);
@@ -405,31 +382,6 @@ public class RenderExitScreensTests
         File.WriteAllText(Path.Combine(ExitScreenRenderer.OutputDirectory, fileName), html);
 
         Assert.False(string.IsNullOrWhiteSpace(html));
-    }
-
-    /// <summary>
-    /// Sets the feature switch for one test and puts back whatever was there.
-    /// </summary>
-    /// <remarks>
-    /// The switch is process-wide and <c>Constants.UnilateralExitEnabled</c> is a property precisely so this
-    /// works. Both pages here need it on: the controller refuses to build the exit model without it, and the
-    /// Advanced page renders no backup section at all.
-    /// </remarks>
-    private static IDisposable FeatureGate() => new EnvironmentSwitch(Gate, "1");
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name, string? value)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, value);
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
     }
 
     /// <summary>

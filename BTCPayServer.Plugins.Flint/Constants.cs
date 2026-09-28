@@ -175,36 +175,10 @@ public static class Constants
 
     #region Unilateral exit
 
-    /// <summary>
-    /// Whether the experimental unilateral-exit flow exists on this host at all.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Off unless the operator sets <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT=1</c> (or <c>true</c>) in the BTCPay
-    /// process's environment. With it unset the Advanced page renders no link and every exit route returns
-    /// <c>NotFound</c>: not disabled-looking, <em>absent</em>. A merchant who cannot tell a feature from a
-    /// broken one will try the broken one, and this particular one produces signed transactions they then have
-    /// to broadcast themselves.
-    /// </para>
-    /// <para>
-    /// <b>Environment rather than a store setting</b>, because the decision is not the merchant's: the flow can
-    /// only exit leaves whose exit data was collected while the operators were reachable (the pinned SDK quotes
-    /// and builds from local storage, but cannot obtain what it never synced), needs an on-chain UTXO the
-    /// operator funds by hand, and settles over multi-day CSV timelocks. That is a whole-deployment judgement by whoever
-    /// runs the server, and it must be revocable without touching any store's settings blob — unsetting the
-    /// variable takes the feature away from every store at once, leaving the acknowledgements in place for if it
-    /// comes back.
-    /// </para>
-    /// <para>
-    /// <b>A property, not a <c>const</c> or a <c>static readonly</c>.</b> It is read on every request so a
-    /// change takes effect on process restart rather than on rebuild, and so a test can set the variable and
-    /// exercise both sides of the gate in one run — a cached <c>static readonly</c> would freeze whichever
-    /// value the first test to touch this class happened to see, which is exactly the kind of ordering-dependent
-    /// green suite that hides a gate that does not gate.
-    /// </para>
-    /// </remarks>
-    internal static bool UnilateralExitEnabled =>
-        Environment.GetEnvironmentVariable("FLINT_EXPERIMENTAL_UNILATERAL_EXIT") is "1" or "true";
+    // There is no switch for the flow itself. Earlier releases put it behind FLINT_EXPERIMENTAL_UNILATERAL_EXIT;
+    // that variable is no longer read, and what stands between a store and an exit is the stored disclosure
+    // acknowledgement (UnilateralExitSettings.DisclosureAcknowledged), which the service re-reads before every
+    // quote and build.
 
     /// <summary>
     /// BIP32 hardened account index for the on-chain key that funds a unilateral exit —

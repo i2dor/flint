@@ -101,8 +101,10 @@
                 @if (Model.IsMainnet)
                 {
                     <text>
-                        An esplora API used only to look up what has arrived on the funding address. Left empty it
-                        is <code>@SparkExitFundingExplorer.MainnetDefaultApiUrl</code>, which means telling
+                        An esplora API, asked only while you use this page: for a suggested fee rate beside the
+                        quote form, and for what has arrived on the funding address while an exit waits for
+                        funding and when it is built. Left empty it is
+                        <code>@SparkExitFundingExplorer.MainnetDefaultApiUrl</code>, which means telling
                         mempool.space which address funds your exit; point it at your own instance if you would
                         rather not. It never affects what gets built or signed.
                     </text>
@@ -191,8 +193,10 @@
                     and an exit built from it goes ahead with the operators gone for good.
                 </p>
                 <p class="mb-0">
-                    <strong>It is experimental.</strong> It is behind a server-side switch for that reason, and
-                    nothing about it is covered by the guarantees the rest of the plugin makes.
+                    <strong>Nothing about it is covered by the guarantees the rest of the plugin makes.</strong>
+                    Whether it finishes depends on exit data collected earlier, on a Bitcoin node you run, and on
+                    you broadcasting each step in order and on time — and a mistake in any of those is yours to
+                    recover from.
                 </p>
             </div>
 
