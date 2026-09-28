@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -379,7 +380,7 @@ public sealed class StablecoinPaymentService
 
         var now = _time.GetUtcNow();
         var existing = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
-        if (Reusable(existing, invoice, asset, network, now) is { } reusable)
+        if (Reusable(existing, invoice, asset, network, sdk, now) is { } reusable)
             return await ShowAsync(invoice, asset, reusable, cancellationToken).ConfigureAwait(false);
         if (existing.Count >= StablecoinPayments.MaxQuotesPerInvoice)
             return TooManyForInvoice();
@@ -442,7 +443,7 @@ public sealed class StablecoinPaymentService
             {
                 now = _time.GetUtcNow();
                 var current = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
-                raced = Reusable(current, invoice, asset, network, now);
+                raced = Reusable(current, invoice, asset, network, sdk, now);
                 if (raced is null)
                 {
                     var fresh = await _quotes
@@ -464,6 +465,7 @@ public sealed class StablecoinPaymentService
                         // attribute a payment to it, so an address shown without one is money that arrives
                         // unattributable.
                         await _quotes.AddAsync(recorded, cancellationToken).ConfigureAwait(false);
+                        RecordMinted(sdk, recorded.Id);
                     }
                 }
             }
@@ -510,18 +512,40 @@ public sealed class StablecoinPaymentService
     private static BigInteger SatsWorth(BigInteger amount, BigInteger sats) =>
         BigInteger.Divide(amount + sats - BigInteger.One, sats);
 
+    /// <summary>The quotes each running wallet minted, by the SDK handle it runs as.</summary>
+    /// <remarks>
+    /// Weak on the handle, so a wallet that is torn down takes its entry with it. See <see cref="Reusable"/>.
+    /// </remarks>
+    private readonly ConditionalWeakTable<ISparkSdkClient, ConcurrentDictionary<string, byte>> _mintedBy = new();
+
+    private bool MintedBy(ISparkSdkClient sdk, string quoteId) =>
+        _mintedBy.TryGetValue(sdk, out var minted) && minted.ContainsKey(quoteId);
+
+    private void RecordMinted(ISparkSdkClient sdk, string quoteId) =>
+        _mintedBy.GetValue(sdk, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal))[quoteId] = 0;
+
     /// <summary>
     /// The live quote this invoice already holds for the network and due, if any: a payer clicking back and forth
     /// costs nothing.
     /// </summary>
-    private static StablecoinQuote? Reusable(
+    /// <remarks>
+    /// <b>Only a quote the running wallet made.</b> A quote's address pays whichever wallet quoted it, and after a
+    /// store's recovery phrase is replaced that is the old one: reused, the checkout kept handing payers an address
+    /// into a wallet the store had moved away from, for the hour it is offered. The table records no wallet, so the
+    /// running wallet's own quotes are tracked here, by the SDK handle that minted them. After a restart nothing is
+    /// known to be the running wallet's, and the next request for each network mints once — a provider row, against
+    /// sending a payer to a wallet that may no longer be the store's.
+    /// </remarks>
+    private StablecoinQuote? Reusable(
         IReadOnlyList<StablecoinQuote> invoiceQuotes,
         StablecoinInvoice invoice,
         StablecoinAsset asset,
         StablecoinNetworkOption network,
+        ISparkSdkClient sdk,
         DateTimeOffset now) =>
         invoiceQuotes.FirstOrDefault(quote =>
-            quote.PaymentMethodId == asset.PaymentMethodId.ToString()
+            MintedBy(sdk, quote.Id)
+            && quote.PaymentMethodId == asset.PaymentMethodId.ToString()
             && StablecoinPayments.Same(quote.Chain, network.Chain)
             && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
             && quote.SdkPaymentId is null

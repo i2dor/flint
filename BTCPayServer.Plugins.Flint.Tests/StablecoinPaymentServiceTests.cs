@@ -379,6 +379,29 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
+    public async Task A_quote_from_the_wallet_a_store_replaced_is_not_handed_out_again()
+    {
+        // After the recovery phrase is replaced, the old quote's address still pays the old wallet. Reused, checkout
+        // kept offering it for the hour it is offered.
+        var sdk = new FakeSparkSdkClient();
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients[StoreId] = sdk;
+        var setup = new Setup(new StablecoinHarness(runtime), sdk);
+        Invoice(setup);
+        var old = await QuoteOk(setup, "base");
+
+        var replacement = new FakeSparkSdkClient();
+        runtime.Clients[StoreId] = replacement;
+        var fresh = await QuoteOk(setup, "base");
+
+        Assert.NotEqual(old.QuoteId, fresh.QuoteId);
+        Assert.Single(replacement.CrossChainReceiveCalls);
+        // …and the replacement's own quote is reused as usual.
+        Assert.Equal(fresh.QuoteId, (await QuoteOk(setup, "base")).QuoteId);
+        Assert.Single(replacement.CrossChainReceiveCalls);
+    }
+
+    [Fact]
     public async Task A_changed_due_is_a_fresh_quote()
     {
         var setup = Create();
