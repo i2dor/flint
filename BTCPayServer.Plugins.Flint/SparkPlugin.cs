@@ -378,6 +378,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("spark-setup-post-body", "Spark/SparkStablecoinSetupStep");
         services.AddUIExtension("checkout-end", "Spark/StablecoinCheckout");
         services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
+        // And, on the status page, the USDC/USDT money that is on no invoice — which otherwise only the server log knew.
+        services.AddUIExtension("spark-status-post-body", "Spark/StablecoinAttention");
 
         base.Execute(services);
     }

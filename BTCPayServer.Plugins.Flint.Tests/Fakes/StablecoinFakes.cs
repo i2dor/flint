@@ -156,8 +156,13 @@ public sealed class InMemoryStablecoinQuoteStore : IStablecoinQuoteStore
                 .ToList());
     }
 
+    /// <summary>Thrown by <see cref="CountUncreditedAsync"/>: a database that is down.</summary>
+    public Exception? FailUncreditedReadsWith { get; set; }
+
     public Task<int> CountUncreditedAsync(string storeId, CancellationToken cancellationToken = default)
     {
+        if (FailUncreditedReadsWith is not null)
+            throw FailUncreditedReadsWith;
         lock (_gate)
             return Task.FromResult(Quotes.Count(q =>
                 q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null));

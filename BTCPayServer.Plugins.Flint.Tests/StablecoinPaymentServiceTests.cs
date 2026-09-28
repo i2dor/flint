@@ -771,6 +771,46 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
+    public async Task Money_on_no_invoice_is_there_for_the_store_to_see_not_only_in_the_server_log()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var foreign = FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown) with { ExpectedReceivedAmount = 12_345 }, "spark-pay-1", paid: 10_080_000);
+        await setup.Service.TryCreditAsync(StoreId, foreign, Ct);
+        await setup.Service.TryCreditAsync(StoreId, foreign, Ct);
+        var stuck = await SettledElsewhere(setup, "stuck", time.GetUtcNow());
+        await SettledElsewhere(setup, "just-now", time.GetUtcNow().AddMinutes(10));
+        time.Advance(StablecoinPaymentService.UncreditedNoticeAfter + TimeSpan.FromMinutes(1));
+
+        var attention = await setup.Service.GetAttentionAsync(StoreId, Ct);
+
+        Assert.True(attention.Any);
+        var arrival = Assert.Single(attention.Unattributed);
+        Assert.Equal("spark-pay-1", arrival.SdkPaymentId);
+        Assert.Equal("10.08", arrival.Amount);
+        Assert.Equal("Base", arrival.ChainName);
+        Assert.Equal("0xpayerspark-pay-1", arrival.ExternalTxHash);
+        // The one that settled a quarter of an hour ago and still has no credit; the retry is still on the other.
+        var uncredited = Assert.Single(attention.Uncredited);
+        Assert.Equal(stuck.InvoiceId, uncredited.InvoiceId);
+        Assert.Equal(1, attention.UncreditedCount);
+        Assert.False((await Create().Service.GetAttentionAsync(StoreId, Ct)).Any);
+    }
+
+    [Fact]
+    public async Task What_the_store_should_know_is_answered_even_when_the_database_is_not()
+    {
+        // Read by the status page's partial, inside the page's own request.
+        var setup = Create();
+        setup.Quotes.FailUncreditedReadsWith = new InvalidOperationException("database unavailable");
+
+        Assert.False((await setup.Service.GetAttentionAsync(StoreId, Ct)).Any);
+    }
+
+    [Fact]
     public async Task A_receive_this_plugin_did_not_quote_is_not_credited_to_anything()
     {
         var setup = Create();

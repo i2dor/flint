@@ -805,6 +805,7 @@ public sealed class StablecoinPaymentService
         }
 
         openQuotes.Remove(quote);
+        ForgetUnattributed(storeId, payment.SdkPaymentId);
 
         _logger.LogInformation(
             "Store {StoreId}: {Asset} payment on {Chain} (Spark payment {SdkPaymentId}) settled quote {QuoteId} "
@@ -982,9 +983,19 @@ public sealed class StablecoinPaymentService
         if (!_reportedUnattributed.TryAdd(payment.SdkPaymentId, 0))
             return;
 
-        var paid = conversion.AssetAmountIn is { } amount
-            ? StablecoinAmounts.Format(amount, (int)conversion.AssetDecimals)
-            : "an unreported amount of";
+        var amount = conversion.AssetAmountIn is { } units
+            ? StablecoinAmounts.Format(units, (int)conversion.AssetDecimals)
+            : null;
+        RememberUnattributed(storeId, new StablecoinUnattributedArrival(
+            payment.SdkPaymentId,
+            conversion.Asset ?? "stablecoin",
+            conversion.Chain is { Length: > 0 } chain ? StablecoinPayments.ChainName(chain) : "an unknown network",
+            amount,
+            conversion.ExternalTxHash,
+            match.Kind is StablecoinMatchKind.Ambiguous ? match.Candidates : 0,
+            payment.Timestamp));
+
+        var paid = amount ?? "an unreported amount of";
         _logger.LogWarning(
             "Store {StoreId}: received {Paid} {Asset} on {Chain} (Spark payment {SdkPaymentId}, payer transaction "
             + "{ExternalTxHash}) that {Reason}. It is in the Spark wallet and has not been recorded on any invoice; "
@@ -994,6 +1005,101 @@ public sealed class StablecoinPaymentService
             match.Kind is StablecoinMatchKind.Ambiguous
                 ? $"fits {match.Candidates} open quotes equally well"
                 : "matches none of this store's open quotes");
+    }
+
+    #endregion
+
+    #region What the store owner should know
+
+    /// <summary>The arrivals each store's page lists, newest last, at most <see cref="MaxRememberedPerStore"/> each.</summary>
+    private readonly Dictionary<string, List<StablecoinUnattributedArrival>> _unattributed = new(StringComparer.Ordinal);
+
+    internal const int MaxRememberedPerStore = 20;
+
+    /// <summary>How long after settling a credit that has not landed is shown to the store, rather than left to the retry.</summary>
+    internal static readonly TimeSpan UncreditedNoticeAfter = TimeSpan.FromMinutes(15);
+
+    private void RememberUnattributed(string storeId, StablecoinUnattributedArrival arrival)
+    {
+        lock (_unattributed)
+        {
+            if (!_unattributed.TryGetValue(storeId, out var list))
+            {
+                if (_unattributed.Count >= MaxStoresPerPass * 2)
+                    _unattributed.Clear();
+                _unattributed[storeId] = list = [];
+            }
+
+            list.RemoveAll(a => a.SdkPaymentId == arrival.SdkPaymentId);
+            list.Add(arrival);
+            if (list.Count > MaxRememberedPerStore)
+                list.RemoveRange(0, list.Count - MaxRememberedPerStore);
+        }
+    }
+
+    private void ForgetUnattributed(string storeId, string sdkPaymentId)
+    {
+        lock (_unattributed)
+        {
+            if (_unattributed.TryGetValue(storeId, out var list))
+                list.RemoveAll(a => a.SdkPaymentId == sdkPaymentId);
+        }
+    }
+
+    /// <summary>
+    /// The USDC/USDT money in a store's wallet that is on no invoice: arrivals nothing could attribute, and
+    /// payments that matched an invoice but could not be recorded on it. Never throws.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the store needs to hear this.</b> Both are real money a human has to place by hand, and until now they
+    /// were a warning in the server log — which on a shared server the store owner never sees. The Flint status page
+    /// shows them (<c>Views/Shared/Spark/StablecoinAttention.cshtml</c>), once each, without anything being sent.
+    /// </para>
+    /// <para>
+    /// <b>Arrivals are remembered in memory, bounded per store.</b> Nothing stores an arrival that matched no quote,
+    /// and adding a table for a notice is more than it is worth: after a restart the reconciliation pass reports each
+    /// one again for as long as it is inside an open quote's window, which is where it can still be matched by hand
+    /// from the invoice it belongs to. Uncredited payments are read from the quote table, so they survive restarts
+    /// and are counted however old.
+    /// </para>
+    /// </remarks>
+    public async Task<StablecoinAttention> GetAttentionAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(storeId) || !Available)
+            return StablecoinAttention.None;
+
+        IReadOnlyList<StablecoinUnattributedArrival> arrivals;
+        lock (_unattributed)
+            arrivals = _unattributed.TryGetValue(storeId, out var list) ? [.. list] : [];
+
+        try
+        {
+            var count = await _quotes.CountUncreditedAsync(storeId, cancellationToken).ConfigureAwait(false);
+            if (count == 0)
+                return new StablecoinAttention(arrivals, [], 0);
+
+            var noticeBefore = _time.GetUtcNow() - UncreditedNoticeAfter;
+            var uncredited = (await _quotes
+                    .ListUncreditedAsync(storeId, DateTimeOffset.MinValue, MaxRememberedPerStore, cancellationToken)
+                    .ConfigureAwait(false))
+                .Where(q => q.SettledAt is { } at && at < noticeBefore)
+                .Select(q => new StablecoinUncreditedPayment(
+                    q.InvoiceId,
+                    q.Asset,
+                    StablecoinPayments.ChainName(q.Chain),
+                    StablecoinAmounts.Format(CreditedBaseUnits(q), q.Decimals),
+                    q.SdkPaymentId!,
+                    q.SettledAt!.Value))
+                .ToList();
+            // The count covers what the list, bounded, leaves out; below the bound the list is the count.
+            return new StablecoinAttention(arrivals, uncredited, count > MaxRememberedPerStore ? count : uncredited.Count);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Store {StoreId}: could not read the USDC/USDT payments awaiting a credit", storeId);
+            return new StablecoinAttention(arrivals, [], 0);
+        }
     }
 
     #endregion
