@@ -130,26 +130,37 @@ public sealed class InMemoryStablecoinQuoteStore : IStablecoinQuoteStore
 
     public Task<IReadOnlyList<StablecoinQuote>> ListUncreditedAsync(
         string storeId,
+        DateTimeOffset settledFrom,
         int limit,
         CancellationToken cancellationToken = default)
     {
         lock (_gate)
             return Task.FromResult<IReadOnlyList<StablecoinQuote>>(Quotes
-                .Where(q => q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null)
+                .Where(q => q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null
+                            && q.SettledAt >= settledFrom)
                 .OrderBy(q => q.SettledAt)
                 .Take(limit)
                 .Select(Copy)
                 .ToList());
     }
 
-    public Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
+        CancellationToken cancellationToken = default)
     {
         lock (_gate)
             return Task.FromResult<IReadOnlyList<string>>(Quotes
-                .Where(q => q.SdkPaymentId is not null && q.CreditedAt is null)
+                .Where(q => q.SdkPaymentId is not null && q.CreditedAt is null && q.SettledAt >= settledFrom)
                 .Select(q => q.StoreId)
                 .Distinct()
                 .ToList());
+    }
+
+    public Task<int> CountUncreditedAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+            return Task.FromResult(Quotes.Count(q =>
+                q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null));
     }
 
     public Task<int> DeleteFinishedAsync(DateTimeOffset before, CancellationToken cancellationToken = default)

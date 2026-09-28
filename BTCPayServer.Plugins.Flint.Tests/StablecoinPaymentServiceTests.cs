@@ -822,6 +822,58 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(0, await setup.Service.ReconcileAsync(Ct));
     }
 
+    private static async Task<StablecoinQuote> SettledElsewhere(Setup setup, string id, DateTimeOffset settledAt)
+    {
+        var quote = OpenQuote(id, settledAt.AddHours(-1), settledAt.AddMinutes(-58));
+        quote.InvoiceId = $"gone-{id}";
+        await setup.Quotes.AddAsync(quote, Ct);
+        Assert.True(await setup.Quotes.TrySettleAsync(
+            id, new StablecoinSettlement($"spark-{id}", 5_000_000, null, null, null, null, settledAt), Ct));
+        return quote;
+    }
+
+    [Fact]
+    public async Task Credits_past_the_retry_horizon_do_not_crowd_out_newer_ones()
+    {
+        // The retry read the oldest page of uncredited quotes and dropped the ones past a week afterwards, so a
+        // page's worth of stale ones — each a credit that can never land — kept every newer credit from being tried.
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        var invoice = Invoice(setup);
+        var now = time.GetUtcNow();
+        for (var i = 0; i < 150; i++)
+            await SettledElsewhere(setup, $"stale-{i}", now.AddDays(-8));
+
+        var shown = await QuoteOk(setup, "base");
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000);
+        setup.Invoices.FailPaymentsWith = new InvalidOperationException("database unavailable");
+        Assert.Equal(StablecoinReceiveOutcome.CreditFailed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+        setup.Invoices.FailPaymentsWith = null;
+
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+        Assert.Single(invoice.Payments);
+    }
+
+    [Fact]
+    public async Task A_credit_that_keeps_failing_is_warned_about_once_not_every_pass()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        await SettledElsewhere(setup, "orphan", time.GetUtcNow());
+
+        for (var pass = 0; pass < 5; pass++)
+        {
+            await setup.Service.ReconcileAsync(Ct);
+            time.Advance(TimeSpan.FromMinutes(1));
+        }
+
+        Assert.Single(setup.Harness.Log.Lines, line => line.StartsWith("Warning") && line.Contains("spark-orphan"));
+
+        time.Advance(StablecoinPaymentService.CreditFailureWarningInterval);
+        await setup.Service.ReconcileAsync(Ct);
+        Assert.Equal(2, setup.Harness.Log.Lines.Count(line => line.StartsWith("Warning") && line.Contains("spark-orphan")));
+    }
+
     [Fact]
     public async Task The_reconciliation_pass_credits_an_arrival_the_event_stream_dropped()
     {

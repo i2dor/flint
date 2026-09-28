@@ -63,14 +63,30 @@ public interface IStablecoinQuoteStore
         DateTimeOffset creditedAt,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Settled quotes whose BTCPay credit has not landed yet, oldest first.</summary>
+    /// <summary>
+    /// Settled quotes whose BTCPay credit has not landed yet, settled at or after <paramref name="settledFrom"/>,
+    /// oldest first.
+    /// </summary>
+    /// <remarks>
+    /// The cutoff is part of the query, not applied to its result: filtering a page of the oldest afterwards let a
+    /// page's worth of quotes past the retry horizon fill every page, so newer credits were never retried.
+    /// </remarks>
     Task<IReadOnlyList<StablecoinQuote>> ListUncreditedAsync(
         string storeId,
+        DateTimeOffset settledFrom,
         int limit,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Stores holding a settled quote whose BTCPay credit has not landed yet.</summary>
-    Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Stores holding a settled quote whose BTCPay credit has not landed yet, settled at or after
+    /// <paramref name="settledFrom"/>.
+    /// </summary>
+    Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>How many of a store's settled quotes have no BTCPay credit, however long ago they settled.</summary>
+    Task<int> CountUncreditedAsync(string storeId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes finished quotes: those credited before <paramref name="before"/>, and unsettled ones that expired

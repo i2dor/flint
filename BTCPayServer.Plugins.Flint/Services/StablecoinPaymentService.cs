@@ -915,12 +915,15 @@ public sealed class StablecoinPaymentService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex,
+            _logger.Log(CreditFailureLevel(quote.Id), ex,
                 "Store {StoreId}: could not record the {Asset} payment {SdkPaymentId} on invoice {InvoiceId} yet; "
                 + "it is retried on the next reconciliation pass",
                 quote.StoreId, quote.Asset, paymentId, quote.InvoiceId);
             return StablecoinReceiveOutcome.CreditFailed;
         }
+
+        if (outcome is StablecoinCreditOutcome.CreditedNow or StablecoinCreditOutcome.AlreadyRecorded)
+            _creditFailureWarned.TryRemove(quote.Id, out _);
 
         switch (outcome)
         {
@@ -936,7 +939,7 @@ public sealed class StablecoinPaymentService
                 return StablecoinReceiveOutcome.AlreadyCredited;
 
             default:
-                _logger.LogWarning(
+                _logger.Log(CreditFailureLevel(quote.Id),
                     "Store {StoreId}: the {Asset} payment {SdkPaymentId} ({Value}) matched invoice {InvoiceId}, but it "
                     + "could not be recorded there ({Outcome}). The money is in the Spark wallet; the plugin keeps "
                     + "retrying for {Days} days",
@@ -944,6 +947,28 @@ public sealed class StablecoinPaymentService
                     CreditRetryHorizon.TotalDays);
                 return StablecoinReceiveOutcome.CreditFailed;
         }
+    }
+
+    /// <summary>How often one quote's failing credit is reported at warning level; in between, at debug.</summary>
+    internal static readonly TimeSpan CreditFailureWarningInterval = TimeSpan.FromHours(6);
+
+    /// <summary>When each failing credit was last reported at warning level.</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _creditFailureWarned = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Warning the first time a quote's credit fails and every <see cref="CreditFailureWarningInterval"/> after,
+    /// debug otherwise. The retry runs every pass for a week, and a credit that cannot land (the invoice deleted, its
+    /// prompt gone) would otherwise write a warning a minute for all of it — per quote.
+    /// </summary>
+    private LogLevel CreditFailureLevel(string quoteId)
+    {
+        var now = _time.GetUtcNow();
+        if (_creditFailureWarned.Count > 10_000)
+            _creditFailureWarned.Clear();
+        if (_creditFailureWarned.TryGetValue(quoteId, out var last) && now - last < CreditFailureWarningInterval)
+            return LogLevel.Debug;
+        _creditFailureWarned[quoteId] = now;
+        return LogLevel.Warning;
     }
 
     private void ReportUnattributed(
@@ -989,7 +1014,9 @@ public sealed class StablecoinPaymentService
                 .ListStoresWithOpenQuotesAsync(now - StablecoinPayments.MatchWindow, cancellationToken)
                 .ConfigureAwait(false))
             .ToHashSet(StringComparer.Ordinal);
-        var creditStores = await _quotes.ListStoresAwaitingCreditAsync(cancellationToken).ConfigureAwait(false);
+        var creditStores = await _quotes
+            .ListStoresAwaitingCreditAsync(now - CreditRetryHorizon, cancellationToken)
+            .ConfigureAwait(false);
 
         await PruneAsync(now, cancellationToken).ConfigureAwait(false);
 
@@ -1038,9 +1065,9 @@ public sealed class StablecoinPaymentService
     {
         var credited = 0;
         var pending = await _quotes
-            .ListUncreditedAsync(storeId, MaxCreditsPerStorePerPass, cancellationToken)
+            .ListUncreditedAsync(storeId, now - CreditRetryHorizon, MaxCreditsPerStorePerPass, cancellationToken)
             .ConfigureAwait(false);
-        foreach (var quote in pending.Where(q => q.SettledAt is not { } at || now - at <= CreditRetryHorizon))
+        foreach (var quote in pending)
         {
             if (await CreditAsync(quote, cancellationToken).ConfigureAwait(false) is StablecoinReceiveOutcome.Credited)
                 credited++;
