@@ -5,7 +5,16 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [1.2.0] — 2026-09-28
+
+The first feature release since 1.0. Customers can pay in **USDC or USDT** from eight networks while the store
+receives and keeps bitcoin; the Breez Spark SDK moves from 0.23 to 0.26; and an **experimental unilateral exit**,
+absent unless the server sets `FLINT_EXPERIMENTAL_UNILATERAL_EXIT`, gives an operator a way to take a store's
+balance on chain without Spark's operators. **Read "Upgrading" first: this release cannot be rolled back to
+1.1.0.** Validated before shipping: the unit suite (1,797 tests) and the Postgres store contract (128 tests)
+green, the funded, live-regtest and local Spark stack suites green in CI, and a mainnet test host running this
+build on BTCPay Server 2.4.4 with every store's balance unchanged across each deploy and two real USDC payments
+settled on their invoices — one of them paid with a rounded amount.
 
 ### Upgrading — read before installing
 
