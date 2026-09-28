@@ -655,7 +655,9 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
-    /// What the payer's wallet is handed: an EIP-681 token transfer on an EVM chain, the bare address elsewhere.
+    /// What the payer's wallet is handed by link: an EIP-681 token transfer on an EVM chain, the bare address
+    /// elsewhere. The QR code is the bare address everywhere — a scanner that does not read EIP-681 takes its first
+    /// address, the token contract, as the recipient.
     /// </summary>
     /// <remarks>
     /// Built here rather than taken from the SDK, because the SDK's URI carries the deposit it sized and the payer

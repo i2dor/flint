@@ -207,6 +207,9 @@ public class StablecoinPaymentMethodTests
         Assert.Equal("10.08", (string?)data["quote"]!["amount"]);
         Assert.Equal("0xdep", (string?)data["quote"]!["address"]);
         Assert.Equal("ethereum:0xabc@8453/transfer?address=0xdep&uint256=10080000", model.InvoiceBitcoinUrl);
+        // The QR code is the bare deposit address: a scanner that does not read EIP-681 would take the URI's first
+        // address — the token contract — as the recipient.
+        Assert.Equal("0xdep", model.InvoiceBitcoinUrlQR);
         Assert.Equal("UIStablecoinCheckout/Quote?invoiceId=invoice-1&paymentMethodId=USDC-FLINT", (string?)data["quoteUrl"]);
     }
 
@@ -264,6 +267,24 @@ public class StablecoinPaymentMethodTests
         Assert.Contains("local.id !== this.withdrawnId", view);
         Assert.Contains("id !== this.localBasis", view);
         Assert.Contains("id=\"FlintStablecoinWithdrawn\"", view);
+    }
+
+    [Fact]
+    public void The_checkout_qr_code_and_its_copy_button_are_the_bare_deposit_address()
+    {
+        // An EIP-681 URI names the token contract first; scanned or pasted by something that does not read token
+        // transfers, the contract becomes the recipient and the payment is gone.
+        var view = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
+            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+        var qr = System.Text.RegularExpressions.Regex.Match(
+            view, "<div class=\"qr-container[^>]*>\\s*<div>\\s*<qrcode[^>]*>", System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        Assert.True(qr.Success);
+        Assert.Contains(":data-qr-value=\"quote.address\"", qr.Value);
+        Assert.Contains(":data-clipboard=\"quote.address\"", qr.Value);
+        Assert.Contains("<qrcode :value=\"quote.address\"", qr.Value);
+        Assert.DoesNotContain("paymentRequest", qr.Value);
     }
 
     [Fact]

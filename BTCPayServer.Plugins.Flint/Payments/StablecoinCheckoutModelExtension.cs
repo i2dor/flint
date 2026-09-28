@@ -91,8 +91,11 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
 
         if (current && quote is not null)
         {
+            // The link a wallet opens is the EIP-681 transfer; the QR code is the bare address, because a scanner that
+            // does not read token transfers takes that URI's first address — the token contract — as the recipient.
+            // See the component's note on its QR code.
             context.Model.InvoiceBitcoinUrl = quote.PaymentRequest;
-            context.Model.InvoiceBitcoinUrlQR = quote.PaymentRequest;
+            context.Model.InvoiceBitcoinUrlQR = quote.DepositAddress;
         }
         else
         {

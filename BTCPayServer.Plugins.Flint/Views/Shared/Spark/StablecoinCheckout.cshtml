@@ -103,9 +103,16 @@
             <div v-else-if="error && !picking" class="alert alert-danger" role="alert" id="FlintStablecoinError">{{ error }}</div>
 
             <template v-else-if="quote && !picking">
-                <div class="qr-container clipboard-button" :data-qr-value="quote.paymentRequest" :data-clipboard="quote.paymentRequest" data-clipboard-confirm-element="#FlintStablecoinAddress [data-clipboard]">
+                @* The bare deposit address, in the QR code and on the clipboard — never the EIP-681 URI. That URI's first
+                   address is the token contract ("ethereum:<contract>@<chain>/transfer?address=<deposit>&uint256=…"),
+                   and a scanner that does not understand token transfers — an exchange's withdrawal form, a wallet that
+                   reads only the address — takes the contract as the recipient, which burns the payment. A bare address
+                   is read the same way by everything; the payer enters the amount shown below, as they must for Tron
+                   and Solana anyway, and a rounded amount is still matched to this quote (StablecoinQuoteMatcher).
+                   Wallets that do honour EIP-681 get it from the "Pay in wallet" link. *@
+                <div class="qr-container clipboard-button" :data-qr-value="quote.address" :data-clipboard="quote.address" data-clipboard-confirm-element="#FlintStablecoinAddress [data-clipboard]" id="FlintStablecoinQr">
                     <div>
-                        <qrcode :value="quote.paymentRequest" tag="div" :options="qrOptions" />
+                        <qrcode :value="quote.address" tag="div" :options="qrOptions" />
                     </div>
                     <img v-if="iconFor(quote.chain)" class="qr-icon" :src="iconFor(quote.chain)" :alt="quote.chainName" id="FlintStablecoinQrIcon" />
                 </div>
