@@ -364,6 +364,42 @@ public class StablecoinPaymentMethodTests
         Assert.IsType<EmptyResult>(result);
     }
 
+    [Fact]
+    public async Task A_quote_expiring_at_the_end_of_the_calendar_is_answered_not_thrown()
+    {
+        // SparkSdkClient.FromUnixSeconds clamps an absurd provider expiry to the last representable second, and the
+        // hour the checkout keeps an address past its price used to overflow from there — inside the anonymous
+        // endpoint, where an escaped exception restarts the server.
+        var sdk = new FakeSparkSdkClient { ReceiveQuoteExpiresAt = DateTimeOffset.MaxValue };
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients["store-1"] = sdk;
+        var harness = new StablecoinHarness(runtime);
+        harness.Invoices.Add("invoice-1", "store-1", 10m, (StablecoinPayments.Usdc, ["base"]));
+        harness.Invoices.SetContracts("invoice-1", StablecoinPayments.Usdc, sdk.CrossChainReceiveRoutes);
+        var controller = new UIStablecoinCheckoutController(
+            harness.Service, NullLogger<UIStablecoinCheckoutController>.Instance);
+
+        var result = await controller.Quote("invoice-1", "USDC-FLINT", "base", Ct);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var body = JObject.FromObject(ok.Value!);
+        Assert.Equal(DateTimeOffset.MaxValue.ToUnixTimeSeconds(), (long)body["quote"]!["offeredUntil"]!);
+    }
+
+    [Fact]
+    public void The_time_a_quote_is_offered_for_saturates_at_the_end_of_the_calendar()
+    {
+        Assert.Equal(DateTimeOffset.MaxValue, StablecoinPayments.OfferedUntil(DateTimeOffset.MaxValue));
+        Assert.Equal(DateTimeOffset.MaxValue,
+            StablecoinPayments.OfferedUntil(DateTimeOffset.MaxValue - TimeSpan.FromMinutes(1)));
+        // An offset that puts the local clock nearer the end than the instant is must not overflow either.
+        var nearEnd = new DateTimeOffset(DateTime.MaxValue.AddHours(-2), TimeSpan.Zero).ToOffset(TimeSpan.FromHours(1.5));
+        Assert.Equal(nearEnd.UtcDateTime.AddHours(1), StablecoinPayments.OfferedUntil(nearEnd).UtcDateTime);
+
+        var ordinary = new DateTimeOffset(2026, 9, 28, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(ordinary + StablecoinPayments.OfferedPastExpiry, StablecoinPayments.OfferedUntil(ordinary));
+    }
+
     #endregion
 
     #region Rates

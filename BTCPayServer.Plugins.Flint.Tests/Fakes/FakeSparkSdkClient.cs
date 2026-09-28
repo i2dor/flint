@@ -1055,6 +1055,12 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>How long the provider holds a receive quote's price: about two minutes, measured on mainnet.</summary>
     public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// When set, the expiry every receive quote carries instead of <see cref="ReceiveQuoteLifetime"/> from now — for
+    /// the values the real client produces at its edges, such as the clamp to the last representable second.
+    /// </summary>
+    public DateTimeOffset? ReceiveQuoteExpiresAt { get; set; }
+
     public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
 
     private int _receiveCount;
@@ -1118,7 +1124,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             ReceiveLandsAsToken ? Usdb.Value : null,
             fixedFee + proportional,
             route.Asset,
-            DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
+            ReceiveQuoteExpiresAt ?? DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
             address);
     }
 

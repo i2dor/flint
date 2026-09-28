@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Payments;
+using BTCPayServer.Plugins.Flint.Payments;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -68,10 +69,18 @@ public class UIStablecoinCheckoutController : Controller
             return NotFound();
         }
 
-        StablecoinQuoteResult result;
         try
         {
-            result = await _service.QuoteAsync(invoiceId, parsed, chain, cancellationToken);
+            var result = await _service.QuoteAsync(invoiceId, parsed, chain, cancellationToken);
+            if (result.NotFound)
+                return NotFound();
+            if (result.Quote is not { } quote)
+                return BadRequest(new { error = result.Error });
+
+            // Built inside the try too: the quote's fields are the provider's, read back through the SDK, and a
+            // value nobody foresaw — an expiry at the end of the calendar, say — must answer 503 like any other
+            // failure rather than escape to BTCPay's exception handler.
+            return Ok(new { quote = ToResponse(quote) });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -88,27 +97,20 @@ public class UIStablecoinCheckoutController : Controller
                 error = "This payment method is unavailable right now. Please try again shortly, or pay another way."
             });
         }
-
-        if (result.NotFound)
-            return NotFound();
-        if (result.Quote is not { } quote)
-            return BadRequest(new { error = result.Error });
-
-        return Ok(new
-        {
-            quote = new
-            {
-                id = quote.QuoteId,
-                chain = quote.Chain,
-                chainName = quote.ChainName,
-                address = quote.DepositAddress,
-                amount = quote.Amount,
-                paymentRequest = quote.PaymentRequest,
-                contract = quote.ContractAddress,
-                fee = quote.Fee.ToString(CultureInfo.InvariantCulture),
-                // Not the provider's expiry, which is the life of its price; see StablecoinPayments.OfferedPastExpiry.
-                offeredUntil = StablecoinPayments.OfferedUntil(quote.ExpiresAt).ToUnixTimeSeconds()
-            }
-        });
     }
+
+    /// <summary>The quote as the checkout component reads it — the same shape the checkout model carries.</summary>
+    internal static object ToResponse(StablecoinActiveQuote quote) => new
+    {
+        id = quote.QuoteId,
+        chain = quote.Chain,
+        chainName = quote.ChainName,
+        address = quote.DepositAddress,
+        amount = quote.Amount,
+        paymentRequest = quote.PaymentRequest,
+        contract = quote.ContractAddress,
+        fee = quote.Fee.ToString(CultureInfo.InvariantCulture),
+        // Not the provider's expiry, which is the life of its price; see StablecoinPayments.OfferedPastExpiry.
+        offeredUntil = StablecoinPayments.OfferedUntil(quote.ExpiresAt).ToUnixTimeSeconds()
+    };
 }
