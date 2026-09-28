@@ -571,7 +571,7 @@ public class SparkServiceStartupTests
     /// connect that looked only at its own cache would find nothing.
     /// </remarks>
     private static Task WithExitStateBackup(SparkServiceHarness h, string storeId, string backup) =>
-        h.ExitStateBackups.WriteAsync(storeId, backup);
+        h.ExitStateBackups.WriteAsync(storeId, backup, null);
 
 
     private static async Task WaitUntil(Func<bool> condition, string what)

@@ -531,6 +531,22 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <para>
+    /// <b>A pasted backup is queued for import, never written over the automatic backup.</b> The automatic
+    /// slot is the wallet's own latest export and every due pass replaces it — within two minutes of any
+    /// receive, and at once after a restart — so a paste written there was routinely gone before anything had
+    /// imported it. The queue is a slot no automatic pass writes: a queued backup leaves it only once an import
+    /// of it has returned. The caller imports it straight away when the wallet is running
+    /// (<see cref="ISparkStoreRuntime.ImportPendingExitStateAsync"/>); otherwise the next connect does.
+    /// </para>
+    /// <para>
+    /// <b>Blank clears everything the page reports</b>: the queue, the automatic backup, and the deprecated
+    /// settings slot — the last because the connect adopts from it whenever the file is empty, so a store that
+    /// still held a value there would take the blob back on its next connect under a page that says none is
+    /// stored. The automatic backup is then taken afresh by the next due pass.
+    /// </para>
+    /// </remarks>
     public async Task<UnilateralExitOpResult> SetExitStateBackupAsync(
         string storeId,
         string? exitState,
@@ -570,78 +586,54 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             if (settings is null)
                 return Refuse(NotConfigured);
 
-            // Read the stored value only to answer "does this press change anything" — a full read of a
-            // multi-megabyte blob, on a press an operator makes rarely at most, and what it buys is that a
-            // re-paste cannot move the file's timestamp: a rewrite would report the backup as taken at a
-            // moment when nothing was actually learned about the wallet. A failed read is not a refusal —
-            // "unchanged" has to be earned from a read that answered, so this press just proceeds to its
-            // own write, which is the same failure or success the comparison was guarding.
-            string? current = null;
-            var compared = false;
-            try
-            {
-                current = await _backups.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-                compared = true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Store {StoreId}: its stored exit-state backup could not be read before a save, so the "
-                    + "write proceeded without comparing to what was there",
-                    storeId);
-            }
-
-            // A clear never takes this shortcut. "Nothing stored" is what the file answers for a store whose
-            // deprecated settings slot still holds a blob — upgraded while the feature was off, or not yet
-            // reconnected since, or a file write that failed during adoption — and the press that empties
-            // one location has to empty the other with it.
-            if (compared && normalised is not null &&
-                string.Equals(current, normalised, StringComparison.Ordinal))
-            {
-                // No write for a press that changes nothing, and the comparison is by value rather than
-                // by reference so a re-paste of the same blob is also a no-op. This used to be required
-                // because a settings write reconnected the wallet; it is kept because a write that moves
-                // the TakenAt of a backup that did not change lies about the backup, not just about cost.
-                return new UnilateralExitOpResult(true, null, null);
-            }
-
             // The subject and the log's description deliberately say nothing about the value: it discloses
-            // the store's balance and history, and this method is one of the two places in the plugin
-            // that handles it.
+            // the store's balance and history, and this method is one of the places in the plugin that
+            // handles it.
             try
             {
                 if (normalised is null)
                 {
+                    // The queue first: it is the one slot holding data the wallet may not have, so a clear that
+                    // stopped part way is better stopped with the automatic copy still in place.
+                    foreach (var queued in await _backups.ListPendingAsync(storeId, cancellationToken)
+                                 .ConfigureAwait(false))
+                    {
+                        await _backups.DeletePendingAsync(storeId, queued.Id, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
                     await _backups.DeleteAsync(storeId, cancellationToken).ConfigureAwait(false);
 
-                    // Both locations, or the word "cleared" is a promise the next connect breaks:
-                    // RestoreExitStateAsync adopts from the deprecated slot whenever the file is empty, so a
-                    // store that still holds a value there takes back the blob this press removed — under a
-                    // banner telling the operator a restart will import nothing.
+                    // Both locations, or the word "cleared" is a promise the next connect breaks.
                     await _settingsStore.ClearExitStateBackupSlotAsync(storeId).ConfigureAwait(false);
 
                     _logger.LogInformation(
-                        "Store {StoreId}: the stored exit-state backup was cleared", storeId);
+                        "Store {StoreId}: the stored and queued exit-state backups were cleared", storeId);
                 }
                 else
                 {
-                    await _backups.WriteAsync(storeId, normalised, cancellationToken).ConfigureAwait(false);
+                    // Deduplicated by the store: a save pressed twice, or a page reloaded with the value still
+                    // in the textarea, queues one copy, not two multi-megabyte files.
+                    await _backups.AddPendingAsync(storeId, normalised, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation(
-                        "Store {StoreId}: stored an exit-state backup from the page ({Length} characters)",
+                        "Store {StoreId}: queued an exit-state backup from the page for import ({Length} characters)",
                         storeId, normalised.Length);
                 }
             }
             catch (Exception ex)
             {
+                // The exception is the store's own — filesystem or settings — and never carries the value.
                 _logger.LogError(ex,
-                    "Store {StoreId}: could not store {What} ({Reason})",
+                    "Store {StoreId}: could not {What}",
                     storeId,
                     normalised is null
-                        ? "the unilateral-exit state backup being cleared"
-                        : "a unilateral-exit state backup",
-                    SparkErrors.Describe(ex));
+                        ? "clear the unilateral-exit state backups"
+                        : "queue a unilateral-exit state backup");
 
-                return Refuse($"The exit-state backup could not be saved: {SparkErrors.Describe(ex)}");
+                return Refuse(normalised is null
+                    ? "The exit-state backups could not all be cleared. Check the server log for the reason."
+                    : "The exit-state backup could not be stored, so nothing will be imported. Check the server "
+                      + "log for the reason.");
             }
 
             return new UnilateralExitOpResult(true, null, null);

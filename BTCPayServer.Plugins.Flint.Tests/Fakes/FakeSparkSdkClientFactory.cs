@@ -51,6 +51,12 @@ public sealed class FakeSparkSdkClientFactory : ISparkSdkClientFactory
     /// <summary>The event writers handed to each connect, so a test can prove the channel was completed.</summary>
     public ConcurrentDictionary<string, ChannelWriter<SparkEventEnvelope>> EventWriters { get; } = new();
 
+    /// <summary>
+    /// Runs on each new client before the connect returns it — the only moment a test can script what a
+    /// wallet does on its connect path (its startup import) before the service starts driving it.
+    /// </summary>
+    public Action<string, FakeSparkSdkClient>? OnConnect { get; set; }
+
     public Task<ISparkSdkClient> ConnectAsync(
         SparkConnectOptions options,
         ChannelWriter<SparkEventEnvelope> eventWriter,
@@ -74,6 +80,7 @@ public sealed class FakeSparkSdkClientFactory : ISparkSdkClientFactory
         }
 
         var client = new FakeSparkSdkClient();
+        OnConnect?.Invoke(options.StoreId, client);
         Clients[options.StoreId] = client;
         return Task.FromResult<ISparkSdkClient>(client);
     }

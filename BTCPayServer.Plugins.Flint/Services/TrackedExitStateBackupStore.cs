@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -85,12 +86,13 @@ public sealed class TrackedExitStateBackupStore : IExitStateBackupStore
         _inner.OpenReadAsync(storeId, cancellationToken);
 
     /// <inheritdoc />
-    public async Task WriteAsync(string storeId, string backup, CancellationToken cancellationToken = default)
+    public async Task WriteAsync(
+        string storeId, string backup, string? walletIdentity, CancellationToken cancellationToken = default)
     {
         using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
         try
         {
-            await _inner.WriteAsync(storeId, backup, cancellationToken).ConfigureAwait(false);
+            await _inner.WriteAsync(storeId, backup, walletIdentity, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -120,4 +122,61 @@ public sealed class TrackedExitStateBackupStore : IExitStateBackupStore
         _scheduler.NoteStoredContent(storeId, null);
         return deleted;
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// A set-aside empties the automatic slot exactly as a delete does, so it moves the belief the same way:
+    /// to "nothing stored", which makes the next due pass write the wallet's own export afresh.
+    /// </remarks>
+    public async Task<string?> SetAsideAsync(
+        string storeId, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default)
+    {
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        var aside = await _inner.SetAsideAsync(storeId, reason, cancellationToken).ConfigureAwait(false);
+        _scheduler.NoteStoredContent(storeId, null);
+        return aside;
+    }
+
+    // Everything below touches the stamp, a set-aside copy or the pending queue — never the automatic
+    // slot's content, which is the only thing the scheduler holds a belief about — so it passes through.
+
+    /// <inheritdoc />
+    public Task<ExitStateBackupStamp?> ReadStampAsync(string storeId, CancellationToken cancellationToken = default) =>
+        _inner.ReadStampAsync(storeId, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> StampAsync(
+        string storeId, string backup, string? walletIdentity, CancellationToken cancellationToken = default) =>
+        _inner.StampAsync(storeId, backup, walletIdentity, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<string> KeepAsideAsync(
+        string storeId, string backup, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default) =>
+        _inner.KeepAsideAsync(storeId, backup, reason, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<PendingExitStateBackup>> ListPendingAsync(
+        string storeId, CancellationToken cancellationToken = default) =>
+        _inner.ListPendingAsync(storeId, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<string> AddPendingAsync(string storeId, string backup, CancellationToken cancellationToken = default) =>
+        _inner.AddPendingAsync(storeId, backup, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<string?> ReadPendingAsync(string storeId, string id, CancellationToken cancellationToken = default) =>
+        _inner.ReadPendingAsync(storeId, id, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<Stream?> OpenReadPendingAsync(string storeId, string id, CancellationToken cancellationToken = default) =>
+        _inner.OpenReadPendingAsync(storeId, id, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> DeletePendingAsync(string storeId, string id, CancellationToken cancellationToken = default) =>
+        _inner.DeletePendingAsync(storeId, id, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<string?> SetAsidePendingAsync(
+        string storeId, string id, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default) =>
+        _inner.SetAsidePendingAsync(storeId, id, reason, cancellationToken);
 }

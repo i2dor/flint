@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -77,6 +78,18 @@ public class SparkAdvancedViewModel
     /// </remarks>
     [BindNever]
     public DateTimeOffset? ExitStateBackupTakenAt { get; set; }
+
+    /// <summary>
+    /// Backups waiting to be imported into this wallet — pasted ones, and stored ones whose import failed —
+    /// oldest first. Times and sizes only.
+    /// </summary>
+    /// <remarks>
+    /// Shown because a backup in this list is one the wallet has not been shown to hold: while it is here
+    /// the operator's copy is the only proof it was ever supplied, and "is my paste in yet?" has no other
+    /// answer on the page. Each can be downloaded; none is ever replaced by the automatic backup.
+    /// </remarks>
+    [BindNever]
+    public IReadOnlyList<PendingExitStateBackup> PendingExitStateBackups { get; set; } = [];
 
     /// <summary>
     /// A blob to store, inbound only. The stored blob is never written into this model.

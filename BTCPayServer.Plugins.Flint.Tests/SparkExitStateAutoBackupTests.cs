@@ -150,6 +150,7 @@ public class SparkExitStateAutoBackupTests
         h.SeedStore(brokenStore, SparkServiceHarness.MnemonicFor(1));
         h.SeedStore(healthyStore, SparkServiceHarness.MnemonicFor(2));
         await h.Service.StartAsync(Ct);
+        await RestoredAsync(h);
 
         h.Sdk.Clients[brokenStore].FailExportWith = new InvalidOperationException("export refused");
 
@@ -399,6 +400,7 @@ public class SparkExitStateAutoBackupTests
 
             h = first.Restart();
             await h.Service.StartAsync(Ct);
+            await RestoredAsync(h);
 
             // A restarted scheduler knows nothing about what is stored. The pass must seed from the
             // file — a first pass after every restart that rewrote every store's identical backup
@@ -426,7 +428,7 @@ public class SparkExitStateAutoBackupTests
         // One manual writer: the page's export, a paste, an adoption all write through this same
         // seam without saying anything to the scheduler — and through this seam they cannot, because
         // the tracked store moves the scheduler's belief as part of the write itself.
-        await h.ExitStateBackups.WriteAsync(StoreId, "pasted-exit-state", Ct);
+        await h.ExitStateBackups.WriteAsync(StoreId, "pasted-exit-state", null, Ct);
 
         // What a due pass will ask is now answered from that write rather than from a second read of
         // the file: the scheduler knows something is stored, and these exact bytes are it. Left
@@ -477,6 +479,7 @@ public class SparkExitStateAutoBackupTests
         {
             h.SeedStore(StoreId, SparkServiceHarness.MnemonicFor(1));
             await h.Service.StartAsync(CancellationToken.None);
+            await RestoredAsync(h, StoreId);
             return h;
         }
         catch
@@ -484,6 +487,17 @@ public class SparkExitStateAutoBackupTests
             h.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Waits for the connect-time restore of each store (every running one, when none is named) — the gate
+    /// the automatic pass now waits on, so a test that ran a pass straight after the start would be asking a
+    /// pass that correctly declined to run yet.
+    /// </summary>
+    private static async Task RestoredAsync(SparkServiceHarness h, params string[] storeIds)
+    {
+        var ids = storeIds.Length > 0 ? storeIds : (await h.Service.GetRunningStoreIds()).ToArray();
+        await Task.WhenAll(ids.Select(h.Service.WhenExitStateRestoredAsync)).WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     private static void Emit(SparkServiceHarness h, string storeId, SparkEventKind kind, Payment? payment) =>

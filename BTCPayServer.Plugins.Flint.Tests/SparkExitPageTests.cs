@@ -748,7 +748,7 @@ public class SparkExitPageTests
         var takenAt = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
 
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        await h.ExitStateBackups.WriteAsync(Store, secret, CancellationToken.None);
+        await h.ExitStateBackups.WriteAsync(Store, secret, null, CancellationToken.None);
         h.ExitStateBackups.TakenAt = takenAt;
 
         ApplyControllerCachePolicy(h.Mvc);
@@ -816,7 +816,7 @@ public class SparkExitPageTests
         using var gate = FeatureGate(enabled: true);
 
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", CancellationToken.None);
+        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", null, CancellationToken.None);
         h.ExitStateBackups.FailReadWith = new UnauthorizedAccessException("permission denied");
 
         var redirect = Assert.IsType<RedirectToActionResult>(
@@ -825,6 +825,109 @@ public class SparkExitPageTests
         Assert.Equal(nameof(h.Mvc.Advanced), redirect.ActionName);
         var message = Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
         Assert.Contains("could not be read", message);
+    }
+
+    /// <summary>
+    /// A paste is imported into the running wallet at once, and the banner says what the import did.
+    /// </summary>
+    /// <remarks>
+    /// The page used to promise an import "when this store's wallet next restarts" — a promise the next
+    /// automatic pass routinely broke by replacing the file first. The operator now hears the outcome in the
+    /// response to the paste, in counts.
+    /// </remarks>
+    [Fact]
+    public async Task A_paste_is_imported_at_once_and_the_banner_reports_the_counts()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+        h.Runtime.NextImportReport = new ExitStateImportReport(
+            ExitStateImportOutcome.Imported, Imported: 1, RestoredLeaves: 3, SkippedChains: 2);
+
+        await h.Mvc.SetExitStateBackup(
+            Store, new SparkAdvancedViewModel { ExitStateBackup = "pasted-secret" }, CancellationToken.None);
+
+        Assert.Equal([Store], h.Runtime.ImportRequests);
+        var message = Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.SuccessMessage]);
+        Assert.Contains("imported into the running wallet", message);
+        Assert.Contains("3 leaves restored", message);
+        Assert.DoesNotContain("pasted-secret", message);
+    }
+
+    [Theory]
+    [InlineData(ExitStateImportOutcome.WalletNotRunning, "not running")]
+    [InlineData(ExitStateImportOutcome.Failed, "could not be imported now")]
+    public async Task A_paste_that_could_not_be_imported_now_says_it_is_kept_and_retried(
+        ExitStateImportOutcome outcome, string expected)
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+        h.Runtime.NextImportReport = new ExitStateImportReport(outcome, Failed: 1, Reason: "Spark said no.");
+
+        await h.Mvc.SetExitStateBackup(
+            Store, new SparkAdvancedViewModel { ExitStateBackup = "pasted-secret" }, CancellationToken.None);
+
+        var message = (string?)h.Mvc.TempData[WellKnownTempData.SuccessMessage]
+                      ?? Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
+        Assert.Contains(expected, message);
+        Assert.Contains("never replaced by the automatic backup", message);
+    }
+
+    [Fact]
+    public async Task A_clear_does_not_ask_for_an_import()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        await h.Mvc.SetExitStateBackup(Store, new SparkAdvancedViewModel(), CancellationToken.None);
+
+        Assert.Empty(h.Runtime.ImportRequests);
+        Assert.Contains("No exit-state backup is stored or waiting",
+            Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.SuccessMessage]));
+    }
+
+    /// <summary>
+    /// A backup waiting to be imported can be downloaded, and only by an id the store generated.
+    /// </summary>
+    [Fact]
+    public async Task A_backup_waiting_to_be_imported_can_be_downloaded_by_its_id_and_by_nothing_else()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        var id = await h.ExitStateBackups.AddPendingAsync(Store, "waiting-backup", CancellationToken.None);
+
+        var file = Assert.IsType<FileStreamResult>(
+            await h.Mvc.DownloadPendingExitStateBackup(Store, id, CancellationToken.None));
+        using var delivered = new MemoryStream();
+        await file.FileStream.CopyToAsync(delivered, CancellationToken.None);
+        Assert.Equal(Encoding.UTF8.GetBytes("waiting-backup"), delivered.ToArray());
+
+        var redirect = Assert.IsType<RedirectToActionResult>(
+            await h.Mvc.DownloadPendingExitStateBackup(Store, "20260916T120000000Z-deadbeef", CancellationToken.None));
+        Assert.Equal(nameof(h.Mvc.Advanced), redirect.ActionName);
+    }
+
+    /// <summary>
+    /// The Advanced page lists what is waiting to be imported — times and sizes, never content.
+    /// </summary>
+    [Fact]
+    public async Task The_advanced_page_lists_the_backups_waiting_to_be_imported()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
+        await h.ExitStateBackups.AddPendingAsync(Store, "waiting-backup", CancellationToken.None);
+
+        var view = Assert.IsType<ViewResult>(await h.Mvc.Advanced(Store, CancellationToken.None));
+        var model = Assert.IsType<SparkAdvancedViewModel>(view.Model);
+        var pending = Assert.Single(model.PendingExitStateBackups);
+        Assert.Equal(Encoding.UTF8.GetByteCount("waiting-backup"), pending.Length);
     }
 
     /// <summary>
@@ -856,7 +959,7 @@ public class SparkExitPageTests
         using var gate = FeatureGate(enabled: true);
 
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", CancellationToken.None);
+        await h.ExitStateBackups.WriteAsync(Store, "stored-backup", null, CancellationToken.None);
         h.ExitStateBackups.FailReadWith = new IOException("disk error");
 
         var view = Assert.IsType<ViewResult>(await h.Mvc.Advanced(Store, CancellationToken.None));

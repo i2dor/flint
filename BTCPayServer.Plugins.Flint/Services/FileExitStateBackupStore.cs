@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Configuration;
@@ -11,10 +16,21 @@ using Microsoft.Extensions.Options;
 namespace BTCPayServer.Plugins.Flint.Services;
 
 /// <summary>
-/// Exit-state backups as one owner-only file per store under
-/// <c>&lt;DataDir&gt;/Plugins/Flint/exit-state/&lt;storeId&gt;.txt</c>.
+/// Exit-state backups as owner-only files per store under <c>&lt;DataDir&gt;/Plugins/Flint/exit-state/</c>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>The layout, per store</b> — every name starts with the store id and a dot, so one store's files are
+/// found by prefix and never another's:
+/// </para>
+/// <list type="bullet">
+/// <item><description><c>&lt;storeId&gt;.txt</c> — the automatic backup (the wallet's own latest export).</description></item>
+/// <item><description><c>&lt;storeId&gt;.stamp.json</c> — its <see cref="ExitStateBackupStamp"/>.</description></item>
+/// <item><description><c>&lt;storeId&gt;.pending-&lt;time&gt;-&lt;random&gt;.txt</c> — a backup waiting to be imported.</description></item>
+/// <item><description><c>&lt;storeId&gt;.other-wallet-…</c>, <c>.removed-…</c>, <c>.foreign-…</c> — backups kept
+/// aside, named for why; nothing in the plugin reads, replaces or removes them again. They are the
+/// operator's to keep or delete.</description></item>
+/// </list>
 /// <para>
 /// <b>A file, deliberately, not a column.</b> The backup is a multi-megabyte secret, and the store's
 /// settings blob is deserialized on every settings read — a several-megabyte value in that column would be
@@ -57,6 +73,19 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
     /// <summary>How old a temporary must be before a later write treats it as a crashed write's debris.</summary>
     private static readonly TimeSpan AbandonedTemporaryAge = TimeSpan.FromHours(1);
 
+    /// <summary>The name part between the store id and the timestamp of a queued backup.</summary>
+    private const string PendingMarker = ".pending-";
+
+    /// <summary>The timestamp every generated name carries: sortable, UTC, and free of separators.</summary>
+    private const string NameTimeFormat = "yyyyMMdd'T'HHmmssfff'Z'";
+
+    /// <summary>
+    /// The only shape a pending id may have. Ids come back from a form, so anything else is refused before
+    /// it is ever joined onto a path.
+    /// </summary>
+    private static readonly Regex PendingId = new(
+        @"^\d{8}T\d{9}Z-[0-9a-f]{8}$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
     private readonly IOptions<DataDirectories> _dataDirectories;
     private readonly ILogger<FileExitStateBackupStore> _logger;
 
@@ -96,7 +125,17 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
         Task.FromResult(WrittenAt(PathFor(storeId)));
 
     /// <inheritdoc />
-    public async Task WriteAsync(string storeId, string backup, CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// <para>
+    /// <b>The stamp is written before the content, deliberately.</b> A crash between the two then leaves a
+    /// stamp whose digest does not match the file, which the connect reads as "not known to be held" and
+    /// answers with one import of the file — harmless. The other order could leave a new file under the
+    /// previous content's stamp, and a digest that happened to be absent would lose the identity that decides
+    /// whether a later wallet's write sets the file aside.
+    /// </para>
+    /// </remarks>
+    public async Task WriteAsync(
+        string storeId, string backup, string? walletIdentity, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
         ArgumentNullException.ThrowIfNull(backup);
@@ -105,6 +144,12 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
         using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
         EnsureDirectory();
         SweepAbandonedTemporaries(storeId);
+
+        await WriteAtomicallyAsync(
+                StampPathFor(storeId),
+                JsonSerializer.Serialize(new StampFile(ExitStateBackupStamp.HashOf(backup), walletIdentity)),
+                cancellationToken)
+            .ConfigureAwait(false);
         await WriteAtomicallyAsync(path, backup, cancellationToken).ConfigureAwait(false);
     }
 
@@ -113,7 +158,133 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
     {
         var path = PathFor(storeId);
         using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        DeleteIfPresent(StampPathFor(storeId));
         return DeleteIfPresent(path);
+    }
+
+    /// <inheritdoc />
+    public async Task<ExitStateBackupStamp?> ReadStampAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        ValidateStoreId(storeId);
+        return await ReadStampUnlockedAsync(storeId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> StampAsync(
+        string storeId, string backup, string? walletIdentity, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(backup);
+        var path = PathFor(storeId);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+
+        // Under the lock and against the file as it is now, not as the caller read it: a write that landed
+        // since would otherwise be described by a stamp for the bytes it replaced.
+        var current = await ReadIfPresentAsync(path, cancellationToken).ConfigureAwait(false);
+        if (current is null || !string.Equals(current, backup, StringComparison.Ordinal))
+            return false;
+
+        await WriteAtomicallyAsync(
+                StampPathFor(storeId),
+                JsonSerializer.Serialize(new StampFile(ExitStateBackupStamp.HashOf(backup), walletIdentity)),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> SetAsideAsync(
+        string storeId, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default)
+    {
+        var path = PathFor(storeId);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (!File.Exists(path))
+            return null;
+
+        var aside = MoveAside(storeId, path, reason);
+        DeleteIfPresent(StampPathFor(storeId));
+        return aside;
+    }
+
+    /// <inheritdoc />
+    public async Task<string> KeepAsideAsync(
+        string storeId, string backup, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(backup);
+        ValidateStoreId(storeId);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        EnsureDirectory();
+
+        var name = AsideName(storeId, reason);
+        await WriteAtomicallyAsync(Path.Combine(StorageDirectory(), name), backup, cancellationToken)
+            .ConfigureAwait(false);
+        return name;
+    }
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<PendingExitStateBackup>> ListPendingAsync(
+        string storeId, CancellationToken cancellationToken = default)
+    {
+        ValidateStoreId(storeId);
+        TightenExistingModes(storeId);
+        return Task.FromResult(ListPendingUnlocked(storeId));
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Identical content already queued answers that entry's id instead of a second copy: a paste submitted
+    /// twice, or a failed import at every connect, must not grow the queue by a multi-megabyte file each time.
+    /// </remarks>
+    public async Task<string> AddPendingAsync(string storeId, string backup, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(backup);
+        ValidateStoreId(storeId);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        EnsureDirectory();
+        SweepAbandonedTemporaries(storeId);
+
+        foreach (var entry in ListPendingUnlocked(storeId))
+        {
+            var queued = await ReadIfPresentAsync(PendingPathFor(storeId, entry.Id), cancellationToken)
+                .ConfigureAwait(false);
+            if (string.Equals(queued, backup, StringComparison.Ordinal))
+                return entry.Id;
+        }
+
+        var id = string.Create(CultureInfo.InvariantCulture,
+            $"{DateTime.UtcNow.ToString(NameTimeFormat, CultureInfo.InvariantCulture)}-{RandomSuffix(8)}");
+        await WriteAtomicallyAsync(PendingPathFor(storeId, id), backup, cancellationToken).ConfigureAwait(false);
+        return id;
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> ReadPendingAsync(string storeId, string id, CancellationToken cancellationToken = default)
+    {
+        TightenExistingModes(storeId);
+        return await ReadIfPresentAsync(PendingPathFor(storeId, id), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public Task<Stream?> OpenReadPendingAsync(string storeId, string id, CancellationToken cancellationToken = default)
+    {
+        TightenExistingModes(storeId);
+        return Task.FromResult(OpenIfPresent(PendingPathFor(storeId, id)));
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> DeletePendingAsync(string storeId, string id, CancellationToken cancellationToken = default)
+    {
+        var path = PendingPathFor(storeId, id);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        return DeleteIfPresent(path);
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> SetAsidePendingAsync(
+        string storeId, string id, ExitStateBackupSetAside reason, CancellationToken cancellationToken = default)
+    {
+        var path = PendingPathFor(storeId, id);
+        using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
+        return File.Exists(path) ? MoveAside(storeId, path, reason) : null;
     }
 
     /// <inheritdoc />
@@ -136,12 +307,117 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
     internal string StorageDirectory() => Path.Combine(
         _dataDirectories.Value.DataDir, "Plugins", Constants.WorkDirName, Subdirectory);
 
-    /// <summary>One store's backup file.</summary>
+    /// <summary>One store's automatic backup file.</summary>
     internal string PathFor(string storeId)
     {
         ValidateStoreId(storeId);
         return Path.Combine(StorageDirectory(), storeId + ".txt");
     }
+
+    /// <summary>The stamp beside a store's automatic backup.</summary>
+    internal string StampPathFor(string storeId)
+    {
+        ValidateStoreId(storeId);
+        return Path.Combine(StorageDirectory(), storeId + ".stamp.json");
+    }
+
+    /// <summary>One queued backup's file. Refuses an id that is not one this class generated.</summary>
+    internal string PendingPathFor(string storeId, string id)
+    {
+        ValidateStoreId(storeId);
+        if (string.IsNullOrEmpty(id) || !PendingId.IsMatch(id))
+            throw new ArgumentException("Not a pending exit-state backup id.", nameof(id));
+
+        return Path.Combine(StorageDirectory(), storeId + PendingMarker + id + ".txt");
+    }
+
+    /// <summary>The queue, oldest first. Ids sort by time because they start with it.</summary>
+    private IReadOnlyList<PendingExitStateBackup> ListPendingUnlocked(string storeId)
+    {
+        var directory = StorageDirectory();
+        if (!Directory.Exists(directory))
+            return [];
+
+        var prefix = storeId + PendingMarker;
+        var entries = new List<PendingExitStateBackup>();
+        foreach (var file in Directory.EnumerateFiles(directory, prefix + "*.txt"))
+        {
+            var name = Path.GetFileName(file);
+            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(".txt", StringComparison.Ordinal))
+                continue;
+
+            var id = name[prefix.Length..^".txt".Length];
+            if (!PendingId.IsMatch(id))
+                continue;
+
+            var info = new FileInfo(file);
+            if (!info.Exists)
+                continue;
+
+            var storedAt = DateTime.TryParseExact(
+                id[..id.IndexOf('-', StringComparison.Ordinal)], NameTimeFormat, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed)
+                ? new DateTimeOffset(parsed, TimeSpan.Zero)
+                : new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero);
+            entries.Add(new PendingExitStateBackup(id, storedAt, info.Length));
+        }
+
+        return entries.OrderBy(entry => entry.Id, StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>The stamp, or null when there is none or it cannot be read — unknown provenance, never a throw.</summary>
+    private async Task<ExitStateBackupStamp?> ReadStampUnlockedAsync(string storeId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var text = await ReadIfPresentAsync(StampPathFor(storeId), cancellationToken).ConfigureAwait(false);
+            if (text is null)
+                return null;
+
+            var stamp = JsonSerializer.Deserialize<StampFile>(text);
+            return stamp is { Sha256.Length: > 0 }
+                ? new ExitStateBackupStamp(stamp.Sha256, stamp.WalletIdentity)
+                : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: the stamp beside its exit-state backup could not be read, so the backup is "
+                + "treated as one of unknown provenance", storeId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Renames a file to a set-aside name and answers that name. Caller holds the store's lock.
+    /// </summary>
+    private string MoveAside(string storeId, string path, ExitStateBackupSetAside reason)
+    {
+        var name = AsideName(storeId, reason);
+        File.Move(path, Path.Combine(StorageDirectory(), name), overwrite: false);
+        return name;
+    }
+
+    /// <summary>A fresh set-aside name: the store, why, when, and a random suffix so two in one millisecond differ.</summary>
+    private static string AsideName(string storeId, ExitStateBackupSetAside reason)
+    {
+        var slug = reason switch
+        {
+            ExitStateBackupSetAside.OtherWallet => "other-wallet",
+            ExitStateBackupSetAside.Removed => "removed",
+            ExitStateBackupSetAside.Foreign => "foreign",
+            _ => "kept"
+        };
+
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{storeId}.{slug}-{DateTime.UtcNow.ToString(NameTimeFormat, CultureInfo.InvariantCulture)}-{RandomSuffix(4)}.txt");
+    }
+
+    private static string RandomSuffix(int hexDigits) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(hexDigits / 2));
+
+    /// <summary>The stamp file's shape. Property names are the on-disk format.</summary>
+    private sealed record StampFile(string Sha256, string? WalletIdentity);
 
     /// <summary>
     /// Refuses a store id that could place a file outside the owner-only directory.

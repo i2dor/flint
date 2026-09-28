@@ -114,6 +114,7 @@ public class SparkUnilateralExitServiceTests
         Assert.False(backupAttempt.Success);
         Assert.Equal(SparkUnilateralExitService.FeatureDisabled, backupAttempt.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
 
         Assert.Empty(harness.Backups.ReadCalls);
     }
@@ -1543,19 +1544,25 @@ public class SparkUnilateralExitServiceTests
     #region The exit-state backup
 
     /// <summary>
-    /// A backup the operator pastes lands in the file store and not in the settings blob — the
-    /// value is multi-megabytes and settings are read on every settings read.
+    /// A backup the operator pastes is queued for import in the file store — not written over the automatic
+    /// backup, and not into the settings blob.
     /// </summary>
+    /// <remarks>
+    /// The automatic slot is the wallet's own latest export and every due pass replaces it, so a paste written
+    /// there was gone before anything had imported it. The queue is the slot nothing automatic writes.
+    /// </remarks>
     [Fact]
-    public async Task A_pasted_backup_lands_in_the_file_store_and_not_in_the_settings_blob()
+    public async Task A_pasted_backup_is_queued_for_import_and_not_written_over_the_automatic_backup()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
+        await harness.Backups.WriteAsync(StoreId, "the-wallet-s-own-export", "02aa", Ct);
 
         var result = await harness.Service.SetExitStateBackupAsync(StoreId, "opaque-sdk-backup", Ct);
 
         Assert.True(result.Success, result.Error);
-        Assert.Equal("opaque-sdk-backup", harness.Backups.Stored(StoreId));
+        Assert.Equal(["opaque-sdk-backup"], harness.Backups.Pending(StoreId));
+        Assert.Equal("the-wallet-s-own-export", harness.Backups.Stored(StoreId));
         // No settings write at all, on the one save action the operator triggers by hand: keeping
         // this value out of the settings column is the entire reason the file store exists.
         Assert.Empty(harness.Settings.Writes);
@@ -1577,14 +1584,15 @@ public class SparkUnilateralExitServiceTests
         Assert.NotNull(result.Error);
         Assert.Contains("characters", result.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
         Assert.Empty(harness.Backups.DeleteCalls);
     }
 
     /// <summary>
-    /// Re-pasting the backup already stored does not write it again.
+    /// Re-pasting a backup already waiting does not queue a second copy.
     /// </summary>
     [Fact]
-    public async Task Re_pasting_the_stored_backup_does_not_write_it_again()
+    public async Task Re_pasting_a_queued_backup_does_not_queue_it_twice()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
@@ -1592,22 +1600,25 @@ public class SparkUnilateralExitServiceTests
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
 
-        // A save button pressed twice, a page reloaded with the value still in the textarea: the
-        // equality check costs one string comparison and spares the disk a multi-megabyte rewrite.
-        Assert.Single(harness.Backups.WriteCalls);
+        // A save button pressed twice, a page reloaded with the value still in the textarea: one copy
+        // waits, not two multi-megabyte files.
+        Assert.Equal(["same-blob"], harness.Backups.Pending(StoreId));
+        Assert.Empty(harness.Backups.WriteCalls);
     }
 
-    /// <summary>Clearing the backup removes the file.</summary>
+    /// <summary>Clearing removes the automatic backup and everything waiting to be imported.</summary>
     [Fact]
-    public async Task Clearing_the_backup_removes_the_file()
+    public async Task Clearing_the_backup_removes_the_automatic_backup_and_the_queue()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
+        await harness.Backups.WriteAsync(StoreId, "automatic", "02aa", Ct);
         await harness.Service.SetExitStateBackupAsync(StoreId, "to-be-cleared", Ct);
 
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, null, Ct)).Success);
 
         Assert.Null(harness.Backups.Stored(StoreId));
+        Assert.Empty(harness.Backups.Pending(StoreId));
         Assert.Contains(StoreId, harness.Backups.DeleteCalls);
     }
 
@@ -1651,6 +1662,7 @@ public class SparkUnilateralExitServiceTests
 
         Assert.Equal(SparkUnilateralExitService.NotConfigured, result.Error);
         Assert.Empty(harness.Backups.WriteCalls);
+        Assert.Empty(harness.Backups.PendingAddCalls);
     }
 
     #endregion

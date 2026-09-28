@@ -1,3 +1,4 @@
+using System.Text;
 using BTCPayServer.Configuration;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
@@ -39,7 +40,7 @@ public class FileExitStateBackupStoreTests
         using var dir = new TempDirectory();
         var store = Create(dir);
 
-        await store.WriteAsync(Store, "the-stored-backup-blob");
+        await store.WriteAsync(Store, "the-stored-backup-blob", null);
 
         Assert.Equal("the-stored-backup-blob", await store.ReadAsync(Store));
 
@@ -57,8 +58,8 @@ public class FileExitStateBackupStoreTests
         using var dir = new TempDirectory();
         var store = Create(dir);
 
-        await store.WriteAsync(Store, "first-backup");
-        await store.WriteAsync(Store, "second-backup");
+        await store.WriteAsync(Store, "first-backup", null);
+        await store.WriteAsync(Store, "second-backup", null);
 
         Assert.Equal("second-backup", await store.ReadAsync(Store));
     }
@@ -71,7 +72,7 @@ public class FileExitStateBackupStoreTests
 
         Assert.Null(await store.TakenAtAsync(Store));
 
-        await store.WriteAsync(Store, "the-stored-backup-blob");
+        await store.WriteAsync(Store, "the-stored-backup-blob", null);
         var written = await store.TakenAtAsync(Store);
         Assert.NotNull(written);
 
@@ -92,7 +93,7 @@ public class FileExitStateBackupStoreTests
         var store = Create(dir, log);
         var secret = "blob-that-must-not-be-logged-9f3a";
 
-        await store.WriteAsync(Store, secret);
+        await store.WriteAsync(Store, secret, null);
         Assert.Equal(secret, await store.ReadAsync(Store));
         await store.DeleteAsync(Store);
 
@@ -107,7 +108,7 @@ public class FileExitStateBackupStoreTests
         using var dir = new TempDirectory();
         var store = Create(dir);
 
-        await store.WriteAsync(Store, "the-stored-backup-blob");
+        await store.WriteAsync(Store, "the-stored-backup-blob", null);
 
         // The same hardening the SDK's per-store directory and the log directory get — this one
         // holds, per store, the wallet's whole exit state as one readable string.
@@ -123,7 +124,7 @@ public class FileExitStateBackupStoreTests
         using var dir = new TempDirectory();
         var store = Create(dir);
 
-        await store.WriteAsync(Store, "the-stored-backup-blob");
+        await store.WriteAsync(Store, "the-stored-backup-blob", null);
 
         // The 0700 directory keeps other accounts out; this is the second line of defence for the
         // one that is already in — the mode is set on the temporary before the rename carries it to
@@ -145,7 +146,7 @@ public class FileExitStateBackupStoreTests
         await using (var absent = await store.OpenReadAsync(Store))
             Assert.Null(absent);
 
-        await store.WriteAsync(Store, "the-stored-backup-blob");
+        await store.WriteAsync(Store, "the-stored-backup-blob", null);
 
         // The bytes a download hands over, read back off an open handle: this seam never interprets
         // the content, and the streaming read is the same rule — what comes out is what went in.
@@ -160,7 +161,7 @@ public class FileExitStateBackupStoreTests
     {
         using var dir = new TempDirectory();
         var store = Create(dir);
-        await store.WriteAsync(Store, "first-backup");
+        await store.WriteAsync(Store, "first-backup", null);
 
         // The FileShare promise, as a fact about a filesystem rather than a comment: a pass that
         // refreshes the backup halfway through a download renames a new file over the one being
@@ -168,7 +169,7 @@ public class FileExitStateBackupStoreTests
         // response is one whole backup or another, never an error and never a mixture.
         await using var serving = await store.OpenReadAsync(Store)
             ?? throw new InvalidOperationException("the stored backup did not open");
-        await store.WriteAsync(Store, "second-backup-longer");
+        await store.WriteAsync(Store, "second-backup-longer", null);
 
         using var reader = new StreamReader(serving);
         Assert.Equal("first-backup", await reader.ReadToEndAsync());
@@ -187,7 +188,7 @@ public class FileExitStateBackupStoreTests
             .Select(i => new string((char)('a' + i), 512 * 1024))
             .ToArray();
 
-        await Task.WhenAll(candidates.Select(content => Task.Run(() => store.WriteAsync(Store, content))));
+        await Task.WhenAll(candidates.Select(content => Task.Run(() => store.WriteAsync(Store, content, null))));
 
         var stored = await store.ReadAsync(Store);
         Assert.Contains(stored, candidates);
@@ -205,7 +206,7 @@ public class FileExitStateBackupStoreTests
             .Select(i => new string((char)('a' + i), 256 * 1024))
             .ToArray();
 
-        await Task.WhenAll(candidates.Select(content => Task.Run(() => tracked.WriteAsync(Store, content))));
+        await Task.WhenAll(candidates.Select(content => Task.Run(() => tracked.WriteAsync(Store, content, null))));
 
         // The note and the write are one step: whichever write landed last is the one the scheduler
         // believes, so the next pass compares against the file that is really there.
@@ -221,11 +222,11 @@ public class FileExitStateBackupStoreTests
         var inner = new FakeExitStateBackupStore();
         var tracked = new TrackedExitStateBackupStore(inner, scheduler);
 
-        await tracked.WriteAsync(Store, "first");
+        await tracked.WriteAsync(Store, "first", null);
         Assert.True(scheduler.ContentUnchanged(Store, "first"));
 
         inner.FailWriteWith = new IOException("disk full");
-        await Assert.ThrowsAsync<IOException>(() => tracked.WriteAsync(Store, "second"));
+        await Assert.ThrowsAsync<IOException>(() => tracked.WriteAsync(Store, "second", null));
 
         // Unknown, so the next pass re-seeds from the file instead of trusting a belief a failed write may
         // have falsified.
@@ -275,7 +276,7 @@ public class FileExitStateBackupStoreTests
     {
         using var dir = new TempDirectory();
         var store = Create(dir);
-        await store.WriteAsync(Store, "first-backup");
+        await store.WriteAsync(Store, "first-backup", null);
 
         // A process killed mid-write leaves its uniquely named temporary behind, and nothing would ever
         // look for it again. An hour old is old enough that no live writer can still own it.
@@ -283,10 +284,112 @@ public class FileExitStateBackupStoreTests
         await File.WriteAllTextAsync(abandoned, "half-written");
         File.SetLastWriteTimeUtc(abandoned, DateTime.UtcNow - TimeSpan.FromHours(2));
 
-        await store.WriteAsync(Store, "second-backup");
+        await store.WriteAsync(Store, "second-backup", null);
 
         Assert.False(File.Exists(abandoned));
         Assert.Equal("second-backup", await store.ReadAsync(Store));
+    }
+
+    [Fact]
+    public async Task A_write_stamps_the_backup_with_its_digest_and_the_wallet_that_wrote_it()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        Assert.Null(await store.ReadStampAsync(Store));
+
+        await store.WriteAsync(Store, "wallet-export", "02aa");
+
+        var stamp = await store.ReadStampAsync(Store);
+        Assert.NotNull(stamp);
+        Assert.True(stamp.Describes("wallet-export"));
+        Assert.False(stamp.Describes("something-else"));
+        Assert.Equal("02aa", stamp.WalletIdentity);
+
+        // And the stamp goes with the backup it describes.
+        await store.DeleteAsync(Store);
+        Assert.Null(await store.ReadStampAsync(Store));
+    }
+
+    [Fact]
+    public async Task A_stamp_is_written_only_for_the_content_the_file_actually_holds()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+        await store.WriteAsync(Store, "on-disk", null);
+
+        // A caller that imported bytes the file no longer holds must not stamp the file with them.
+        Assert.False(await store.StampAsync(Store, "imported-earlier", "02aa"));
+        Assert.True((await store.ReadStampAsync(Store))!.Describes("on-disk"));
+
+        Assert.True(await store.StampAsync(Store, "on-disk", "02aa"));
+        Assert.Equal("02aa", (await store.ReadStampAsync(Store))!.WalletIdentity);
+    }
+
+    [Fact]
+    public async Task Queued_backups_are_kept_apart_from_the_automatic_one_deduplicated_and_listed_oldest_first()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+        await store.WriteAsync(Store, "automatic", "02aa");
+
+        var first = await store.AddPendingAsync(Store, "pasted-one");
+        await Task.Delay(5);
+        var second = await store.AddPendingAsync(Store, "pasted-two");
+        var again = await store.AddPendingAsync(Store, "pasted-one");
+
+        Assert.Equal(first, again);
+        var queued = await store.ListPendingAsync(Store);
+        Assert.Equal([first, second], queued.Select(entry => entry.Id));
+        Assert.Equal("pasted-one", await store.ReadPendingAsync(Store, first));
+        Assert.Equal(Encoding.UTF8.GetByteCount("pasted-two"), queued[1].Length);
+
+        // An automatic write never reaches the queue.
+        await store.WriteAsync(Store, "automatic-next", "02aa");
+        Assert.Equal(2, (await store.ListPendingAsync(Store)).Count);
+
+        Assert.True(await store.DeletePendingAsync(Store, first));
+        Assert.Null(await store.ReadPendingAsync(Store, first));
+        Assert.Single(await store.ListPendingAsync(Store));
+
+        var aside = await store.SetAsidePendingAsync(Store, second, ExitStateBackupSetAside.Foreign);
+        Assert.NotNull(aside);
+        Assert.StartsWith(Store + ".foreign-", aside);
+        Assert.Empty(await store.ListPendingAsync(Store));
+        Assert.True(File.Exists(Path.Combine(store.StorageDirectory(), aside)));
+    }
+
+    [Fact]
+    public async Task A_pending_id_that_is_not_one_the_store_generated_is_refused()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        // Ids come back from a form; anything but the generated shape could name another file.
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ReadPendingAsync(Store, "../../etc/passwd"));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.OpenReadPendingAsync(Store, "x"));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.DeletePendingAsync(Store, ""));
+    }
+
+    [Fact]
+    public async Task Setting_the_automatic_backup_aside_moves_it_and_its_stamp_out_of_the_live_names()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+        Assert.Null(await store.SetAsideAsync(Store, ExitStateBackupSetAside.Removed));
+
+        await store.WriteAsync(Store, "exit-data", "02aa");
+        var aside = await store.SetAsideAsync(Store, ExitStateBackupSetAside.Removed);
+
+        Assert.NotNull(aside);
+        Assert.StartsWith(Store + ".removed-", aside);
+        Assert.Null(await store.ReadAsync(Store));
+        Assert.Null(await store.ReadStampAsync(Store));
+        Assert.Equal("exit-data", await File.ReadAllTextAsync(Path.Combine(store.StorageDirectory(), aside)));
+
+        var kept = await store.KeepAsideAsync(Store, "legacy-copy", ExitStateBackupSetAside.OtherWallet);
+        Assert.StartsWith(Store + ".other-wallet-", kept);
+        Assert.Equal("legacy-copy", await File.ReadAllTextAsync(Path.Combine(store.StorageDirectory(), kept)));
     }
 
     [Fact]
