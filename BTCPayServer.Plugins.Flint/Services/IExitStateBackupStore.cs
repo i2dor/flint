@@ -94,7 +94,9 @@ public interface IExitStateBackupStore
     /// </summary>
     /// <param name="walletIdentity">
     /// The identity public key of the wallet that exported <paramref name="backup"/>, or null when it could
-    /// not be read.
+    /// not be read. When the backup already stored was stamped by a <em>different</em> identity, it is kept
+    /// aside under a name that says so before this one replaces it: a store re-provisioned onto a new seed
+    /// must not have its next automatic pass overwrite the old wallet's only device-proof exit data.
     /// </param>
     Task WriteAsync(string storeId, string backup, string? walletIdentity, CancellationToken cancellationToken = default);
 

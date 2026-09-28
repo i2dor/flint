@@ -337,6 +337,46 @@ public class SparkExitStateRestoreTests
     }
 
     // ------------------------------------------------------------------------------------------------
+    // Removal and re-provisioning
+    // ------------------------------------------------------------------------------------------------
+
+    [Fact(Timeout = 60_000)]
+    public async Task Removing_Flint_keeps_the_store_s_backups_aside_under_names_that_say_so()
+    {
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(new StubTimeProvider(Base));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        h.Sdk.Clients[StoreId].FailImportWith = new InvalidOperationException("refused");
+        await h.ExitStateBackups.AddPendingAsync(StoreId, "still-waiting", Ct);
+        await h.Service.ImportPendingExitStateAsync(StoreId, Ct);
+
+        await h.Service.Set(StoreId, null);
+
+        // Not deleted — removing Flint is not evidence the funds were swept — and not left under the live
+        // names, where a later re-provision of this store would take them for its own.
+        Assert.Null(await h.ExitStateBackups.ReadAsync(StoreId, Ct));
+        Assert.Empty(await h.ExitStateBackups.ListPendingAsync(StoreId, Ct));
+        Assert.Equal(2, Directory.GetFiles(BackupDirectory(h), StoreId + ".removed-*.txt").Length);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_settings_write_cannot_bring_back_a_deprecated_backup_that_was_cleared()
+    {
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(new StubTimeProvider(Base));
+
+        // A whole-settings write built from a copy read before a clear: the deprecated slot is only ever
+        // cleared now, so a value the stored configuration no longer has is stale and must not be persisted.
+        var stale = (await h.Service.Get(StoreId))!;
+        stale.UnilateralExit = new UnilateralExitSettings { ExitStateBackup = "cleared-a-moment-ago" };
+
+        await h.Service.Set(StoreId, stale);
+
+        Assert.Null(h.Stores.Stored<SparkSettings>(StoreId, Constants.StoreSettingsKey)!.UnilateralExit!.ExitStateBackup);
+        Assert.Null((await h.Service.Get(StoreId))!.UnilateralExit!.ExitStateBackup);
+    }
+
+    // ------------------------------------------------------------------------------------------------
     // Wiring
     // ------------------------------------------------------------------------------------------------
 

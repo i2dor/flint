@@ -127,6 +127,13 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
     /// <inheritdoc />
     /// <remarks>
     /// <para>
+    /// <b>The previous wallet's backup is kept, not replaced.</b> When the stored backup's stamp names a
+    /// different wallet identity from this write's, the store is running a different seed than the one that
+    /// wrote it — a re-provision — and that file is the old wallet's only device-proof exit data. It is moved
+    /// to an <c>other-wallet</c> name first. An unknown identity on either side (an earlier build's file, an
+    /// identity read that failed) is not evidence of a different wallet, so it is replaced as before.
+    /// </para>
+    /// <para>
     /// <b>The stamp is written before the content, deliberately.</b> A crash between the two then leaves a
     /// stamp whose digest does not match the file, which the connect reads as "not known to be held" and
     /// answers with one import of the file — harmless. The other order could leave a new file under the
@@ -144,6 +151,20 @@ public sealed class FileExitStateBackupStore : IExitStateBackupStore
         using var held = await _locks.AcquireAsync(storeId, cancellationToken).ConfigureAwait(false);
         EnsureDirectory();
         SweepAbandonedTemporaries(storeId);
+
+        var previous = await ReadStampUnlockedAsync(storeId, cancellationToken).ConfigureAwait(false);
+        if (previous?.WalletIdentity is { } previousIdentity
+            && walletIdentity is not null
+            && !string.Equals(previousIdentity, walletIdentity, StringComparison.Ordinal)
+            && File.Exists(path))
+        {
+            var aside = MoveAside(storeId, path, ExitStateBackupSetAside.OtherWallet);
+            _logger.LogWarning(
+                "Store {StoreId}: its stored exit-state backup was written by a different wallet than the one "
+                + "this store now runs, so it was kept aside as {File} instead of being replaced. It is the "
+                + "previous wallet's exit data; keep it for as long as that wallet's seed may still hold funds",
+                storeId, aside);
+        }
 
         await WriteAtomicallyAsync(
                 StampPathFor(storeId),

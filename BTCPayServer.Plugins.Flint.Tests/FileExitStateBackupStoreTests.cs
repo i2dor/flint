@@ -327,6 +327,28 @@ public class FileExitStateBackupStoreTests
     }
 
     [Fact]
+    public async Task A_different_wallet_s_first_write_keeps_the_previous_wallet_s_backup_aside()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        await store.WriteAsync(Store, "old-wallet-exit-data", "02old");
+        await store.WriteAsync(Store, "new-wallet-exit-data", "02new");
+
+        // A re-provision onto a new seed: the old wallet's backup is its only device-proof exit data, and the
+        // new wallet's first pass must not be what destroys it.
+        Assert.Equal("new-wallet-exit-data", await store.ReadAsync(Store));
+        var aside = Assert.Single(Directory.GetFiles(store.StorageDirectory(), Store + ".other-wallet-*.txt"));
+        Assert.Equal("old-wallet-exit-data", await File.ReadAllTextAsync(aside));
+
+        // The same wallet, or one whose identity is unknown, replaces as it always did.
+        await store.WriteAsync(Store, "newer", "02new");
+        await store.WriteAsync(Store, "newest", null);
+        Assert.Single(Directory.GetFiles(store.StorageDirectory(), Store + ".other-wallet-*.txt"));
+        Assert.Equal("newest", await store.ReadAsync(Store));
+    }
+
+    [Fact]
     public async Task Queued_backups_are_kept_apart_from_the_automatic_one_deduplicated_and_listed_oldest_first()
     {
         using var dir = new TempDirectory();

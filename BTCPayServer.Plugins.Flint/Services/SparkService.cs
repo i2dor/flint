@@ -312,6 +312,10 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             _logger.LogInformation(
                 "Store {StoreId} removed; Spark instance shut down. Its SDK storage at {StorageDir} was left in place",
                 removed.StoreId, GetWorkDir(removed.StoreId));
+
+            // The exit-state backups for the same reason, and moved aside rather than left under their live
+            // names: see SetAsideExitStateBackupsAsync.
+            await SetAsideExitStateBackupsAsync(removed.StoreId).ConfigureAwait(false);
         }
 
         await base.ProcessEvent(evt, cancellationToken).ConfigureAwait(false);
@@ -1296,6 +1300,30 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
 
         LogImportCounts(storeId, "the exit-state backup at its old settings location", counts);
 
+        if (counts.RestoredNothing && counts.SkippedForeignLeaves > 0)
+        {
+            // Another wallet's — a seed change the settings carried it across. Not this wallet's backup, so
+            // not written as one: kept aside, then cleared from the settings like any adopted blob.
+            try
+            {
+                var aside = await _exitStateBackupStore
+                    .KeepAsideAsync(storeId, legacy, ExitStateBackupSetAside.Foreign, CancellationToken.None)
+                    .ConfigureAwait(false);
+                await ClearExitStateBackupSlot(storeId).ConfigureAwait(false);
+                _logger.LogWarning(
+                    "Store {StoreId}: every leaf in the exit-state backup at its old settings location belonged to "
+                    + "another wallet, so it was kept aside as {File} and cleared from the settings", storeId, aside);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Store {StoreId}: another wallet's exit-state backup at its old settings location could not be "
+                    + "kept aside; it stays at that location", storeId);
+            }
+
+            return;
+        }
+
         // After the import, never before: the old location is the only copy until the wallet has
         // demonstrably taken the blob back, and an adoption that cleared it on a failed import would
         // trade the backup for nothing.
@@ -1444,6 +1472,87 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         _instances.TryGetValue(storeId, out var instance) ? instance.ExitState.RestoredTask : Task.CompletedTask;
 
     /// <summary>
+    /// Moves a store's exit-state backups aside when Flint is removed from it, so they are neither left under
+    /// their live names nor deleted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Not deleted</b>, for the reason the SDK's own storage directory is kept: removing Flint from a
+    /// store is not evidence that the wallet's funds have been swept, and while the seed may still control
+    /// them these files are its only device-proof exit data. <b>Not left under the live names</b>, because
+    /// a later re-provision of the same store would then treat the old wallet's backup as its own — import
+    /// it, and let its first pass overwrite it.
+    /// </para>
+    /// <para>
+    /// Best effort and never throws: this runs after the teardown, on the removal path, and a filesystem
+    /// fault here must not undo a removal the operator asked for. The log names the files, never content.
+    /// </para>
+    /// </remarks>
+    private async Task SetAsideExitStateBackupsAsync(string storeId)
+    {
+        try
+        {
+            var kept = new List<string>();
+            if (await _exitStateBackupStore
+                    .SetAsideAsync(storeId, ExitStateBackupSetAside.Removed, CancellationToken.None)
+                    .ConfigureAwait(false) is { } aside)
+            {
+                kept.Add(aside);
+            }
+
+            foreach (var entry in await _exitStateBackupStore
+                         .ListPendingAsync(storeId, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (await _exitStateBackupStore
+                        .SetAsidePendingAsync(storeId, entry.Id, ExitStateBackupSetAside.Removed, CancellationToken.None)
+                        .ConfigureAwait(false) is { } queued)
+                {
+                    kept.Add(queued);
+                }
+            }
+
+            if (kept.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Store {StoreId}: Flint was removed, and its exit-state backups were kept as {Files} in the "
+                    + "plugin's exit-state directory. They are that wallet's exit data; delete them only once "
+                    + "its funds are safely elsewhere",
+                    storeId, string.Join(", ", kept));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: Flint was removed, but its exit-state backups could not be moved aside; they "
+                + "were left where they were", storeId);
+        }
+    }
+
+    /// <summary>
+    /// The settings to persist, minus a deprecated exit-state backup the stored configuration no longer has.
+    /// Caller holds <see cref="_instanceLock"/>.
+    /// </summary>
+    /// <remarks>
+    /// Nothing writes the deprecated slot any more; it is only ever cleared. A whole-settings write carrying
+    /// a value the cache no longer holds is therefore a stale copy — read before an adoption or an operator's
+    /// clear emptied the slot — and persisting it would bring a cleared backup back for the next connect to
+    /// adopt, under a page that says none is stored.
+    /// </remarks>
+    private SparkSettings? WithoutReinstatedLegacyBackup(string storeId, SparkSettings? settings)
+    {
+        if (settings?.UnilateralExit is not { ExitStateBackup.Length: > 0 })
+            return settings;
+
+        var cached = _settings.GetValueOrDefault(storeId)?.UnilateralExit?.ExitStateBackup;
+        if (!string.IsNullOrEmpty(cached))
+            return settings;
+
+        var copy = settings.Clone();
+        copy.UnilateralExit!.ExitStateBackup = null;
+        return copy;
+    }
+
+    /// <summary>
     /// Commits the adoption of a backup found at the old settings location: writes it to the file store,
     /// then clears the setting.
     /// </summary>
@@ -1535,22 +1644,35 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     private async Task ClearExitStateBackupSlot(string storeId)
     {
-        var stored = await _storeRepository
-            .GetSettingAsync<SparkSettings>(storeId, Constants.StoreSettingsKey)
-            .ConfigureAwait(false);
-
-        if (stored?.UnilateralExit is { } exit && !string.IsNullOrEmpty(exit.ExitStateBackup))
+        // Under the instance lock, the one Set persists under: this is a read-modify-write of the whole row,
+        // and without the lock a Set landing between the read and the write was reverted by it — the store's
+        // new configuration silently replaced by the one this method read a moment earlier. Never called
+        // with the lock held (the connect's adoption runs on the fire-and-forget warm-up), so waiting here
+        // cannot deadlock; it only queues behind a reconfiguration in flight.
+        await _instanceLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
         {
-            exit.ExitStateBackup = null;
-            await _storeRepository
-                .UpdateSetting(storeId, Constants.StoreSettingsKey, stored)
+            var stored = await _storeRepository
+                .GetSettingAsync<SparkSettings>(storeId, Constants.StoreSettingsKey)
                 .ConfigureAwait(false);
-        }
 
-        // Unconditionally, not only when the row moved: an empty row and a populated cache is a state this
-        // method has been called to end regardless of which half is holding it.
-        if (_settings.TryGetValue(storeId, out var cached) && cached.UnilateralExit is { } cachedExit)
-            cachedExit.ExitStateBackup = null;
+            if (stored?.UnilateralExit is { } exit && !string.IsNullOrEmpty(exit.ExitStateBackup))
+            {
+                exit.ExitStateBackup = null;
+                await _storeRepository
+                    .UpdateSetting(storeId, Constants.StoreSettingsKey, stored)
+                    .ConfigureAwait(false);
+            }
+
+            // Unconditionally, not only when the row moved: an empty row and a populated cache is a state
+            // this method has been called to end regardless of which half is holding it.
+            if (_settings.TryGetValue(storeId, out var cached) && cached.UnilateralExit is { } cachedExit)
+                cachedExit.ExitStateBackup = null;
+        }
+        finally
+        {
+            _instanceLock.Release();
+        }
     }
 
     /// <summary>
@@ -2479,22 +2601,32 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         ArgumentException.ThrowIfNullOrEmpty(storeId);
         await _startupGate.Task.ConfigureAwait(false);
 
-        // Persist first: if the process dies between the two steps, the next startup converges on the stored
-        // settings. The reverse order could leave a live wallet nothing has a record of.
-        //
-        // The interface declares the value non-nullable while the implementation deletes the setting when it is
-        // null, which is how removal works here — hence the suppression rather than a second code path.
-        await _storeRepository
-            .UpdateSetting(storeId, Constants.StoreSettingsKey, settings!)
-            .ConfigureAwait(false);
-
         await _instanceLock.WaitAsync(CancellationToken).ConfigureAwait(false);
         try
         {
+            settings = WithoutReinstatedLegacyBackup(storeId, settings);
+
+            // Persist first: if the process dies between the two steps, the next startup converges on the
+            // stored settings. The reverse order could leave a live wallet nothing has a record of.
+            //
+            // Under the instance lock, which it was not always: ClearExitStateBackupSlot rewrites the whole
+            // row from a fresh read, and a persist outside the lock could land between that read and its
+            // write and be reverted by it.
+            //
+            // The interface declares the value non-nullable while the implementation deletes the setting when
+            // it is null, which is how removal works here — hence the suppression rather than a second code
+            // path.
+            await _storeRepository
+                .UpdateSetting(storeId, Constants.StoreSettingsKey, settings!)
+                .ConfigureAwait(false);
+
             if (settings is null)
             {
                 _settings.TryRemove(storeId, out _);
                 await TeardownInstanceAsync(storeId).ConfigureAwait(false);
+
+                // Kept, under names that say the store no longer runs them — see the method.
+                await SetAsideExitStateBackupsAsync(storeId).ConfigureAwait(false);
 
                 // The plugin writes the store's BTC-LN payment method config, so it clears it too. Leaving a
                 // connection string pointing at a wallet that no longer exists makes Lightning checkout fail
