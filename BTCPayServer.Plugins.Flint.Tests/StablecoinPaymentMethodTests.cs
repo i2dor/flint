@@ -467,12 +467,18 @@ public class StablecoinPaymentMethodTests
 
     #region Rates
 
-    /// <summary>The default rules as the plugin registers them, under a store whose preferred exchange is Kraken.</summary>
-    private static RateRules Rules(string symbol) => RateRules.Combine(
-    [
-        RateRules.Parse("X_X = kraken(X_X);"),
-        RateRules.Parse($"{symbol}_USD = 1; {symbol}_X = {symbol}_BTC * BTC_X; {symbol}_BTC = 1 / BTC_USD;")
-    ]);
+    /// <summary>
+    /// A store's rules as BTCPay builds them for a store on a preferred exchange: its catch-all first, then every
+    /// default rule on the server — here BTCPay's own recommendation and the plugin's, exactly as registered.
+    /// </summary>
+    private static RateRules StoreRules(string exchange, params DefaultRules[] defaults)
+    {
+        var collection = new DefaultRulesCollection(defaults.Length > 0
+            ? defaults
+            : [StablecoinRateRules.For(StablecoinPayments.Usdc), StablecoinRateRules.For(StablecoinPayments.Usdt),
+                new DefaultRules.Recommendation("USD", "kraken") { Order = DefaultRules.HardcodedRecommendedExchangeOrder }]);
+        return new StoreBlob.RateSettings { PreferredExchange = exchange }.GetRateRules(collection, 0m);
+    }
 
     [Theory]
     [InlineData("USDC")]
@@ -480,7 +486,7 @@ public class StablecoinPaymentMethodTests
     public void A_dollar_invoice_asks_for_exactly_its_price(string symbol)
     {
         // The exact pair outranks the store's catch-all, so there is no bid/ask spread's worth of extra to pay.
-        var rule = Rules(symbol).GetRuleFor(new CurrencyPair(symbol, "USD"));
+        var rule = StoreRules("kraken").GetRuleFor(new CurrencyPair(symbol, "USD"));
 
         Assert.True(rule.Reevaluate());
         Assert.Equal(1m, rule.BidAsk!.Bid);
@@ -488,9 +494,9 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
-    public void Any_other_currency_is_crossed_through_bitcoin_at_dollar_parity()
+    public void Any_other_fiat_is_crossed_through_bitcoin_at_dollar_parity()
     {
-        var rule = Rules("USDC").GetRuleFor(new CurrencyPair("USDC", "EUR"));
+        var rule = StoreRules("kraken").GetRuleFor(new CurrencyPair("USDC", "EUR"));
         rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "USD"), new BidAsk(100_000m));
         rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "EUR"), new BidAsk(90_000m));
 
@@ -499,14 +505,68 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
-    public void A_bitcoin_denominated_invoice_is_priced_from_the_bitcoin_rate_alone()
+    public void A_fiat_the_plugin_does_not_list_is_priced_by_the_stores_exchange()
     {
-        var rule = Rules("USDT").GetRuleFor(new CurrencyPair("USDT", "BTC"));
-        rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "USD"), new BidAsk(100_000m));
+        var rule = StoreRules("coingecko").GetRuleFor(new CurrencyPair("USDT", "ISK"));
+
+        Assert.Equal(["coingecko USDT_ISK"], rule.ExchangeRates.Select(r => $"{r.Exchange} {r.CurrencyPair}").ToArray());
+    }
+
+    [Theory]
+    [InlineData("USDT")]
+    [InlineData("USDC")]
+    public void A_store_priced_in_a_stablecoin_on_an_exchange_without_btc_usd_still_gets_its_rate(string symbol)
+    {
+        // A store that never enabled USDC or USDT, pricing in USDT on Binance, which lists BTC/USDT and no BTC/USD.
+        // The rules this plugin used to register included USDT_BTC = 1 / BTC_USD, which BTCPay takes as the inverse
+        // of BTC_USDT ahead of the store's own catch-all: bitcoin priced at BTC_USD, and on Binance no rate at all.
+        var pair = new CurrencyPair("BTC", symbol);
+
+        var rule = StoreRules("binance").GetRuleFor(pair);
+        Assert.Equal([$"binance {pair}"], rule.ExchangeRates.Select(r => $"{r.Exchange} {r.CurrencyPair}").ToArray());
+        rule.ExchangeRates.SetRate("binance", pair, new BidAsk(100_050m));
+        Assert.True(rule.Reevaluate());
+        Assert.Equal(100_050m, rule.BidAsk!.Bid);
+
+        var before = StoreRules("binance", new DefaultRules(
+            [$"{symbol}_USD = 1", $"{symbol}_X = {symbol}_BTC * BTC_X", $"{symbol}_BTC = 1 / BTC_USD"])).GetRuleFor(pair);
+        before.ExchangeRates.SetRate("binance", pair, new BidAsk(100_050m));
+        Assert.False(before.Reevaluate());
+    }
+
+    [Fact]
+    public void A_bitcoin_denominated_invoice_is_priced_at_the_stores_own_market_for_the_coin()
+    {
+        // No rule names USDT_BTC any more (it is BTC_USDT's inverse), so the store's catch-all prices it, and the
+        // exchange's BTC/USDT market answers for its inverse.
+        var rule = StoreRules("binance").GetRuleFor(new CurrencyPair("USDT", "BTC"));
+        rule.ExchangeRates.SetRate("binance", new CurrencyPair("BTC", "USDT"), new BidAsk(100_000m));
 
         Assert.True(rule.Reevaluate());
         Assert.Equal(0.00001m, rule.BidAsk!.Bid);
     }
 
+    [Fact]
+    public void The_plugins_rules_are_exact_pairs_for_its_own_coins_and_nothing_else()
+    {
+        var lines = StablecoinPayments.Assets
+            .SelectMany(asset => StablecoinRateRules.Lines(asset.Symbol, StablecoinRateRules.FiatCurrencies))
+            .ToList();
+
+        Assert.Contains("USDT_USD = 1;", lines);
+        Assert.Contains("USDC_EUR = BTC_EUR / BTC_USD;", lines);
+        Assert.Equal(2 * StablecoinRateRules.FiatCurrencies.Count, lines.Count);
+        Assert.All(lines, line =>
+        {
+            var pair = line[..line.IndexOf(' ')];
+            Assert.Matches("^(USDC|USDT)_[A-Z0-9]+$", pair);
+            Assert.False(pair.EndsWith("_X", StringComparison.Ordinal), pair);
+            Assert.NotEqual("USDC_BTC", pair);
+            Assert.NotEqual("USDT_BTC", pair);
+        });
+        Assert.Equal(StablecoinRateRules.Order, StablecoinRateRules.For(StablecoinPayments.Usdt).Order);
+    }
+
     #endregion
 }
+

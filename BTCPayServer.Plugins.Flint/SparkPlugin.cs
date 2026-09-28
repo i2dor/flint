@@ -397,9 +397,10 @@ public class SparkPlugin : BaseBTCPayServerPlugin
     /// <b>Rates.</b> A prompt is denominated in the coin, so BTCPay needs <c>USDC_X</c> and <c>USDT_X</c> for
     /// every invoice currency. Both coins are taken at dollar parity — exactly as the SDK sizes the quote — and
     /// crossed through bitcoin for anything else, so a store needs no rate configuration of its own: the preferred
-    /// exchange that already prices <c>BTC_X</c> prices these too. The exact <c>_USD</c> rule outranks the store's
-    /// catch-all, so a dollar invoice asks for exactly its price rather than for a bid/ask spread's worth more. A
-    /// store on custom rate scripting has to add these itself, which the docs say.
+    /// exchange that already prices <c>BTC_X</c> prices these too. The rules are exact pairs, one per fiat currency,
+    /// because default rules are server-wide and a pattern rule would reprice other stores' <c>BTC_USDT</c>
+    /// (<see cref="StablecoinRateRules"/>). A store on custom rate scripting has to add these itself, which the docs
+    /// say.
     /// </para>
     /// </remarks>
     private static void AddStablecoinPayments(IServiceCollection services)
@@ -447,12 +448,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 Symbol = null,
                 Crypto = true
             });
-            services.AddSingleton(new DefaultRules(
-            [
-                $"{asset.Symbol}_USD = 1",
-                $"{asset.Symbol}_X = {asset.Symbol}_BTC * BTC_X",
-                $"{asset.Symbol}_BTC = 1 / BTC_USD"
-            ]));
+            // Exact pairs only, so they price these prompts and nothing else on the server: see StablecoinRateRules.
+            services.AddSingleton(StablecoinRateRules.For(asset));
         }
 
         // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the
