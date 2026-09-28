@@ -5,7 +5,7 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [1.2.1] — 2026-09-28
 
 The unilateral exit stops being an experiment behind a server switch and becomes a supported feature on every
 server. Nothing about what it is changes — it is still a manual last resort that the plugin never broadcasts —
