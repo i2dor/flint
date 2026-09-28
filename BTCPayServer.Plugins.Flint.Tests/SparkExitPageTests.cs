@@ -277,6 +277,33 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task A_page_read_that_failed_reaches_the_view_as_an_error_and_nothing_else()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // What the service hands back when the exit records could not be read at all. The view must render the
+        // error and not the quote form beside it: an empty page with a form reads as "no exit is in progress"
+        // when the truth is "this page could not tell".
+        var exit = new StubExitService
+        {
+            Page = Page() with { LoadError = SparkUnilateralExitService.ExitsUnreadable }
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+
+        Assert.Equal(SparkUnilateralExitService.ExitsUnreadable, model.LoadError);
+
+        var view = ExitTemplate();
+        var errorAt = view.IndexOf("id=\"SparkExitLoadError\"", StringComparison.Ordinal);
+        var quoteAt = view.IndexOf("id=\"SparkExitQuoteForm\"", StringComparison.Ordinal);
+        var elseAt = view.IndexOf("else", errorAt, StringComparison.Ordinal);
+        Assert.InRange(errorAt, 0, view.Length);
+        // Every form comes after the error branch's own else, so none can render beside it.
+        Assert.InRange(elseAt, errorAt, quoteAt);
+    }
+
+    [Fact]
     public async Task On_mainnet_the_page_says_so_and_starts_with_no_override()
     {
         using var gate = FeatureGate(enabled: true);

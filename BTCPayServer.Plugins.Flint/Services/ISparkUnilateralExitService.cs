@@ -211,6 +211,11 @@ public sealed record UnilateralExitOpResult(
 /// a built exit runs to a dozen rows of which at most one or two are actionable at any moment. Null when
 /// there is no built set, or when the set read back was empty.
 /// </param>
+/// <param name="LoadError">
+/// Set when the read itself failed — the exit records could not be loaded — and every other member is then the
+/// empty page. The view renders this instead of any form: an empty page with a quote form beside it would read
+/// as "no exit is in progress" when the truth is "this page could not tell".
+/// </param>
 public sealed record UnilateralExitPageData(
     bool WalletRunning,
     bool DisclosureAcknowledged,
@@ -224,4 +229,5 @@ public sealed record UnilateralExitPageData(
     string? FundingKeyPath,
     IReadOnlyList<SparkExitTransaction>? Transactions,
     bool TransactionsUnreadable,
-    IReadOnlyList<SparkExitTransaction>? PendingBroadcast);
+    IReadOnlyList<SparkExitTransaction>? PendingBroadcast,
+    string? LoadError = null);

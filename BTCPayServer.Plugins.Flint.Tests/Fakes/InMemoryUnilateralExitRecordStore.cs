@@ -37,6 +37,15 @@ public sealed class InMemoryUnilateralExitRecordStore : IUnilateralExitRecordSto
     /// <summary>Makes <see cref="UpdateAsync"/> report that it changed nothing, as a vanished row would.</summary>
     public bool RefuseUpdates { get; set; }
 
+    /// <summary>
+    /// Thrown by every read when set: the database is down, or a row will not materialise.
+    /// </summary>
+    /// <remarks>
+    /// What the EF store does when Postgres is unreachable, reproduced because the caller is a request handler and
+    /// an exception escaping one disables the plugin — so the service has to be seen turning this into a refusal.
+    /// </remarks>
+    public Exception? FailReadsWith { get; set; }
+
     /// <summary>The live rows. Read them; do not mutate through them.</summary>
     public IReadOnlyDictionary<string, UnilateralExitRecord> Records => _records;
 
@@ -118,13 +127,17 @@ public sealed class InMemoryUnilateralExitRecordStore : IUnilateralExitRecordSto
         string storeId,
         string id,
         CancellationToken cancellationToken = default) =>
-        Task.FromResult(
-            _records.TryGetValue(id, out var record) && record.StoreId == storeId ? Copy(record) : null);
+        FailReadsWith is { } failure
+            ? Task.FromException<UnilateralExitRecord?>(failure)
+            : Task.FromResult(
+                _records.TryGetValue(id, out var record) && record.StoreId == storeId ? Copy(record) : null);
 
     public Task<UnilateralExitRecord?> GetActiveForStoreAsync(
         string storeId,
         CancellationToken cancellationToken = default) =>
-        Task.FromResult(Newest(_records.Values.Where(r => r.StoreId == storeId && r.IsActive)));
+        FailReadsWith is { } failure
+            ? Task.FromException<UnilateralExitRecord?>(failure)
+            : Task.FromResult(Newest(_records.Values.Where(r => r.StoreId == storeId && r.IsActive)));
 
     public Task<IReadOnlyList<UnilateralExitRecord>> ListTerminalForStoreAsync(
         string storeId,
@@ -132,6 +145,9 @@ public sealed class InMemoryUnilateralExitRecordStore : IUnilateralExitRecordSto
         CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
+
+        if (FailReadsWith is { } failure)
+            return Task.FromException<IReadOnlyList<UnilateralExitRecord>>(failure);
 
         return Task.FromResult<IReadOnlyList<UnilateralExitRecord>>(Ordered(
                 _records.Values.Where(r => r.StoreId == storeId && !r.IsActive))

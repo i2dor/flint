@@ -167,6 +167,13 @@ public class SparkExitViewModel
     [ValidateNever]
     public SparkExitVerdict? CheckResult { get; set; }
 
+    /// <summary>
+    /// Why the page could not be read, when it could not — see <c>UnilateralExitPageData.LoadError</c>. The view
+    /// renders only this when it is set.
+    /// </summary>
+    [ValidateNever]
+    public string? LoadError { get; set; }
+
     /// <summary>The chain this server runs on, named in the copy that depends on it.</summary>
     public string NetworkName { get; set; } = string.Empty;
 

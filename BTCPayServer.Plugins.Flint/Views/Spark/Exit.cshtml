@@ -110,6 +110,17 @@
 <div class="row">
     <div class="col-xl-8 col-xxl-constrain">
 
+        @if (Model.LoadError is { } loadError)
+        {
+            @*
+                The read failed, so nothing below is known — including whether an exit is in progress. Rendering
+                the quote form here would say "no exit is in progress" on the strength of a query that never
+                answered, so the page says only what it knows.
+            *@
+            <div class="alert alert-danger" role="alert" id="SparkExitLoadError">@loadError</div>
+        }
+        else
+        {
         @if (!Model.WalletRunning)
         {
             <div class="alert alert-danger" role="alert" id="SparkExitWalletStopped">
@@ -914,6 +925,7 @@
                     }
                 </tbody>
             </table>
+        }
         }
     </div>
 </div>

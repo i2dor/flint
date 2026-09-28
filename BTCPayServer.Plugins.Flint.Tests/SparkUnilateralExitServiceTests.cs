@@ -1775,6 +1775,11 @@ public class SparkUnilateralExitServiceTests
     [InlineData("[]")]
     [InlineData("[{}]")]
     [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":99,"Status":0}]""")]
+    // The member most likely to be null, and the one that used to be dereferenced before it was checked: the
+    // status is a reference record, and System.Text.Json fills an explicit or missing null into it regardless.
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0,"Status":null}]""")]
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0}]""")]
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[null],"Kind":0,"Status":{"Readiness":1}}]""")]
     public async Task An_unreadable_transaction_column_is_reported_rather_than_thrown(string stored)
     {
         using var harness = Harness.Create();
@@ -1786,8 +1791,62 @@ public class SparkUnilateralExitServiceTests
 
         Assert.True(page.TransactionsUnreadable);
         Assert.Null(page.Transactions);
+        Assert.Null(page.LoadError);
         // And the record itself is still on the page, so the operator can abandon it.
         Assert.Equal(record.Id, page.ActiveRecord?.Id);
+
+        // The check reads the same column and must refuse on it the same way, not throw on the way to the SDK.
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.NotEqual(SparkUnilateralExitService.UnexpectedFailure, check.Error);
+        Assert.Empty(harness.Sdk.ExitCheckCalls);
+    }
+
+    /// <summary>
+    /// A database that will not answer becomes a refusal on every operation and a "could not read" page, never
+    /// an exception.
+    /// </summary>
+    /// <remarks>
+    /// These methods are called from request handlers, and BTCPay 2.4 answers an unhandled plugin exception during
+    /// a request by disabling the plugin and restarting the server — every store's Lightning, over one exit page.
+    /// The page read in particular must not fall back to the quote form: "no exit is in progress" on the strength
+    /// of a query that never answered is an invitation to start a second one.
+    /// </remarks>
+    [Fact]
+    public async Task A_database_that_will_not_answer_degrades_every_entry_point_instead_of_throwing()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed();
+        harness.Records.FailReadsWith = new InvalidOperationException("the database is not answering");
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.Equal(SparkUnilateralExitService.ExitsUnreadable, page.LoadError);
+        Assert.Null(page.ActiveRecord);
+        Assert.False(page.DisclosureAcknowledged);
+
+        foreach (var attempt in new[]
+                 {
+                     await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct),
+                     await harness.Service.BuildAsync(StoreId, record.Id, Ct),
+                     await harness.Service.CheckAsync(StoreId, record.Id, Ct),
+                     await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct),
+                     await harness.Service.AbandonAsync(StoreId, record.Id, Ct)
+                 })
+        {
+            Assert.False(attempt.Success);
+            Assert.Equal(SparkUnilateralExitService.UnexpectedFailure, attempt.Error);
+        }
+
+        // Nothing was signed on the way to those refusals.
+        Assert.Empty(harness.Sdk.ExitBuildCalls);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, harness.Records.Records[record.Id].Status);
+
+        // And the per-store gate was released each time, so the store is usable again once the database is.
+        harness.Records.FailReadsWith = null;
+        Assert.True((await harness.Service.AbandonAsync(StoreId, record.Id, Ct)).Success);
     }
 
     /// <summary>

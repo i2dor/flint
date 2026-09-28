@@ -1494,7 +1494,11 @@ public class SparkController : Controller
             // said "nothing is ready" into an empty list here would change nothing — but turning a service
             // that said "I could not tell" into one would put an action block on screen for an unknown set.
             PendingBroadcast = page.PendingBroadcast,
-            EsploraApiUrl = settings?.UnilateralExit.EsploraApiUrl,
+            // Both links coalesced: a stored blob with an explicit "UnilateralExit": null deserialises to a null
+            // section whatever the property initialiser says, and a NullReferenceException on this GET disables
+            // the plugin and restarts BTCPay.
+            EsploraApiUrl = settings?.UnilateralExit?.EsploraApiUrl,
+            LoadError = page.LoadError,
             NetworkName = _sweepSettings.Network.ChainName.ToString(),
             IsMainnet = _sweepSettings.Network.ChainName == ChainName.Mainnet
         };

@@ -75,8 +75,22 @@ public class SparkSettings
     /// acknowledgement silently disappearing from the blob the first time an operator saved settings with the
     /// gate off. The section existing is not the feature being available; see
     /// <see cref="UnilateralExitSettings"/>.
+    /// <para>
+    /// <b>Never null, including after a read.</b> A property initialiser covers a blob with no
+    /// <c>UnilateralExit</c> key at all, but a blob carrying an explicit <c>"UnilateralExit": null</c> — a hand
+    /// edit, a restored backup, an older serializer — has the deserializer call this setter with null, and every
+    /// reader that trusted the declared type then threw. On the exit page that was a
+    /// <see cref="NullReferenceException"/> on a GET, which BTCPay answers by disabling the plugin and restarting
+    /// the server. The setter coalesces, so the section a reader gets is always a usable default.
+    /// </para>
     /// </remarks>
-    public UnilateralExitSettings UnilateralExit { get; set; } = new();
+    public UnilateralExitSettings UnilateralExit
+    {
+        get => _unilateralExit;
+        set => _unilateralExit = value ?? new UnilateralExitSettings();
+    }
+
+    private UnilateralExitSettings _unilateralExit = new();
 
     /// <summary>
     /// An independent copy, nested settings included. Every property added to this class must be added here too.

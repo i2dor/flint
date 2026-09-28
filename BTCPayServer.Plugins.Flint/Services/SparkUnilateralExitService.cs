@@ -126,6 +126,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         "The leaves this exit was quoted for are no longer in this wallet, so there is nothing left to force "
         + "on-chain. Abandon this exit and quote a new one.";
 
+    /// <summary>The backstop's refusal: see <see cref="GuardAsync"/>.</summary>
+    internal const string UnexpectedFailure =
+        "Something unexpected went wrong with that, so it was not completed. Nothing was broadcast. The server log "
+        + "has the detail; reload the page to see this exit's current state.";
+
+    /// <summary>The page read's backstop: the exit records could not be read at all.</summary>
+    internal const string ExitsUnreadable =
+        "This store's unilateral-exit records could not be read, so this page cannot show whether an exit is in "
+        + "progress. Nothing has been changed. The server log has the detail; try again shortly.";
+
     internal const string BuiltButNotSaved =
         "The exit was built, but its signed transactions could not be saved, so they are lost. Nothing was "
         + "broadcast. Try again.";
@@ -215,9 +225,32 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private bool Mainnet => _network == Network.Main;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Guarded for the same reason every operation is (see <see cref="GuardAsync"/>), and this is the call that
+    /// most needs it: it runs on every GET of a page any store viewer can reload. A failure reads as a page that
+    /// says it could not read the exits — never as the quote form, which would invite a second exit beside one
+    /// the page merely failed to load.
+    /// </remarks>
     public async Task<UnilateralExitPageData> ReadAsync(
         string storeId,
         CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadCoreAsync(storeId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: could not read the unilateral-exit page data ({Reason})",
+                storeId, SparkErrors.Describe(ex));
+            return AbsentFeature with { LoadError = ExitsUnreadable };
+        }
+    }
+
+    private async Task<UnilateralExitPageData> ReadCoreAsync(
+        string storeId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -320,9 +353,15 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
+    public Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
         string storeId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "acknowledging the disclosure for",
+            () => AcknowledgeDisclosureCoreAsync(storeId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> AcknowledgeDisclosureCoreAsync(
+        string storeId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -356,10 +395,17 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> SetExplorerUrlAsync(
+    public Task<UnilateralExitOpResult> SetExplorerUrlAsync(
         string storeId,
         string? esploraApiUrl,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "setting the explorer for",
+            () => SetExplorerUrlCoreAsync(storeId, esploraApiUrl, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> SetExplorerUrlCoreAsync(
+        string storeId,
+        string? esploraApiUrl,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -411,10 +457,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> CheckAsync(
+    public Task<UnilateralExitOpResult> CheckAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "checking", () => CheckCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> CheckCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -653,11 +705,19 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> QuoteAsync(
+    public Task<UnilateralExitOpResult> QuoteAsync(
         string storeId,
         long feeRateSatPerVbyte,
         string destinationAddress,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "quoting",
+            () => QuoteCoreAsync(storeId, feeRateSatPerVbyte, destinationAddress, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> QuoteCoreAsync(
+        string storeId,
+        long feeRateSatPerVbyte,
+        string destinationAddress,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -827,10 +887,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// the veto would keep refusing it, for ever. So this re-quotes first, persists the fresh requirement so that
     /// the number on the page is the number that will be judged, and only then selects.
     /// </remarks>
-    public async Task<UnilateralExitOpResult> BuildAsync(
+    public Task<UnilateralExitOpResult> BuildAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "building", () => BuildCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> BuildCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -1140,10 +1206,17 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> MarkCompletedAsync(
+    public Task<UnilateralExitOpResult> MarkCompletedAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "completing",
+            () => MarkCompletedCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> MarkCompletedCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -1201,10 +1274,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
-    public async Task<UnilateralExitOpResult> AbandonAsync(
+    public Task<UnilateralExitOpResult> AbandonAsync(
         string storeId,
         string recordId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "abandoning", () => AbandonCoreAsync(storeId, recordId, cancellationToken));
+
+    private async Task<UnilateralExitOpResult> AbandonCoreAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
@@ -1461,6 +1540,43 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private static UnilateralExitOpResult Refuse(string error) => new(false, error, null);
 
     /// <summary>
+    /// Runs one operation, turning anything it failed to anticipate into a refusal instead of an exception.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every public operation goes through this, and it is not tidiness.</b> These methods are called straight
+    /// from request handlers, and BTCPay 2.4's plugin exception handler answers an unhandled exception from a
+    /// plugin's request by <em>disabling the plugin and restarting the server</em> — so a database blip, a row
+    /// someone edited by hand, or a shape the SDK has never returned before would take every store's Lightning
+    /// down over one exit page. The anticipated failures are all handled where they happen, with wording for
+    /// the case; this is the backstop for the ones nobody anticipated, and it words them generically on purpose.
+    /// </para>
+    /// <para>
+    /// Safe because of the class's first rule: nothing here broadcasts, so an exception anywhere in an operation
+    /// has moved no coins. The one place an exception could cost something — after a successful build, before
+    /// its transactions are stored — is handled inside the build itself, where the txids are logged.
+    /// </para>
+    /// </remarks>
+    /// <param name="operation">A gerund for the log line, e.g. "building".</param>
+    private async Task<UnilateralExitOpResult> GuardAsync(
+        string storeId,
+        string operation,
+        Func<Task<UnilateralExitOpResult>> body)
+    {
+        try
+        {
+            return await body().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: unexpected failure while {Operation} a unilateral exit ({Reason})",
+                storeId, operation, SparkErrors.Describe(ex));
+            return Refuse(UnexpectedFailure);
+        }
+    }
+
+    /// <summary>
     /// Why the funding on the address does not fund this exit, in terms an operator can act on.
     /// </summary>
     /// <remarks>
@@ -1589,11 +1705,17 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         transactions = parsed;
         return true;
 
+        // Status is checked for null before it is dereferenced, and it is the member most likely to arrive null:
+        // SparkExitTxStatus is a reference record, and System.Text.Json fills a missing or explicit-null member of
+        // a positional record with null whatever the declared nullability says. An exception here is not a page
+        // error — it escapes a request, and BTCPay disables the plugin and restarts the server over it.
         static bool IsMalformed(SparkExitTransaction? transaction) =>
             transaction is null
             || string.IsNullOrWhiteSpace(transaction.Txid)
             || string.IsNullOrWhiteSpace(transaction.TxHex)
             || transaction.DependsOn is null
+            || transaction.DependsOn.Any(string.IsNullOrWhiteSpace)
+            || transaction.Status is null
             || !Enum.IsDefined(transaction.Kind)
             || !Enum.IsDefined(transaction.Status.Readiness);
     }
