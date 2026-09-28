@@ -304,6 +304,22 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task A_settings_read_that_throws_does_not_take_the_exit_page_down()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // The controller reads the store's settings once more for the explorer box. On BTCPay 2.4 an exception
+        // escaping this GET disables the plugin and restarts the server, so a failed read costs the box, not that.
+        var exit = new StubExitService { Page = Page(disclosureAcknowledged: true) };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+        h.Settings.FailGetsWith = new InvalidOperationException("the settings could not be read");
+
+        var model = await RenderExit(h);
+
+        Assert.Null(model.EsploraApiUrl);
+    }
+
+    [Fact]
     public async Task On_mainnet_the_page_says_so_and_starts_with_no_override()
     {
         using var gate = FeatureGate(enabled: true);

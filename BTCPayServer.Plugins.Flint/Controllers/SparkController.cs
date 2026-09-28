@@ -969,8 +969,30 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         return View(BuildExitViewModel(storeId, page, settings));
+    }
+
+    /// <summary>
+    /// The store's settings for the exit page's own inputs, or null when they could not be read.
+    /// </summary>
+    /// <remarks>
+    /// Read only to pre-fill the explorer box, so a failure here costs an empty box and nothing else — and a
+    /// throw on this GET would cost the whole plugin: BTCPay 2.4 disables a plugin and restarts the server on an
+    /// unhandled exception from one of its requests. The service's own read of the same settings is guarded the
+    /// same way, and the page it returns already says when the store could not be read.
+    /// </remarks>
+    private async Task<SparkSettings?> ReadSettingsForExitPageAsync(string storeId)
+    {
+        try
+        {
+            return await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Store {StoreId}: could not read its settings for the exit page", storeId);
+            return null;
+        }
     }
 
     /// <summary>
@@ -1116,7 +1138,7 @@ public class SparkController : Controller
             .ConfigureAwait(false);
 
         var page = await _unilateralExit.ReadAsync(storeId, cancellationToken).ConfigureAwait(false);
-        var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
+        var settings = await ReadSettingsForExitPageAsync(storeId).ConfigureAwait(false);
         var model = BuildExitViewModel(storeId, page, settings);
 
         // Read after the write, so the banner and the table describe the same moment. Verdict is not
