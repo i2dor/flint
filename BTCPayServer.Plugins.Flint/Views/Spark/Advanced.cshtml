@@ -238,12 +238,20 @@
                 </div>
             }
 
+            @*
+                Multipart, so a pasted backup is posted as it is: url-encoded, every brace, quote and comma of
+                the SDK's JSON is sent as three characters. The action raises its own form limits for the size
+                a real export reaches.
+            *@
             <form method="post" asp-action="SetExitStateBackup" asp-route-storeId="@Model.StoreId"
-                  permission="@Policies.CanModifyStoreSettings" class="mt-3">
+                  enctype="multipart/form-data" permission="@Policies.CanModifyStoreSettings" class="mt-3">
                 <div class="form-group">
                     <label asp-for="ExitStateBackup" class="form-label"></label>
                     <textarea asp-for="ExitStateBackup" id="SparkExitStateBackup" class="form-control font-monospace"
                               rows="5" spellcheck="false" autocomplete="off"></textarea>
+                    <label asp-for="ExitStateBackupFile" class="form-label mt-2"></label>
+                    <input asp-for="ExitStateBackupFile" type="file" id="SparkExitStateBackupFile"
+                           class="form-control" accept=".txt,text/plain" />
                     <div class="form-text">
                         A backup you exported earlier. It is <strong>imported into the running wallet straight
                         away</strong>, and the result is shown when you save. If the wallet is not running, or

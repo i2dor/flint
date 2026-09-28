@@ -1427,6 +1427,11 @@ public class SparkController : Controller
     /// </remarks>
     [HttpPost("advanced/exit-state")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    [RequestFormLimits(
+        ValueLengthLimit = ExitStateFormLimitBytes,
+        MultipartBodyLengthLimit = ExitStateFormLimitBytes,
+        Order = BeforeAntiforgery)]
+    [RequestSizeLimit(ExitStateFormLimitBytes, Order = BeforeAntiforgery)]
     public async Task<IActionResult> SetExitStateBackup(
         [FromRoute] string storeId,
         SparkAdvancedViewModel vm,
@@ -1440,11 +1445,18 @@ public class SparkController : Controller
 
         storeId = store.Id;
 
+        var (pasted, refusal) = await ReadSubmittedBackupAsync(storeId, vm, cancellationToken).ConfigureAwait(false);
+        if (refusal is not null)
+        {
+            TempData[WellKnownTempData.ErrorMessage] = refusal;
+            return RedirectToAction(nameof(Advanced), new { storeId });
+        }
+
         UnilateralExitOpResult result;
         try
         {
             result = await _unilateralExit
-                .SetExitStateBackupAsync(storeId, vm.ExitStateBackup, cancellationToken)
+                .SetExitStateBackupAsync(storeId, pasted, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1459,7 +1471,7 @@ public class SparkController : Controller
                 "The exit-state backup could not be saved. Check the server log for the reason.", null);
         }
 
-        if (!result.Success || string.IsNullOrWhiteSpace(vm.ExitStateBackup))
+        if (!result.Success || string.IsNullOrWhiteSpace(pasted))
         {
             RelayExitResult(
                 result,
@@ -1484,6 +1496,90 @@ public class SparkController : Controller
 
         RelayImportReport(report);
         return RedirectToAction(nameof(Advanced), new { storeId });
+    }
+
+    /// <summary>
+    /// The largest exit-state form this controller accepts, in bytes, whichever way it is posted.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the action states its own form limits at all.</b> ASP.NET's defaults cap a single form value at
+    /// 4 MiB and a request body at about 30 MB, and the SDK documents a real wallet's export as reaching several
+    /// megabytes. A paste past 4 MiB therefore failed as a bare 400 long before the service's own
+    /// sixteen-million-character cap could say anything — and it failed inside the antiforgery check, which
+    /// reads the whole form before the action runs. A url-encoded post makes it worse: the export is JSON, and
+    /// every brace, quote and comma is sent as three characters.
+    /// </para>
+    /// <para>
+    /// Sixty-four MiB covers the service's cap even url-encoded, with room. The page posts multipart (so a
+    /// paste is sent as it is) and offers a file input as well. The service's character cap stays the real
+    /// bound; this only makes sure the request reaches it. Authorisation still runs first — an anonymous
+    /// request is refused before any of its body is read.
+    /// </para>
+    /// </remarks>
+    internal const int ExitStateFormLimitBytes = 64 * 1024 * 1024;
+
+    /// <summary>
+    /// Filter order for the form limits: ahead of every antiforgery filter, because antiforgery is what reads
+    /// the form first — BTCPay's global UI filter (order 0) and <see cref="AutoValidateAntiforgeryTokenAttribute"/>
+    /// on this controller (order 1000).
+    /// </summary>
+    /// <remarks>
+    /// Belt and braces: on this framework both attributes are also endpoint metadata that the form read
+    /// honours whichever filter triggers it, so the limits hold at the attributes' default order too. The
+    /// explicit order is what keeps them holding if that ever stops being true, and it costs nothing — the
+    /// filters only configure the request, and authorisation has run before any of them.
+    /// </remarks>
+    private const int BeforeAntiforgery = -10_000;
+
+    /// <summary>
+    /// The backup a save carries: the pasted text, or the chosen file's content — never both, never a file
+    /// that could be mistaken for a clear.
+    /// </summary>
+    /// <returns>The value to hand the service (null or blank means "clear"), or a refusal for the page.</returns>
+    /// <remarks>
+    /// The file is read as text exactly as a download wrote it — UTF-8, a byte-order mark dropped, nothing
+    /// trimmed — so a backup downloaded here and uploaded again is byte-for-byte the string the wallet
+    /// exported. A chosen file that turns out empty is a refusal, not a clear: clearing is what the empty
+    /// textarea means, and an operator who picked a file did not ask for everything to be deleted.
+    /// </remarks>
+    private async Task<(string? Backup, string? Refusal)> ReadSubmittedBackupAsync(
+        string storeId, SparkAdvancedViewModel vm, CancellationToken cancellationToken)
+    {
+        if (vm.ExitStateBackupFile is not { Length: > 0 } file)
+        {
+            return vm.ExitStateBackupFile is { Length: 0 }
+                ? (null, "That file is empty, so nothing was stored.")
+                : (vm.ExitStateBackup, null);
+        }
+
+        if (!string.IsNullOrWhiteSpace(vm.ExitStateBackup))
+            return (null, "Paste the backup or choose its file, not both. Nothing was stored.");
+
+        // Four bytes per character is the most UTF-8 can spend, so a file past this cannot be under the
+        // service's character cap; refused before any of it is read into memory.
+        if (file.Length > (long)SparkUnilateralExitService.MaxExitStateBackupChars * 4)
+        {
+            return (null, "That file is far larger than an exit-state backup can be, so it is not one. "
+                          + "Nothing was stored.");
+        }
+
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var content = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(content)
+                ? (null, "That file is empty, so nothing was stored.")
+                : (content, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Store {StoreId}: an uploaded exit-state backup could not be read ({ExceptionType})",
+                storeId, ex.GetType().Name);
+            return (null, "That file could not be read, so nothing was stored.");
+        }
     }
 
     /// <summary>

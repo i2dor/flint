@@ -7,6 +7,7 @@ using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.DependencyInjection;
@@ -877,6 +878,52 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task An_uploaded_backup_file_is_saved_as_its_text_and_an_empty_one_clears_nothing()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        // What Download wrote, BOM and all if an editor added one: the text comes back byte-for-byte.
+        var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes("{\"exit\":\"state\"}")).ToArray();
+        await h.Mvc.SetExitStateBackup(Store, new SparkAdvancedViewModel
+        {
+            ExitStateBackupFile = new FormFile(new MemoryStream(bytes), 0, bytes.Length, "file", "backup.txt")
+        }, CancellationToken.None);
+        Assert.Contains("ExitState:{\"exit\":\"state\"}", exit.Calls);
+
+        // A chosen file that is empty is not the empty textarea: an operator who picked a file did not ask
+        // for every backup to be deleted.
+        exit.Calls.Clear();
+        await h.Mvc.SetExitStateBackup(Store, new SparkAdvancedViewModel
+        {
+            ExitStateBackupFile = new FormFile(new MemoryStream([]), 0, 0, "file", "empty.txt")
+        }, CancellationToken.None);
+        Assert.Empty(exit.Calls);
+        Assert.Contains("empty", Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]));
+    }
+
+    [Fact]
+    public async Task A_save_carrying_both_a_paste_and_a_file_is_refused_rather_than_choosing_one()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+        var bytes = Encoding.UTF8.GetBytes("from-the-file");
+
+        await h.Mvc.SetExitStateBackup(Store, new SparkAdvancedViewModel
+        {
+            ExitStateBackup = "from-the-textarea",
+            ExitStateBackupFile = new FormFile(new MemoryStream(bytes), 0, bytes.Length, "file", "backup.txt")
+        }, CancellationToken.None);
+
+        Assert.Empty(exit.Calls);
+        Assert.Contains("not both", Assert.IsType<string>(h.Mvc.TempData[WellKnownTempData.ErrorMessage]));
+    }
+
+    [Fact]
     public async Task A_clear_does_not_ask_for_an_import()
     {
         using var gate = FeatureGate(enabled: true);
@@ -1115,7 +1162,7 @@ public class SparkExitPageTests
     /// on purpose: these tests are about relaying and gating, so a per-method result table would be six places
     /// to keep in step for no assertion's benefit.
     /// </remarks>
-    private sealed class StubExitService : ISparkUnilateralExitService
+    internal sealed class StubExitService : ISparkUnilateralExitService
     {
         public UnilateralExitPageData Page { get; set; } =
             new(WalletRunning: true, DisclosureAcknowledged: false, BalanceSats: 0,

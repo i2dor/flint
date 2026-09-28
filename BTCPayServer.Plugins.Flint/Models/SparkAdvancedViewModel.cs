@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 
@@ -102,6 +103,17 @@ public class SparkAdvancedViewModel
     /// </remarks>
     [Display(Name = "Exit-state backup")]
     public string? ExitStateBackup { get; set; }
+
+    /// <summary>
+    /// The same backup as a file — what Download produced — inbound only, as the alternative to pasting.
+    /// </summary>
+    /// <remarks>
+    /// Offered because a multi-megabyte value is an awkward thing to paste into a textarea, and a file is
+    /// what the operator was told to keep. Never both: the action refuses a save that carries a paste and a
+    /// file, rather than choosing one silently.
+    /// </remarks>
+    [Display(Name = "Or choose the backup file")]
+    public IFormFile? ExitStateBackupFile { get; set; }
 
     /// <summary>
     /// A freshly exported blob, for one render, so the operator can copy it.
