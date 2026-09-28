@@ -74,10 +74,22 @@
     // funding panel — and never in both at once, so one local function serves both without colliding ids.
     // Off mainnet it is not a preference: mempool.space has no regtest or testnet, so funding discovery
     // refuses outright until this is set, and the form says so rather than sitting there looking optional.
+    //
+    // Server administrators only: the URL makes this server send requests to a host of the setter's choosing on
+    // every page view, so it is a server setting in all but location. Everyone else sees what is set and whom to
+    // ask, rather than a form that would be refused.
     async Task ExplorerForm()
     {
+        <div not-permission="@Policies.CanModifyServerSettings" class="mb-3" id="SparkExitExplorerReadOnly">
+            <span class="form-label d-block">Block explorer API</span>
+            <code>@(Model.EsploraApiUrl is { Length: > 0 } configured ? configured : SparkExitFundingExplorer.MainnetDefaultApiUrl + " (default)")</code>
+            <div class="form-text">
+                Only a server administrator can change which block explorer this server asks about exit funding,
+                because it decides which host the server sends requests to.
+            </div>
+        </div>
         <form method="post" asp-action="SetExitExplorer" asp-route-storeId="@Model.StoreId"
-              permission="@Policies.CanModifyStoreSettings" id="SparkExitExplorerForm"
+              permission="@Policies.CanModifyServerSettings" id="SparkExitExplorerForm"
               class="@(Model.IsMainnet ? "mb-3" : "alert alert-warning mb-3")">
             <label asp-for="EsploraApiUrl" class="form-label">Block explorer API</label>
             <div class="input-group">
@@ -241,6 +253,19 @@
                             Set the fee rate to use for the entire exit chain. Be sure to set it higher than
                             the current mempool minimum, as it will be used for the entire exit chain over the
                             course of several hours or even days.
+                            @if (Model.FeeRateSuggested)
+                            {
+                                @*
+                                    Whose number it is, said out loud: a third party's claim about the fee market,
+                                    capped so a broken or hostile explorer cannot make the most expensive exit the
+                                    default.
+                                *@
+                                <span class="d-block mt-1" id="SparkExitFeeRateSuggested">
+                                    Pre-filled with the block explorer's half-hour estimate, capped at
+                                    @SparkExitFundingExplorer.MaxRecommendedFeeRateSatPerVbyte.ToString("N0") sat/vB.
+                                    It is a suggestion, not a check — look at the mempool yourself before quoting.
+                                </span>
+                            }
                         </div>
                     </div>
                 </div>

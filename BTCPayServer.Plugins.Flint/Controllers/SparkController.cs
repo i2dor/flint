@@ -1416,9 +1416,18 @@ public class SparkController : Controller
     /// be reached" would otherwise have to go looking for a settings screen that does not exist. A blank value
     /// clears the override; whether the string is an acceptable URL is the service's judgement, not this
     /// action's.
+    /// <para>
+    /// <b>Server administrators only, on top of the store permission.</b> The URL is not a store preference so
+    /// much as an instruction to this server to make HTTP requests to a host of the setter's choosing — on every
+    /// view of the exit page, by anyone who can view the store — and to relay what came back into the page. For
+    /// a store administrator on a shared server that is a blind request forger against the server's own network:
+    /// its LAN, its loopback services, whatever a cloud host exposes. The server's administrator is the one
+    /// person for whom pointing it at an internal esplora is a legitimate choice, so the setting is theirs.
+    /// </para>
     /// </remarks>
     [HttpPost("exit/explorer")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyServerSettings)]
     public async Task<IActionResult> SetExitExplorer(
         [FromRoute] string storeId,
         string? esploraApiUrl,
@@ -1525,6 +1534,7 @@ public class SparkController : Controller
             // quote at rather than a field they have to fill in blind, and either way they can type another one.
             model.FeeRateSatPerVbyte = page.RecommendedFeeRateSatPerVbyte
                                        ?? SparkUnilateralExitService.DefaultFeeRateSatPerVbyte;
+            model.FeeRateSuggested = page.RecommendedFeeRateSatPerVbyte is not null;
             return model;
         }
 

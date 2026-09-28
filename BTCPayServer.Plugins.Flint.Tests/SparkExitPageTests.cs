@@ -638,6 +638,49 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public void Only_a_server_administrator_can_point_the_server_at_an_explorer()
+    {
+        // The override is an instruction to this server to send requests to a host of the setter's choosing on
+        // every view of the page. A store administrator on a shared server must not be able to aim it at the
+        // server's own network, so the action demands the server permission on top of the store one...
+        var policies = typeof(SparkController)
+            .GetMethod(nameof(SparkController.SetExitExplorer))!
+            .GetCustomAttributes(typeof(Microsoft.AspNetCore.Authorization.AuthorizeAttribute), inherit: true)
+            .Cast<Microsoft.AspNetCore.Authorization.AuthorizeAttribute>()
+            .Select(attribute => attribute.Policy)
+            .ToList();
+        Assert.Contains(BTCPayServer.Client.Policies.CanModifyServerSettings, policies);
+        Assert.Contains(BTCPayServer.Client.Policies.CanModifyStoreSettings, policies);
+
+        // ...and the page shows the form only to those who hold it, and what is set to everyone else.
+        var view = ExitTemplate();
+        Assert.Contains("permission=\"@Policies.CanModifyServerSettings\" id=\"SparkExitExplorerForm\"", view);
+        Assert.Contains("not-permission=\"@Policies.CanModifyServerSettings\"", view);
+    }
+
+    [Fact]
+    public async Task A_recommended_rate_is_labelled_as_the_explorer_s_suggestion()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService
+        {
+            Page = Page(disclosureAcknowledged: true, recommendedFeeRateSatPerVbyte: 9)
+        };
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        var model = await RenderExit(h);
+
+        Assert.Equal(9, model.FeeRateSatPerVbyte);
+        Assert.True(model.FeeRateSuggested);
+        Assert.Contains("id=\"SparkExitFeeRateSuggested\"", ExitTemplate());
+
+        exit.Page = Page(disclosureAcknowledged: true);
+        var fallback = await RenderExit(h);
+        Assert.False(fallback.FeeRateSuggested);
+    }
+
+    [Fact]
     public async Task A_fee_bump_reaches_the_service_with_its_rate()
     {
         using var gate = FeatureGate(enabled: true);

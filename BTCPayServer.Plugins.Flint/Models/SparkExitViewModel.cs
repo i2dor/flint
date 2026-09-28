@@ -206,6 +206,13 @@ public class SparkExitViewModel
     [Display(Name = "Fee rate")]
     public long FeeRateSatPerVbyte { get; set; }
 
+    /// <summary>
+    /// True when <see cref="FeeRateSatPerVbyte"/> was pre-filled from the explorer's recommendation rather than
+    /// the plugin's own floor, so the form can say whose number it is. Never set from a post.
+    /// </summary>
+    [BindNever]
+    public bool FeeRateSuggested { get; set; }
+
     /// <summary>Where the recovered coins are swept once the tree has been unrolled.</summary>
     /// <remarks>
     /// Baked into the signed sweep transaction, so it cannot be changed after the build — which is why the

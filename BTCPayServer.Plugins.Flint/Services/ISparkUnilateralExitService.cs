@@ -181,8 +181,14 @@ public interface ISparkUnilateralExitService
     /// <summary>
     /// Stores the explorer override used for funding discovery. Null or blank clears it. This is the
     /// feature's one piece of real configuration, so it is settable from the page that reports it
-    /// missing; validation (absolute http/https URL) is here, not in the controller.
+    /// missing; validation (an absolute http/https base URL with no credentials, query or fragment, and not a
+    /// link-local, unspecified or multicast address) is here, not in the controller.
     /// </summary>
+    /// <remarks>
+    /// Who may call it is the one guard this service cannot hold, because it does not see the caller: the value
+    /// makes the server send requests to a host of the setter's choosing on every page view, so the controller
+    /// restricts it to server administrators. Anything else that calls this must do the same.
+    /// </remarks>
     Task<UnilateralExitOpResult> SetExplorerUrlAsync(string storeId, string? esploraApiUrl, CancellationToken cancellationToken = default);
 }
 

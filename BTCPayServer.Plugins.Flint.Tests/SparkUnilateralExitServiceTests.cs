@@ -2677,11 +2677,12 @@ public class SparkUnilateralExitServiceTests
     /// The half-hour estimate and not the fastest rate on offer, because this one number is paid by every
     /// transaction in a chain of dozens: pricing all of them at the panic rate overpays on each, and pricing them at
     /// a floor risks the failure this flow cannot recover from — a half-broadcast exit whose fan-out is already
-    /// spent. The ceiling matters from the other side: a fee spike must not produce a rate the quote form's own
-    /// bounds refuse, which would show an operator a number that cannot be submitted.
+    /// spent. The ceiling matters from the other side, and it is the suggestion's own rather than the form's: the
+    /// recommendation is a third party's claim, and an explorer answering 900 — broken or hostile — must not make
+    /// the most expensive exit the form accepts the default in front of an operator about to fund it.
     /// </remarks>
     [Fact]
-    public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_form_bounds()
+    public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_suggestion_cap()
     {
         using var harness = Harness.Create();
         harness.ExplorerBody(
@@ -2703,9 +2704,86 @@ public class SparkUnilateralExitServiceTests
             """{"fastestFee":4000,"halfHourFee":900,"hourFee":800,"economyFee":700,"minimumFee":600}""");
 
         Assert.Equal(
-            SparkUnilateralExitService.MaxFeeRateSatPerVbyte,
+            SparkExitFundingExplorer.MaxRecommendedFeeRateSatPerVbyte,
             await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
                 mainnet: true, new UnilateralExitSettings(), Ct));
+        Assert.True(
+            SparkExitFundingExplorer.MaxRecommendedFeeRateSatPerVbyte < SparkUnilateralExitService.MaxFeeRateSatPerVbyte);
+    }
+
+    /// <summary>
+    /// An explorer base URL may be a scheme, a host, a port and a path — and nothing that would carry a secret
+    /// into logs, reshape the request paths, or aim the server at its own cloud metadata service.
+    /// </summary>
+    /// <remarks>
+    /// The page asks this host on every view by anyone who can view the store, so the setting is a standing
+    /// instruction to the server. Loopback and private addresses stay allowed — a self-hosted esplora beside the
+    /// server is the choice the override exists for, and only a server administrator can set it — while
+    /// link-local, unspecified and multicast literals are never an explorer on any network.
+    /// </remarks>
+    [Theory]
+    [InlineData("https://user:secret@esplora.example/api", "user name or password")]
+    [InlineData("https://esplora.example/api?key=abc", "query string")]
+    [InlineData("https://esplora.example/api#frag", "query string or a fragment")]
+    [InlineData("http://169.254.169.254/latest", "link-local")]
+    [InlineData("http://[fe80::1]/api", "link-local")]
+    [InlineData("http://0.0.0.0:3002/api", "link-local")]
+    [InlineData("http://224.0.0.1/api", "link-local")]
+    public void An_explorer_url_that_is_never_an_explorer_is_refused(string candidate, string expected)
+    {
+        Assert.False(SparkExitFundingExplorer.TryNormaliseApiUrl(candidate, out var normalised, out var error));
+        Assert.Null(normalised);
+        Assert.Contains(expected, error);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:3002/api/")]
+    [InlineData("http://127.0.0.1:3002/api")]
+    [InlineData("http://10.21.21.26:3006/api")]
+    [InlineData("http://esplora.local/api")]
+    [InlineData("https://mempool.space/api")]
+    public void A_self_hosted_or_public_explorer_is_accepted(string candidate)
+    {
+        Assert.True(SparkExitFundingExplorer.TryNormaliseApiUrl(candidate, out var normalised, out var error));
+        Assert.Null(error);
+        Assert.False(normalised!.EndsWith('/'));
+    }
+
+    /// <summary>
+    /// A failed lookup names neither the full URL nor anything the HTTP stack said about it — not in the log,
+    /// and not in the refusal the page and the record carry.
+    /// </summary>
+    /// <remarks>
+    /// An esplora path can carry an access token, and a handler's exception message can carry the host, the
+    /// resolved address and the whole request URL. The banner and the record's last error are read by anyone
+    /// who can view the store's settings, and the log by whoever reads the server's logs.
+    /// </remarks>
+    [Fact]
+    public async Task A_failed_lookup_keeps_the_explorer_path_and_the_handler_s_words_out_of_logs_and_errors()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true, esploraApiUrl: "https://esplora.example/api/SECRET-TOKEN");
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(leafIds: ["leaf-a"]);
+        harness.ExplorerOffline();
+
+        var logger = new CapturingLogger<SparkExitFundingExplorer>();
+        var explorer = new SparkExitFundingExplorer(harness.ClientFactory, harness.Time, logger);
+        var lookup = await explorer.ListConfirmedAsync(
+            "https://esplora.example/api/SECRET-TOKEN", FundingAddress, "02" + new string('a', 64), Ct);
+
+        Assert.Null(lookup.Utxos);
+        Assert.DoesNotContain("SECRET-TOKEN", lookup.Error);
+        Assert.DoesNotContain("no route to host", lookup.Error);
+        Assert.NotEmpty(logger.Lines);
+        Assert.DoesNotContain("SECRET-TOKEN", logger.AllText);
+        Assert.DoesNotContain("no route to host", logger.AllText);
+        Assert.Contains("https://esplora.example", logger.AllText);
+
+        var build = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.False(build.Success);
+        Assert.DoesNotContain("SECRET-TOKEN", build.Error);
+        Assert.DoesNotContain("SECRET-TOKEN", harness.Records.Records[record.Id].LastError);
     }
 
     /// <summary>
@@ -2901,8 +2979,9 @@ public class SparkUnilateralExitServiceTests
             Runtime.Clients[StoreId] = Sdk;
 
             Time = new StubTimeProvider(Now);
+            ClientFactory = new ExplorerClientFactory(_handler);
             ExplorerClient = new SparkExitFundingExplorer(
-                new ExplorerClientFactory(_handler),
+                ClientFactory,
                 Time,
                 NullLogger<SparkExitFundingExplorer>.Instance);
 
@@ -2933,6 +3012,9 @@ public class SparkUnilateralExitServiceTests
         /// service in the way — and so a test can tell a fetch the service made from one it did not.
         /// </summary>
         public SparkExitFundingExplorer ExplorerClient { get; }
+
+        /// <summary>The HTTP client factory behind <see cref="ExplorerClient"/>, for a second explorer instance.</summary>
+        public IHttpClientFactory ClientFactory { get; }
 
         public FakeSparkSdkClient Sdk { get; } = new();
 

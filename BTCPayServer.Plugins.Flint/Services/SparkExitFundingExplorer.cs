@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -141,6 +143,22 @@ public sealed class SparkExitFundingExplorer
     /// </remarks>
     public static readonly TimeSpan RecommendedFeeRateTtl = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// The highest rate the quote form will be pre-filled with from an explorer's recommendation, in sat/vB.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Lower than <see cref="SparkUnilateralExitService.MaxFeeRateSatPerVbyte"/> on purpose. That bound is a
+    /// backstop against a typo; this one is about who chose the number. A recommendation is a third party's
+    /// claim, and the rate multiplies across every transaction in the tree and into the funding requirement, so
+    /// an explorer that answers 500 — broken, or hostile — would otherwise put the most expensive exit the form
+    /// accepts in front of an operator as the default. One hundred is above every half-hour rate outside a
+    /// genuine fee spike; in one, the operator types the higher number themselves, and the form says the value
+    /// is a suggestion.
+    /// </para>
+    /// </remarks>
+    public const long MaxRecommendedFeeRateSatPerVbyte = 100;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         // esplora spells everything lower case; being insensitive also survives an instance that does not.
@@ -254,10 +272,68 @@ public sealed class SparkExitFundingExplorer
             return false;
         }
 
+        // A base URL is a scheme, a host, a port and a path, and nothing else is ever needed to reach an esplora
+        // API. Credentials embedded in it would be written into every log line and every request that names it,
+        // and a query or fragment would be concatenated into the middle of the paths built below — so each is
+        // refused rather than carried.
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            error = "it carries a user name or password, which this setting does not store";
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+        {
+            error = "it has a query string or a fragment; give only the API's base address";
+            return false;
+        }
+
+        // Link-local, unspecified and multicast addresses are never an esplora API, and link-local is where cloud
+        // metadata services answer (169.254.169.254). Refused on every network, because the
+        // page asks this host on every view — an override pointing there turns the exit page into a probe of the
+        // server's own surroundings. Loopback and private ranges stay allowed: a self-hosted esplora on the same
+        // machine or LAN is exactly the privacy-preserving choice the override exists for, and only a server
+        // administrator can set it (see SparkController.SetExitExplorer). A name that resolves to such an address
+        // is not caught here; that needs a connect-time check in the HTTP handler.
+        if (IPAddress.TryParse(uri.DnsSafeHost, out var literal) && IsNeverAnExplorer(literal))
+        {
+            error = "it points at a link-local, unspecified or multicast address, which is never a block explorer";
+            return false;
+        }
+
         normalised = trimmed;
         error = null;
         return true;
     }
+
+    private static bool IsNeverAnExplorer(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+            address = address.MapToIPv4();
+
+        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+            return true;
+
+        if (address.AddressFamily is AddressFamily.InterNetworkV6)
+            return address.IsIPv6LinkLocal || address.IsIPv6Multicast;
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 169 && bytes[1] == 254   // link-local, including the metadata service
+               || bytes[0] >= 224;                  // multicast and reserved
+    }
+
+    /// <summary>
+    /// An explorer URL as it may be written to a log: scheme, host and port, and nothing after.
+    /// </summary>
+    /// <remarks>
+    /// The path of a self-hosted or commercial esplora can carry an access token (<c>/api/&lt;key&gt;</c>), and a
+    /// log is read by more people than the settings page. The host is kept because it is what an operator needs
+    /// to recognise which explorer failed.
+    /// </remarks>
+    internal static string RedactForLog(string baseUrl) =>
+        Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+            ? uri.GetLeftPart(UriPartial.Authority) + (uri.AbsolutePath is "/" or "" ? string.Empty : "/…")
+            : "(unparseable explorer address)";
 
     /// <summary>
     /// Lists the confirmed outputs on <paramref name="address"/>, tagged with the public key that spends them.
@@ -464,15 +540,17 @@ public sealed class SparkExitFundingExplorer
             if (rate is null or <= 0)
             {
                 _logger.LogWarning(
-                    "The block explorer at {Url} reported no usable half-hour fee rate", baseUrl);
+                    "The block explorer at {Url} reported no usable half-hour fee rate", RedactForLog(baseUrl));
                 return null;
             }
 
             // Only the ceiling is ever reached: anything under the floor is zero or negative, refused just above.
+            // The ceiling is the suggestion's own, well under what the form accepts: see
+            // MaxRecommendedFeeRateSatPerVbyte.
             return Math.Clamp(
                 rate.Value,
                 SparkUnilateralExitService.MinFeeRateSatPerVbyte,
-                SparkUnilateralExitService.MaxFeeRateSatPerVbyte);
+                MaxRecommendedFeeRateSatPerVbyte);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -481,7 +559,8 @@ public sealed class SparkExitFundingExplorer
         catch (Exception ex)
         {
             // Warning rather than error: nothing is broken by this, and the page still offers a rate to quote at.
-            _logger.LogWarning(ex, "Could not read a recommended fee rate from {Url}", baseUrl);
+            _logger.LogWarning(
+                "Could not read a recommended fee rate from {Url} ({Reason})", RedactForLog(baseUrl), Describe(ex));
 
             return null;
         }
@@ -545,7 +624,7 @@ public sealed class SparkExitFundingExplorer
                 {
                     _logger.LogWarning(
                         "Exit funding lookup for {Address} skipped an unusable output reported by {Url}",
-                        address, baseUrl);
+                        address, RedactForLog(baseUrl));
                     continue;
                 }
 
@@ -562,8 +641,11 @@ public sealed class SparkExitFundingExplorer
         {
             // Warning rather than error: nothing is broken by this, and the two surfaces above both have a
             // sensible "unknown" to render.
-            _logger.LogWarning(ex,
-                "Could not read the exit funding address {Address} from {Url}", address, baseUrl);
+            // The exception is described rather than attached: its message and stack can name the full request URL,
+            // which is exactly what the redaction above keeps out of the log.
+            _logger.LogWarning(
+                "Could not read the exit funding address {Address} from {Url} ({Reason})",
+                address, RedactForLog(baseUrl), Describe(ex));
 
             return (null,
                 "The block explorer could not be read, so it is not known what is on the exit funding address "
@@ -593,10 +675,7 @@ public sealed class SparkExitFundingExplorer
                 break;
 
             if (collected.Length + read > MaxResponseBytes)
-            {
-                throw new InvalidOperationException(
-                    "the explorer's answer was larger than this plugin will read");
-            }
+                throw new InvalidDataException(ResponseTooLarge);
 
             collected.Write(chunk, 0, read);
         }
@@ -604,6 +683,17 @@ public sealed class SparkExitFundingExplorer
         return collected.ToArray();
     }
 
+    private const string ResponseTooLarge = "the explorer's answer was larger than this plugin will read";
+
+    /// <summary>
+    /// A lookup failure in words fit for the banner and the record's last error.
+    /// </summary>
+    /// <remarks>
+    /// Every case is this class's own sentence; nothing passes an exception's message through. A handler's message
+    /// can name the host, the resolved address and the full request URL — a token in its path included — and the
+    /// banner and <see cref="Data.UnilateralExitRecord.LastError"/> are read by anyone who can view the store's
+    /// settings, which is a wider audience than whoever configured the explorer.
+    /// </remarks>
     private static string Describe(Exception exception) => exception switch
     {
         OperationCanceledException => "the explorer did not answer in time",
@@ -611,7 +701,8 @@ public sealed class SparkExitFundingExplorer
             ? string.Format(CultureInfo.InvariantCulture, "the explorer answered {0:D}", (int)status)
             : "the explorer could not be reached",
         JsonException => "the explorer's answer was not in the expected format",
-        _ => exception.Message
+        InvalidDataException => ResponseTooLarge,
+        _ => "the explorer's answer could not be used"
     };
 
     /// <summary>
