@@ -175,7 +175,12 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// The gross value of the selected leaves. <b>Fees are not netted out of it</b>, so a caller deciding whether
 /// an exit is worth doing must compare this against <paramref name="TotalFeeSat"/> itself.
 /// </param>
-/// <param name="TotalFeeSat">Every on-chain fee the exit will pay, fan-out included.</param>
+/// <param name="TotalFeeSat">
+/// Every on-chain fee the exit will pay, fan-out included — and paid from two places. The fan-out and the CPFP
+/// children are paid by the funding, the final sweep by the recovered value, so what arrives is
+/// <paramref name="RecoverableValueSat"/> less the sweep's fee plus whatever funding was not spent;
+/// recoverable minus this total counts the funding-paid fees twice.
+/// </param>
 /// <param name="SingleUtxoFundingSat">
 /// The amount that must sit on the funding address as <b>one</b> UTXO. This is the number an operator funds
 /// against: the plugin spends a single P2WPKH output, so two outputs each half this size do not qualify.

@@ -600,6 +600,20 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public void The_page_says_where_the_fees_come_from_and_what_comes_back()
+    {
+        // The SDK's own arithmetic: the fan-out and CPFP fees come from the funding, only the sweep's fee comes
+        // out of the recovered value, unspent funding is swept to the destination, and funding for an exit that
+        // is never broadcast is not spent at all. The page used to say the opposite of each.
+        var view = ExitTemplate();
+
+        Assert.DoesNotContain("Gross, before the fees below come out of it", view);
+        Assert.DoesNotContain("spent whether or not the exit completes", view);
+        Assert.Contains("only the final", view);
+        Assert.Contains("Funding for an exit you never broadcast is not spent", view);
+    }
+
+    [Fact]
     public void The_page_does_not_claim_a_check_works_with_the_wallet_stopped()
     {
         // The SDK's check reads only the chain, but it is made through the running wallet: there is no

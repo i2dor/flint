@@ -256,8 +256,9 @@ public enum UnilateralExitStatus
     Built = 1,
 
     /// <summary>
-    /// The operator has confirmed they are done with this exit. Terminal, and recorded on their word rather than
-    /// observed on-chain: Phase 0 watches no chain, so nothing here can verify a broadcast.
+    /// Done with. Terminal. Normally recorded because Spark's check reported every transaction, the sweep
+    /// included, in a block; the operator can also record it on their own word when a check cannot answer.
+    /// Nothing watches the chain between presses, so it is never set on its own.
     /// </summary>
     Completed = 2,
 

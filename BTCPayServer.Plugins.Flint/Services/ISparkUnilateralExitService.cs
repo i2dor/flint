@@ -21,8 +21,10 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// <b>Nothing here broadcasts.</b> Phase 0 ends at a signed, ordered transaction set persisted on the
 /// <see cref="UnilateralExitRecord"/>; the operator broadcasts each package themselves (fan-out first
 /// and alone, then tree-node packages in <c>depends_on</c> order waiting for confirmation between,
-/// refunds after their CSV timelocks, sweep last and alone). The SDK in use (0.22.0) still needs the
-/// operators reachable to prepare an exit; exit-from-local-state arrives with a later SDK bump.
+/// refunds after their CSV timelocks, sweep last and alone). Since SDK 0.25 quoting and building read each
+/// leaf's pre-signed chain from local storage, so neither needs the operators reachable — only a leaf whose
+/// chain was collected while they still were (or restored from an exit-state backup) can be exited, and
+/// preparing still makes a best-effort refresh from them first, which is why its calls carry a deadline.
 /// </para>
 /// <para>
 /// One exit at a time per store: a store with an active record (awaiting funding or built) refuses a

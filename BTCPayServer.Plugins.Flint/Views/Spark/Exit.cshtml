@@ -167,8 +167,12 @@
                 </p>
                 <p>
                     <strong>You need your own Bitcoin, on-chain, first.</strong> The exit tree pays no fees of
-                    its own; you fund it from a separate on-chain UTXO before anything can be built, and that
-                    money is spent whether or not the exit completes.
+                    its own; you fund it from a separate on-chain UTXO before anything can be built. Every
+                    transaction you broadcast spends part of that funding on its fee, and that part is gone
+                    whether or not the exit completes. Funding for an exit you never broadcast is not spent —
+                    it stays on the funding address, recoverable from this store's recovery phrase — and
+                    whatever a finished exit did not spend on fees is swept to your destination with the
+                    recovered coins.
                 </p>
                 <p>
                     <strong>It takes days, not minutes.</strong> Each level of the tree carries a CSV timelock,
@@ -338,13 +342,23 @@
                         <td>
                             @record.RecoverableValueSat.ToString("N0") sats
                             <div class="form-text">
-                                Gross, before the fees below come out of it.
+                                The value of the leaves being exited. Most of the fee below — the fan-out and the
+                                fee-bumping children — is paid from your funding, not from this; only the final
+                                sweep's own fee comes out of it. What arrives at the destination is this, less the
+                                sweep's fee, plus whatever funding the exit did not spend.
                             </div>
                         </td>
                     </tr>
                     <tr>
                         <th>Total fee</th>
-                        <td>@record.TotalFeeSat.ToString("N0") sats at @record.FeeRateSatPerVbyte.ToString("N0") sat/vB</td>
+                        <td>
+                            @record.TotalFeeSat.ToString("N0") sats at @record.FeeRateSatPerVbyte.ToString("N0") sat/vB
+                            <div class="form-text">
+                                Everything the exit pays miners, across your funding and the recovered value
+                                together. It is not taken from the recoverable amount twice: recoverable minus this
+                                is not what arrives.
+                            </div>
+                        </td>
                     </tr>
                     <tr>
                         <th>Funding required</th>
@@ -413,7 +427,9 @@
                 <p>
                     Send <strong>@record.SingleUtxoFundingSat.ToString("N0") sats</strong> to the address below as
                     <strong>one single output</strong>, from any wallet you control. This is your own Bitcoin
-                    paying the exit's on-chain fees; it is not part of the balance being recovered.
+                    paying the exit's on-chain fees; it is not part of the balance being recovered. The amount
+                    carries some headroom, and whatever the exit does not spend on fees is swept to your
+                    destination at the end together with the recovered coins.
                 </p>
                 <div class="input-group mb-2">
                     <input id="SparkExitFundingAddress" type="text" class="form-control font-monospace"
@@ -956,10 +972,10 @@
                 </div>
 
                 @*
-                    The exit's own ending. Nothing in Phase 0 watches the chain, so the plugin cannot notice that
-                    the sweep confirmed — without this button the only way a finished exit leaves the active state
-                    is "abandon", and telling a merchant to abandon the thing that just worked is how a page
-                    teaches them to distrust it.
+                    The exit's own ending. Nothing watches the chain between presses, so the plugin does not notice
+                    on its own that the sweep confirmed — without this button the only way a finished exit leaves
+                    the active state is "abandon", and telling a merchant to abandon the thing that just worked is
+                    how a page teaches them to distrust it. The button asks Spark's check first.
                 *@
                 <div permission="@Policies.CanModifyStoreSettings">
                     <h3 class="mt-5 mb-3">When it is done</h3>
@@ -1002,8 +1018,9 @@
                         <div class="form-text">
                             Frees this store to quote a new exit. <strong>It cancels nothing.</strong> Any
                             transaction you have already broadcast stays valid and will still confirm, and the
-                            funding you sent is not returned — it stays on the funding address, spendable from
-                            this store's recovery phrase at the derivation path shown above.
+                            funding you sent is not returned — whatever part of it the broadcast transactions have
+                            not spent on fees stays on the funding address, spendable from this store's recovery
+                            phrase at the derivation path shown above.
                             @if (Model.TransactionsUnreadable)
                             {
                                 <span class="d-block mt-1">

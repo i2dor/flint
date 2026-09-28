@@ -487,10 +487,11 @@ public class StableBalanceSettings
 /// privacy or cost option, and the copy on the page says so.
 /// </para>
 /// <para>
-/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, on the pinned SDK
-/// (Breez.Sdk.Spark 0.22.0) preparing an exit <em>still requires the operators to be reachable</em>: the
-/// scenario a merchant most wants this for — operators gone — is the one it cannot serve until the SDK ships
-/// exit-from-local-state. Second, the tree transactions cannot pay their own fees, so the exit is funded by
+/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, an exit can only
+/// be built for leaves whose exit data is already on this server: since Breez.Sdk.Spark 0.25 quoting and building
+/// read each leaf's pre-signed chain from local storage, so they work with the operators unreachable — but that
+/// data is collected from the operators while they are still reachable, so a leaf never synced, or a server
+/// whose storage is lost with no exit-state backup, cannot be exited at all. Second, the tree transactions cannot pay their own fees, so the exit is funded by
 /// CPFP from an on-chain UTXO the operator has to send to a plugin-derived native-SegWit address first (see
 /// <see cref="Constants.UnilateralExitFundingAccount"/>); too little there and the build refuses. Third, the
 /// funds are not spendable when the transactions are built — they are spendable when the last timelock
