@@ -552,6 +552,20 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public void An_active_exit_says_what_can_invalidate_it()
+    {
+        // The exit is pinned to named leaves and nothing outside Flint's own sweep can be paused, so the page has
+        // to say out loud which other things spend leaves — otherwise the first an operator hears of it is a
+        // refused build days into the exit.
+        var view = ExitTemplate();
+
+        Assert.Contains("id=\"SparkExitLeavesAtRisk\"", view);
+        Assert.Contains("pauses its\n                own sweeps", view.Replace("\r\n", "\n"));
+        Assert.Contains("Lightning payments", view);
+        Assert.Contains("leaf optimisation", view);
+    }
+
+    [Fact]
     public void The_rebuild_form_offers_a_fee_bump_that_can_only_go_up()
     {
         // The SDK raises an exit's fee by re-quoting at a higher rate and building again, so the rebuild has to

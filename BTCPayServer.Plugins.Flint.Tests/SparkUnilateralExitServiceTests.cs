@@ -1104,8 +1104,9 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal(4, first.Length);
         Assert.Contains(first, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
 
-        // leaf-b's branch has confirmed on chain, so the next build has nothing to do for it.
-        harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
+        // leaf-b's exit is over on chain — its refund was swept — so the next build has nothing to do for it and
+        // the SDK says so, which is what separates this from a leaf that went missing.
+        harness.Sdk.ExitFinishedLeafIds.Add("leaf-b");
 
         Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
 
@@ -1117,6 +1118,97 @@ public class SparkUnilateralExitServiceTests
         // The transaction the rebuild dropped is gone from the row, not left behind as a step to broadcast.
         Assert.NotEqual(4, second.Length);
         Assert.Contains(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-a"));
+    }
+
+    #endregion
+
+    #region The pinned leaves
+
+    /// <summary>
+    /// A build whose re-quote no longer covers every pinned leaf refuses, rather than building a smaller exit
+    /// out of the same funding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK skips a named leaf that is missing from its local storage without a word
+    /// (<c>load_exit_tree_nodes</c>: "cannot exit it"), and nothing freezes the leaves an exit is pinned to: a
+    /// Lightning payment, a payout, a Stable Balance conversion or the SDK's own leaf optimisation can spend or
+    /// reshape one between the quote and the build. The quote that comes back is then a smaller exit, and a
+    /// build that accepted any subset whose value beat its fee would commit the operator's funding to
+    /// recovering less than they were shown.
+    /// </para>
+    /// <para>
+    /// Refused before funding is looked at, so nothing is committed; the funding key path is named because the
+    /// operator's way out is to abandon and recover what they sent.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_build_refuses_when_a_pinned_leaf_has_gone_missing()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("1 of the 2 leaves", result.Error);
+        Assert.Contains("m/84'/1'/4607060'/0/0", result.Error);
+        Assert.Empty(harness.Sdk.ExitBuildCalls);
+        Assert.Null(harness.Records.Records[record.Id].FundingUtxosJson);
+    }
+
+    /// <summary>
+    /// The same refusal holds against the quote the build itself commits to, which can differ from the one just
+    /// taken.
+    /// </summary>
+    [Fact]
+    public async Task The_build_s_own_quote_is_held_to_the_pinned_leaves_too()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        // leaf-b is spent between the step-one re-quote and the quote the build commits to.
+        var quotes = 0;
+        harness.Sdk.WhenExitQuoted = () =>
+        {
+            if (++quotes == 1)
+                harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
+        };
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("1 of the 2 leaves", result.Error);
+        // The veto refused it: the build was reached, and signed nothing.
+        var call = Assert.Single(harness.Sdk.ExitBuildCalls);
+        Assert.NotNull(call.Rejection);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, harness.Records.Records[record.Id].Status);
+    }
+
+    /// <summary>
+    /// A pinned leaf whose exit is over on-chain is the one legitimate absence, and an exit whose every leaf is
+    /// over says so instead of calling the leaves gone.
+    /// </summary>
+    [Fact]
+    public async Task Leaves_that_finished_on_chain_are_not_mistaken_for_missing_ones()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+
+        harness.Sdk.ExitFinishedLeafIds.Add("leaf-a");
+
+        var result = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Equal(SparkUnilateralExitService.AllLeavesFinished, result.Error);
+        Assert.NotEqual(SparkUnilateralExitService.LeavesGone, result.Error);
     }
 
     #endregion

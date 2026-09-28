@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace BTCPayServer.Plugins.Flint.Sdk;
 
@@ -192,6 +193,14 @@ public sealed record SparkExitBranchFunding(string LeafId, long FundingSat);
 /// matches what was asked for before it builds anything, because the built sweep is signed against whatever
 /// this says.
 /// </param>
+/// <param name="FinishedLeafIds">
+/// Leaves whose exit the chain shows as already over — their refund was swept, or their branch was taken by a
+/// spend the exit cannot continue from — read off the SDK's <c>exit_chain_state</c>. The SDK leaves such a leaf
+/// out of <see cref="Leaves"/> even when it was named, so this is what tells a leaf that is <em>done</em> apart
+/// from a leaf that is <em>gone</em>: the SDK also silently skips a named leaf missing from its local storage
+/// (spent by a payment, reshaped by leaf optimisation), and a caller resuming a pinned exit has to refuse that
+/// case rather than build a smaller exit than the one that was funded. Null reads as none.
+/// </param>
 public sealed record SparkExitQuote(
     long RecoverableValueSat,
     long TotalFeeSat,
@@ -200,10 +209,25 @@ public sealed record SparkExitQuote(
     long FanoutFeeSat,
     IReadOnlyList<SparkExitBranchFunding> PerBranchFunding,
     ulong FeeRateSatPerVbyte,
-    string Destination)
+    string Destination,
+    IReadOnlyList<string>? FinishedLeafIds = null)
 {
     /// <summary>True when the quote selected nothing — see the remarks on this type.</summary>
     public bool IsEmpty => Leaves.Count == 0;
+
+    /// <summary>
+    /// The pinned leaves this quote no longer covers and the chain does not show as finished, in the order given.
+    /// </summary>
+    /// <remarks>
+    /// Non-empty means the quote describes a smaller exit than the one pinned — the leaves went missing from
+    /// the wallet's storage or became unexitable — and a resume must not quietly build it.
+    /// </remarks>
+    public IReadOnlyList<string> UncoveredOf(IReadOnlyList<string> pinned)
+    {
+        var covered = new HashSet<string>(Leaves.Select(leaf => leaf.LeafId), StringComparer.Ordinal);
+        covered.UnionWith(FinishedLeafIds ?? []);
+        return pinned.Where(id => !covered.Contains(id)).ToList();
+    }
 }
 
 /// <summary>

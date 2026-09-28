@@ -1559,9 +1559,14 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         string destinationAddress,
         IReadOnlyList<string>? leafIds)
     {
-        var selected = leafIds is null || leafIds.Count == 0
-            ? ExitLeaves.ToList()
-            : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)).ToList();
+        // A leaf whose exit is over on-chain is dropped whether it was named or not, and reported back — the
+        // SDK's drop_finished_leaves. A named leaf that is simply not in ExitLeaves is dropped silently, which is
+        // the SDK's "not in local storage" skip and the case a resuming caller has to refuse.
+        var selected = (leafIds is null || leafIds.Count == 0
+                ? ExitLeaves
+                : ExitLeaves.Where(leaf => leafIds.Contains(leaf.LeafId)))
+            .Where(leaf => !ExitFinishedLeafIds.Contains(leaf.LeafId))
+            .ToList();
 
         return new SparkExitQuote(
             selected.Sum(leaf => leaf.ValueSat),
@@ -1573,8 +1578,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                 .Select(leaf => new SparkExitBranchFunding(leaf.LeafId, ExitSingleUtxoFundingSat / selected.Count))
                 .ToList(),
             feeRateSatPerVbyte,
-            destinationAddress);
+            destinationAddress,
+            ExitFinishedLeafIds.ToList());
     }
+
+    /// <summary>
+    /// Leaves the chain shows as finished — refund swept, or branch stopped — which every quote leaves out and
+    /// reports in <see cref="SparkExitQuote.FinishedLeafIds"/>, as the SDK's <c>exit_chain_state</c> does.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from removing a leaf from <see cref="ExitLeaves"/>, and the distinction is the point: a finished
+    /// leaf is a legitimate absence from a resumed quote, a missing one is a smaller exit than was funded.
+    /// </remarks>
+    public List<string> ExitFinishedLeafIds { get; } = [];
 
     public sealed record ExitQuoteCall(
         ulong FeeRateSatPerVbyte,

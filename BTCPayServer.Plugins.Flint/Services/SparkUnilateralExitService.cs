@@ -149,6 +149,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         + "there is nothing here to check against the chain. If its sweep has already confirmed, the exit is "
         + "finished and you can mark it completed. Otherwise build it again, which re-reads the chain.";
 
+    /// <summary>A re-quote found every pinned leaf's exit already over on-chain.</summary>
+    internal const string AllLeavesFinished =
+        "Every leaf this exit was pinned to has already finished on-chain — its refund was swept, or its branch can "
+        + "go no further — so there is nothing left to build. Check progress to confirm the sweep, then mark this "
+        + "exit completed.";
+
     internal const string BuiltButNotSaved =
         "The exit was built, but its signed transactions could not be saved, so they are lost. Nothing was "
         + "broadcast. Try again.";
@@ -1101,10 +1107,14 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     .ConfigureAwait(false);
             }
 
-            if (fresh.IsEmpty)
-            {
-                return await FailAsync(record, from, LeavesGone).ConfigureAwait(false);
-            }
+            // The pinned leaves have to still be the exit. The SDK skips a named leaf that is missing from its
+            // local storage without saying so — a payment, a sweep, a Stable Balance conversion or its own leaf
+            // optimisation can have spent or reshaped it since the quote — so a quote that covers fewer leaves
+            // than were pinned is a smaller exit than the one the operator funded, and building it would commit
+            // that funding to recovering less. Refused here, before any funding is looked at, so nothing is
+            // committed. A leaf the chain shows as finished is the one legitimate absence.
+            if (DescribeCoverage(record, fresh, leafIds) is { } coverage)
+                return await FailAsync(record, from, coverage).ConfigureAwait(false);
 
             if (fresh.RecoverableValueSat <= fresh.TotalFeeSat)
             {
@@ -1232,8 +1242,9 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                             // then persisted by the catch below.
                             committed = second;
 
-                            if (second.IsEmpty)
-                                return LeavesGone;
+                            // Again against the build's own quote: the tree can move between the two.
+                            if (DescribeCoverage(record, second, leafIds) is { } coverage)
+                                return coverage;
 
                             if (second.RecoverableValueSat <= second.TotalFeeSat)
                                 return DescribeUneconomic(second);
@@ -1494,6 +1505,40 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         {
             _running.TryRemove(storeId, out _);
         }
+    }
+
+    /// <summary>
+    /// Why a fresh quote is not the exit that was pinned, or null when it is.
+    /// </summary>
+    /// <remarks>
+    /// Three answers. Every pinned leaf is gone: <see cref="LeavesGone"/>. Some are: the exit has shrunk under the
+    /// operator, and building it would spend their funding on less than they were quoted for. None are missing but
+    /// nothing is left to build either: every leaf has finished on-chain, which is success, not a fault — the
+    /// words send the operator to confirm it rather than to abandon it.
+    /// </remarks>
+    private string? DescribeCoverage(
+        UnilateralExitRecord record,
+        SparkExitQuote quote,
+        IReadOnlyList<string> pinned)
+    {
+        var uncovered = quote.UncoveredOf(pinned);
+
+        if (uncovered.Count == 0)
+            return quote.IsEmpty ? AllLeavesFinished : null;
+
+        if (quote.IsEmpty && uncovered.Count == pinned.Count)
+            return LeavesGone;
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "{0:N0} of the {1:N0} leaves this exit was pinned to are no longer in this wallet's exit data — a "
+            + "payment, a sweep, a Stable Balance conversion or Spark's own leaf optimisation has spent or reshaped "
+            + "them since the quote — so building now would recover less than the exit you funded. Nothing was "
+            + "signed. Abandon this exit and quote a new one for what the wallet holds now; anything on the funding "
+            + "address is recoverable from this store's recovery phrase at {2}.",
+            uncovered.Count,
+            pinned.Count,
+            DescribeKeyPath(record) ?? "the exit's funding key path");
     }
 
     private static string DescribeUneconomic(SparkExitQuote quote) => string.Format(

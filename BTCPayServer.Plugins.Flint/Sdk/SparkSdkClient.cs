@@ -1287,7 +1287,34 @@ public sealed class SparkSdkClient : ISparkSdkClient
                     .Select(branch => new SparkExitBranchFunding(branch.leafId, ToLong(branch.fundingSat)))
                     .ToList(),
             prepared.feeRateSatPerVbyte,
-            prepared.destination);
+            prepared.destination,
+            MapFinishedLeafIds(prepared.exitChainState));
+    }
+
+    /// <summary>
+    /// The leaves the prepare's chain read shows as finished: a refund that was swept, or a branch the exit can
+    /// no longer continue.
+    /// </summary>
+    /// <remarks>
+    /// These are exactly the leaves the SDK drops from a quote even when they are named
+    /// (<c>drop_finished_leaves</c>), so they are what lets a caller tell "done" apart from "missing from local
+    /// storage" when a pinned leaf does not come back. Every level is null-tolerant: the binding's records are
+    /// reference types a future SDK may leave unset, and this runs on a request path.
+    /// </remarks>
+    internal static IReadOnlyList<string> MapFinishedLeafIds(ExitChainState? state)
+    {
+        if (state is null)
+            return [];
+
+        var swept = (state.refunds ?? [])
+            .Where(refund => refund?.state is ExitRefundState.Swept)
+            .Select(refund => refund.leafId);
+
+        return swept
+            .Concat(state.stoppedLeafIds ?? [])
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
     }
 
     private static IReadOnlyList<SparkExitLeaf> MapExitLeaves(UnilateralExitLeaf[]? leaves) =>

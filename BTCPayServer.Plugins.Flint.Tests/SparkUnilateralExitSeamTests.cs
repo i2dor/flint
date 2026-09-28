@@ -193,6 +193,52 @@ public class SparkUnilateralExitSeamTests
     }
 
     /// <remarks>
+    /// The SDK leaves a finished leaf out of a quote even when it is named, and it also leaves out — silently — a
+    /// named leaf missing from its local storage. The chain read is the only thing that tells the two apart, so
+    /// a leaf whose refund was swept and a leaf whose branch stopped must both come through as finished, and a
+    /// refund merely on-chain (the sweep still to come) must not.
+    /// </remarks>
+    [Fact]
+    public void A_quote_reports_which_leaves_the_chain_shows_as_finished()
+    {
+        var quote = SparkSdkClient.MapExitQuote(new PrepareUnilateralExitResponse(
+            leaves: [new UnilateralExitLeaf("leaf-live", 40_000)],
+            recoverableValueSat: 40_000,
+            totalFeeSat: 3_000,
+            cpfpFeeSat: 0,
+            fanoutFeeSat: 0,
+            sweepFeeSat: 0,
+            singleUtxoFundingSat: 4_200,
+            perBranchFunding: [],
+            feeRateSatPerVbyte: 7,
+            destination: Destination,
+            exitChainState: new ExitChainState(
+                [],
+                [
+                    new ExitRefund("leaf-swept", new ExitRefundState.Swept()),
+                    new ExitRefund("leaf-refunded", new ExitRefundState.OnChain("0200", 0, 39_000, 800_000))
+                ],
+                ["leaf-stopped"],
+                [],
+                [])));
+
+        Assert.Equal(["leaf-swept", "leaf-stopped"], quote.FinishedLeafIds);
+
+        // Pinned to all four plus one that simply is not there: only the missing one is uncovered. The refunded
+        // leaf is not finished and not in the quote, so it counts as uncovered too — its sweep is still ahead.
+        Assert.Equal(
+            ["leaf-refunded", "leaf-gone"],
+            quote.UncoveredOf(["leaf-live", "leaf-swept", "leaf-refunded", "leaf-stopped", "leaf-gone"]));
+    }
+
+    [Fact]
+    public void A_missing_chain_state_reads_as_nothing_finished()
+    {
+        Assert.Empty(SparkSdkClient.MapFinishedLeafIds(null));
+        Assert.Empty(SparkSdkClient.MapFinishedLeafIds(new ExitChainState([], [null!], null!, [], [])));
+    }
+
+    /// <remarks>
     /// The case a caller must be able to report as "nothing worth exiting at this fee rate" rather than as a
     /// failure: automatic selection legitimately comes back with nothing.
     /// </remarks>

@@ -285,6 +285,21 @@
                 </div>
             }
 
+            @*
+                What an active exit depends on, and what the plugin can and cannot keep from undoing it. The exit is
+                pinned to named leaves; anything that spends or reshapes one makes the next build refuse. Flint's
+                own sweep is paused (the engine refuses with its own recorded reason), and the rest is said
+                plainly because it cannot be paused from here.
+            *@
+            <div class="alert alert-warning" role="alert" id="SparkExitLeavesAtRisk">
+                <strong>While this exit is in progress, keep this store's balance still.</strong> Flint pauses its
+                own sweeps for this store — automatic and manual — because a sweep would spend the leaves this exit
+                is pinned to. It cannot pause everything: Lightning payments out of this wallet, payouts, Stable
+                Balance conversions and Spark's own background leaf optimisation keep running and can spend or
+                reshape those leaves. If that happens, building refuses rather than quietly building a smaller exit
+                from the same funding, and you will have to abandon this exit and quote a new one.
+            </div>
+
             <h3 class="mb-3">This exit</h3>
             <table class="table" id="SparkExitSummary">
                 <tbody>
