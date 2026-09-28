@@ -331,6 +331,21 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                                 storeId, declined);
                         }
                     }
+                    catch (Exception ex) when (SparkErrors.IsStorageFromNewerVersion(ex))
+                    {
+                        // Not a configuration problem, and the generic line below would say it is: the
+                        // storage was migrated by a newer SDK (a plugin downgrade), and nothing in the
+                        // store's settings can fix that. Said in plain words, with the directory, and
+                        // without the exception — its text is the SDK's own and adds nothing an operator
+                        // can act on.
+                        _logger.LogError(
+                            "Store {StoreId}: its Spark wallet storage at {StorageDir} was written by a newer "
+                            + "version of the Flint plugin (and its Spark SDK) than the one installed now, so "
+                            + "this version cannot open it. Install that version of the plugin or a newer one "
+                            + "to bring this store's Lightning payments back. The wallet's funds are not "
+                            + "affected, and its storage was left as it was",
+                            storeId, GetWorkDir(storeId));
+                    }
                     catch (Exception ex)
                     {
                         // Per-store and non-fatal: one broken store must not stop BTCPay from starting, and

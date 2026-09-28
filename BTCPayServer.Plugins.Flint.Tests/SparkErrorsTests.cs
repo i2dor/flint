@@ -114,4 +114,47 @@ public class SparkErrorsTests
         Assert.False(SparkErrors.IsNotFound(new SdkException.StorageException("@v1=Connection error")));
         Assert.False(SparkErrors.IsNotFound(new SdkException.SparkException("@v1=no rows")));
     }
+
+    /// <summary>
+    /// A downgrade's refusal to open storage a newer SDK migrated is described as exactly that.
+    /// </summary>
+    /// <remarks>
+    /// The raw text — the migration crate's variant name inside the storage layer's wrapping — is what an
+    /// operator saw before, beside a log line blaming the store's configuration. What they need instead is
+    /// what happened, what to install, and that the money is safe; all three are pinned, and the SDK's own
+    /// wording is pinned out.
+    /// </remarks>
+    [Fact]
+    public void Describe_explains_storage_written_by_a_newer_version_in_plain_words()
+    {
+        var refusal = new SdkException.StorageException(
+            "@v1=Underlying implementation error: rusqlite_migrate error: MigrationDefinition(DatabaseTooFarAhead)");
+
+        Assert.True(SparkErrors.IsStorageFromNewerVersion(refusal));
+
+        var described = SparkErrors.Describe(refusal);
+        Assert.Contains("newer version", described);
+        Assert.Contains("Install that version", described);
+        Assert.Contains("funds are not affected", described);
+        Assert.DoesNotContain("rusqlite", described);
+        Assert.DoesNotContain("DatabaseTooFarAhead", described);
+    }
+
+    /// <summary>
+    /// The marker is found whatever the SDK wraps it in, and nothing else is mistaken for it.
+    /// </summary>
+    [Fact]
+    public void IsStorageFromNewerVersion_matches_the_marker_in_any_wrapping_and_nothing_else()
+    {
+        Assert.True(SparkErrors.IsStorageFromNewerVersion(
+            new SdkException.Generic("@v1=rusqlite_migrate error: MigrationDefinition(DatabaseTooFarAhead)")));
+        Assert.True(SparkErrors.IsStorageFromNewerVersion(
+            new InvalidOperationException("connect failed",
+                new SdkException.StorageException("@v1=MigrationDefinition(DatabaseTooFarAhead)"))));
+
+        Assert.False(SparkErrors.IsStorageFromNewerVersion(
+            new SdkException.StorageException("@v1=Underlying implementation error: Query returned no rows")));
+        Assert.False(SparkErrors.IsStorageFromNewerVersion(
+            new InvalidOperationException("the SDK refused this seed")));
+    }
 }
