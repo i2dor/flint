@@ -363,12 +363,29 @@
                     <tr>
                         <th>Funding required</th>
                         <td>
-                            <strong>@record.SingleUtxoFundingSat.ToString("N0") sats in a single UTXO</strong>
-                            <div class="form-text">
-                                One output of at least this size. <strong>Two outputs adding up to it do not
-                                work</strong> — the fee-bumping transaction spends one outpoint, so a split
-                                deposit funds nothing.
-                            </div>
+                            @if (record.Status is UnilateralExitStatus.AwaitingFunding)
+                            {
+                                <strong>@record.SingleUtxoFundingSat.ToString("N0") sats in a single UTXO</strong>
+                                <div class="form-text">
+                                    One output of at least this size. <strong>Two outputs adding up to it do not
+                                    work</strong> for the first build — it is priced for, and spends, one funding
+                                    output, so a split deposit comes up short.
+                                </div>
+                            }
+                            else
+                            {
+                                @*
+                                    After a build the single-output rule no longer applies: a rebuild hands Spark
+                                    the funding already committed to follow, plus anything else on the address.
+                                *@
+                                <strong>Committed to this exit</strong>
+                                <div class="form-text">
+                                    The funding this set was built from. Building again hands it back to Spark,
+                                    which follows it to whatever the broadcast transactions turned it into, and adds
+                                    anything else on the funding address — so if a rebuild asks for more, a top-up
+                                    of any size counts.
+                                </div>
+                            }
                         </td>
                     </tr>
                     <tr>
