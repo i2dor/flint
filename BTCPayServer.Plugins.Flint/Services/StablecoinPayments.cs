@@ -128,10 +128,15 @@ public static class StablecoinPayments
     /// </remarks>
     public const int MaxQuotesPerInvoice = 10;
 
-    /// <summary>Unsettled quotes one store may hold inside <see cref="MatchWindow"/> before new ones are refused.</summary>
+    /// <summary>
+    /// Unsettled quotes one store may have on offer to payers (before <see cref="OfferedUntil"/>) before new ones are
+    /// refused.
+    /// </summary>
     /// <remarks>
     /// The server-wide bound on the polling above, and on the checkout endpoint being used to load somebody
-    /// else's provider through this server. Far above what a real store's customers produce in two days.
+    /// else's provider through this server. Far above what a real store's customers produce in an hour. Quotes past
+    /// their offer do not count: nobody is shown them, the SDK polls them only every ten minutes, and counting them
+    /// let an anonymous caller hold the cap for the whole two-day match window with one burst of quotes.
     /// </remarks>
     public const int MaxOpenQuotesPerStore = 500;
 

@@ -1061,6 +1061,12 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// </summary>
     public DateTimeOffset? ReceiveQuoteExpiresAt { get; set; }
 
+    /// <summary>
+    /// When set, the fingerprint every receive quote carries whatever it is asked for — a provider whose price and
+    /// fee did not move at all between quotes, for the service's give-up path.
+    /// </summary>
+    public (BigInteger Expected, BigInteger ServiceFee)? ReceiveFingerprint { get; set; }
+
     public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
 
     private int _receiveCount;
@@ -1103,10 +1109,22 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         var proportional = amount * ReceiveFeeBps / 10_000;
         var deposit = amount + fixedFee + proportional;
 
-        // Sats for the amount at the configured price, or USDB base units (6 dp) at par.
-        var expected = ReceiveLandsAsToken
-            ? amount * 1_000_000 / scale
-            : amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        // Sats for the amount at the configured price, floored to the sat; or USDB base units (6 dp) at par, floored
+        // to the cent as the provider floors a USDB estimate, with the sub-cent remainder counted in the quote's
+        // total fee as the provider's roundingFeeAmount is. Deterministic, as the real sizing is at a fixed rate: equal
+        // targets quote identical fingerprints, and a target a millionth apart differs only in that remainder.
+        BigInteger expected;
+        var rounding = BigInteger.Zero;
+        if (ReceiveLandsAsToken)
+        {
+            var usdb = amount * 1_000_000 / scale;
+            expected = usdb - usdb % 10_000;
+            rounding = (usdb - expected) * scale / 1_000_000;
+        }
+        else
+        {
+            expected = amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        }
 
         var address = route.Chain switch
         {
@@ -1115,6 +1133,10 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             _ => "0x" + index.ToString("x40", System.Globalization.CultureInfo.InvariantCulture)
         };
 
+        var serviceFee = fixedFee + proportional + rounding;
+        if (ReceiveFingerprint is { } fixedFingerprint)
+            (expected, serviceFee) = fixedFingerprint;
+
         return new SparkCrossChainReceiveQuote(
             route,
             address,
@@ -1122,7 +1144,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             expected,
             ReceiveLandsAsToken ? "USDB" : "BTC",
             ReceiveLandsAsToken ? Usdb.Value : null,
-            fixedFee + proportional,
+            serviceFee,
             route.Asset,
             ReceiveQuoteExpiresAt ?? DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
             address);

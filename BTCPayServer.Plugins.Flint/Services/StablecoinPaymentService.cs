@@ -61,8 +61,8 @@ public enum StablecoinReceiveOutcome
 /// <para>
 /// <b>Why every credit is by quote, never by invoice.</b> The provider pays into the one static Spark address of
 /// the wallet, so the arrival carries nothing but the quote-time data the provider row froze onto it. See
-/// <see cref="StablecoinQuoteMatcher"/> for the rules, and <see cref="StablecoinAmounts.UniqueAsk"/> for what keeps
-/// an exactly-paid quote attributable.
+/// <see cref="StablecoinQuoteMatcher"/> for the rules, and <see cref="QuoteAsync"/> for what keeps that data unique
+/// to one quote.
 /// </para>
 /// </remarks>
 public sealed class StablecoinPaymentService
@@ -304,9 +304,44 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
+    /// How many quotes one request asks the provider for, each with its target nudged, before telling the payer to
+    /// try again — see <see cref="QuoteAsync"/> on why a quote can need another.
+    /// </summary>
+    internal const int MaxFingerprintAttempts = 4;
+
+    /// <summary>
     /// A quote for paying <paramref name="invoiceId"/>'s <paramref name="paymentMethodId"/> prompt from
     /// <paramref name="chain"/>, shown on the prompt — reusing a live one for the same network and due.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every recorded quote has a fingerprint no other open quote on its route shares.</b> The fingerprint —
+    /// the quote's <c>expectedReceivedAmount</c> and <c>serviceFeeAmount</c> — is the only thing the arriving payment
+    /// carries that says which quote it paid (<see cref="StablecoinQuoteMatcher"/>). Equal dues on one route produce
+    /// equal fingerprints: landing as USDB every time, because the SDK's sizing is deterministic at dollar parity and
+    /// the estimate is floored to the cent; landing as sats whenever the provider's price and the SDK's fiat rate
+    /// have not moved between two quotes. So a quote whose fingerprint is taken is not recorded, and the provider is
+    /// asked again for a target nudged up. The quote that lost is never shown to anyone, so nothing is sent to its
+    /// address; the SDK polls its row for a day like any other unpaid quote.
+    /// </para>
+    /// <para>
+    /// <b>Why nudging the target works, and by how much.</b> The SDK sizes the deposit from the target, and the
+    /// provider's quote is exact-in: it forward-computes the estimate from that deposit, and its total fee includes
+    /// the sub-cent remainder the estimate was floored by (<c>service_fee_from_quote</c>). Between them the two
+    /// halves pin down the deposit, so any change in the deposit changes the fingerprint. A target a millionth of the
+    /// token higher is enough when the quote lands as USDB (the SDK rescales the target to USDB's six decimals); a
+    /// quote landing as sats needs a sat's worth, because the SDK converts the target to whole sats first. The first
+    /// attempt starts past the open quotes with the same due on the route — the twins it would most likely
+    /// collide with — so the common case costs one provider round trip and a few millionths of a dollar.
+    /// </para>
+    /// <para>
+    /// <b>The per-store gate covers the check and the write, never the provider.</b> Uniqueness is a read of the
+    /// open quotes followed by a write of the new one, and two requests interleaved there could both take the same
+    /// fingerprint. The provider call — up to <see cref="StablecoinPayments.QuoteDeadline"/> — happens outside it,
+    /// so one slow quote does not queue every payer at the store behind it; the fingerprint it produced is checked
+    /// against a fresh read once the gate is held, and a request that lost the race asks again.
+    /// </para>
+    /// </remarks>
     public async Task<StablecoinQuoteResult> QuoteAsync(
         string invoiceId,
         PaymentMethodId paymentMethodId,
@@ -341,66 +376,18 @@ public sealed class StablecoinPaymentService
         if (sdk is null)
             return StablecoinQuoteResult.Refused($"{asset.Symbol} payments are unavailable right now. Please pay another way.");
 
-        // One quote at a time per store: the uniqueness of every live ask on a route is decided by reading the
-        // open quotes and then writing a new one, and two quotes interleaved there could both take the same ask.
-        var gate = _storeGates.GetOrAdd(invoice.StoreId, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            return await QuoteLockedAsync(invoice, asset, network, sdk, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            gate.Release();
-        }
-    }
-
-    private async Task<StablecoinQuoteResult> QuoteLockedAsync(
-        StablecoinInvoice invoice,
-        StablecoinAsset asset,
-        StablecoinNetworkOption network,
-        ISparkSdkClient sdk,
-        CancellationToken cancellationToken)
-    {
         var now = _time.GetUtcNow();
-        var paymentMethodId = asset.PaymentMethodId;
-
         var existing = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
-        var reusable = existing.FirstOrDefault(quote =>
-            quote.PaymentMethodId == paymentMethodId.ToString()
-            && StablecoinPayments.Same(quote.Chain, network.Chain)
-            && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
-            && quote.SdkPaymentId is null
-            && quote.DueAmount == invoice.Due
-            && StablecoinPayments.OfferedUntil(quote.ExpiresAt) > now + ReuseMargin);
-        if (reusable is not null)
-        {
-            var shown = ToActiveQuote(reusable);
-            await _invoices.ShowQuoteAsync(invoice.InvoiceId, paymentMethodId, shown, cancellationToken)
-                .ConfigureAwait(false);
-            return new StablecoinQuoteResult(shown, null);
-        }
-
+        if (Reusable(existing, invoice, asset, network, now) is { } reusable)
+            return await ShowAsync(invoice, asset, reusable, cancellationToken).ConfigureAwait(false);
         if (existing.Count >= StablecoinPayments.MaxQuotesPerInvoice)
-        {
-            return StablecoinQuoteResult.Refused(
-                "This invoice has already asked for as many quotes as it may. Use an address it has already "
-                + "shown, or pay another way.");
-        }
+            return TooManyForInvoice();
 
         var open = await _quotes
             .ListOpenAsync(invoice.StoreId, now - StablecoinPayments.MatchWindow, cancellationToken)
             .ConfigureAwait(false);
-        if (open.Count >= StablecoinPayments.MaxOpenQuotesPerStore)
-        {
-            _logger.LogWarning(
-                "Store {StoreId}: refusing a new {Asset} quote for invoice {InvoiceId}; the store already holds "
-                + "{Open} unsettled quotes from the last {Hours} hours",
-                invoice.StoreId, asset.Symbol, invoice.InvoiceId, open.Count,
-                StablecoinPayments.MatchWindow.TotalHours);
-            return StablecoinQuoteResult.Refused(
-                $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
-        }
+        if (StoreBusy(invoice, asset, open, now) is { } busy)
+            return busy;
 
         var routes = await _routes
             .GetAsync(invoice.StoreId, sdk, StablecoinPayments.RouteFetchDeadline, cancellationToken)
@@ -417,20 +404,192 @@ public sealed class StablecoinPaymentService
         }
 
         var decimals = (int)route.Decimals;
-        var amount = StablecoinAmounts.ToBaseUnits(invoice.Due, decimals);
+        var due = StablecoinAmounts.ToBaseUnits(invoice.Due, decimals);
+        var step = StablecoinAmounts.Pow10(Math.Max(0, decimals - StablecoinPayments.Divisibility));
+        var twins = open.Where(q => OnRoute(q, route) && q.DueAmount == invoice.Due).ToList();
+        BigInteger nudge = twins.Count;
+        // Twins that landed as sats say what a sat's worth is before the provider is asked at all.
+        if (twins.LastOrDefault(q => q.DestinationAsset == "BTC" && q.ExpectedReceived > BigInteger.Zero) is { } sats)
+            step = BigInteger.Max(step, SatsWorth(due, sats.ExpectedReceived));
 
-        SparkCrossChainReceiveQuote quote;
+        for (var attempt = 0; attempt < MaxFingerprintAttempts; attempt++)
+        {
+            var amount = due + step * nudge;
+            var (quote, refusal) = await RequestQuoteAsync(invoice, asset, network, route, sdk, amount, cancellationToken)
+                .ConfigureAwait(false);
+            if (quote is null)
+                return refusal!;
+
+            // What the payer is asked for: the SDK's deposit at the prompt's precision.
+            var ask = StablecoinAmounts.RoundUpToDivisibility(quote.DepositAmount, decimals, StablecoinPayments.Divisibility);
+            var asked = StablecoinAmounts.FromBaseUnits(ask, decimals, StablecoinPayments.Divisibility);
+            var fee = Math.Max(0m, asked - invoice.Due);
+            if (fee > invoice.Due * MaxFeeShareOfDue)
+            {
+                return StablecoinQuoteResult.Refused(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Paying from {0} would add {1} {2} in network costs to this payment. Choose a cheaper network.",
+                    network.Name, fee, asset.Symbol));
+            }
+
+            StablecoinQuote? recorded = null;
+            StablecoinQuote? raced = null;
+            StablecoinQuoteResult? refused = null;
+            var gate = _storeGates.GetOrAdd(invoice.StoreId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                now = _time.GetUtcNow();
+                var current = await _quotes.ListForInvoiceAsync(invoice.InvoiceId, cancellationToken).ConfigureAwait(false);
+                raced = Reusable(current, invoice, asset, network, now);
+                if (raced is null)
+                {
+                    var fresh = await _quotes
+                        .ListOpenAsync(invoice.StoreId, now - StablecoinPayments.MatchWindow, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (current.Count >= StablecoinPayments.MaxQuotesPerInvoice)
+                    {
+                        refused = TooManyForInvoice();
+                    }
+                    else if (StoreBusy(invoice, asset, fresh, now) is { } stillBusy)
+                    {
+                        refused = stillBusy;
+                    }
+                    else if (!StablecoinQuoteMatcher.FingerprintTaken(
+                                 fresh, route, quote.ExpectedReceivedAmount, quote.ServiceFeeAmount))
+                    {
+                        recorded = NewRecord(invoice, asset, route, quote, ask, fee, now);
+                        // Recorded before anyone is shown the address: the row is the only thing that will
+                        // attribute a payment to it, so an address shown without one is money that arrives
+                        // unattributable.
+                        await _quotes.AddAsync(recorded, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+            if (raced is not null)
+                return await ShowAsync(invoice, asset, raced, cancellationToken).ConfigureAwait(false);
+            if (refused is not null)
+                return refused;
+            if (recorded is not null)
+            {
+                _logger.LogInformation(
+                    "Store {StoreId}: quoted {Amount} {Asset} on {Chain} for invoice {InvoiceId} (due {Due}, landing "
+                    + "as {Destination})",
+                    invoice.StoreId, StablecoinAmounts.Format(ask, decimals), asset.Symbol, route.Chain,
+                    invoice.InvoiceId, invoice.Due, quote.DestinationAsset);
+                return await ShowAsync(invoice, asset, recorded, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Taken. Landing as sats, a millionth of a dollar is a hundredth of a sat and moves nothing, so from
+            // here on each step is at least a sat's worth at the rate this quote implies.
+            if (quote.TokenIdentifier is null && quote.ExpectedReceivedAmount > BigInteger.Zero)
+                step = BigInteger.Max(step, SatsWorth(amount, quote.ExpectedReceivedAmount));
+
+            nudge += BigInteger.One;
+            _logger.LogDebug(
+                "Store {StoreId}: a {Asset} quote on {Chain} for invoice {InvoiceId} matched another open quote's "
+                + "fingerprint; asking again with the target nudged",
+                invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId);
+        }
+
+        _logger.LogWarning(
+            "Store {StoreId}: {Attempts} {Asset} quotes on {Chain} for invoice {InvoiceId} each matched another open "
+            + "quote's fingerprint; refusing rather than showing an address its payment could not be attributed from",
+            invoice.StoreId, MaxFingerprintAttempts, asset.Symbol, route.Chain, invoice.InvoiceId);
+        return StablecoinQuoteResult.Refused(
+            $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
+    }
+
+    /// <summary>Route base units per sat, rounded up, at the rate a quote of <paramref name="sats"/> for <paramref name="amount"/> implies.</summary>
+    private static BigInteger SatsWorth(BigInteger amount, BigInteger sats) =>
+        BigInteger.Divide(amount + sats - BigInteger.One, sats);
+
+    /// <summary>
+    /// The live quote this invoice already holds for the network and due, if any: a payer clicking back and forth
+    /// costs nothing.
+    /// </summary>
+    private static StablecoinQuote? Reusable(
+        IReadOnlyList<StablecoinQuote> invoiceQuotes,
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinNetworkOption network,
+        DateTimeOffset now) =>
+        invoiceQuotes.FirstOrDefault(quote =>
+            quote.PaymentMethodId == asset.PaymentMethodId.ToString()
+            && StablecoinPayments.Same(quote.Chain, network.Chain)
+            && StablecoinPayments.Same(quote.ContractAddress, network.ContractAddress)
+            && quote.SdkPaymentId is null
+            && quote.DueAmount == invoice.Due
+            && StablecoinPayments.OfferedUntil(quote.ExpiresAt) > now + ReuseMargin);
+
+    private static StablecoinQuoteResult TooManyForInvoice() =>
+        StablecoinQuoteResult.Refused(
+            "This invoice has already asked for as many quotes as it may. Use an address it has already "
+            + "shown, or pay another way.");
+
+    /// <summary>
+    /// A refusal when the store already holds <see cref="StablecoinPayments.MaxOpenQuotesPerStore"/> quotes still on
+    /// offer to a payer; null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// <b>Only quotes still on offer count.</b> The cap bounds the provider rows the SDK polls hard, and the SDK polls
+    /// a quote on every tick only until its provider expiry; after that, once per ten minutes
+    /// (<c>RECEIVE_EXPIRED_PROBE_SECS</c>) until it gives up a day later. A quote past
+    /// <see cref="StablecoinPayments.OfferedUntil"/> is also no longer shown to anyone. Counting every quote in the
+    /// two-day match window let an anonymous caller — fifty invoices, ten quotes each — switch a store's USDC and
+    /// USDT off for two days; now holding the cap takes minting quotes continuously against the checkout's rate
+    /// limit. Quotes past their offer still count for attribution: the fingerprint check reads the whole window.
+    /// </remarks>
+    private StablecoinQuoteResult? StoreBusy(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        IReadOnlyList<StablecoinQuote> open,
+        DateTimeOffset now)
+    {
+        var offered = open.Count(q => StablecoinPayments.OfferedUntil(q.ExpiresAt) > now);
+        if (offered < StablecoinPayments.MaxOpenQuotesPerStore)
+            return null;
+
+        _logger.LogWarning(
+            "Store {StoreId}: refusing a new {Asset} quote for invoice {InvoiceId}; the store already has {Offered} "
+            + "unsettled quotes on offer to payers",
+            invoice.StoreId, asset.Symbol, invoice.InvoiceId, offered);
+        return StablecoinQuoteResult.Refused(
+            $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
+    }
+
+    private static bool OnRoute(StablecoinQuote quote, SparkCrossChainReceiveRoute route) =>
+        StablecoinPayments.Same(quote.Chain, route.Chain)
+        && StablecoinPayments.Same(quote.Asset, route.Asset)
+        && StablecoinPayments.Same(quote.ContractAddress, route.ContractAddress);
+
+    /// <summary>One provider quote for <paramref name="amount"/>, or the sentence the payer is shown instead.</summary>
+    private async Task<(SparkCrossChainReceiveQuote? Quote, StablecoinQuoteResult? Refusal)> RequestQuoteAsync(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinNetworkOption network,
+        SparkCrossChainReceiveRoute route,
+        ISparkSdkClient sdk,
+        BigInteger amount,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            quote = await sdk
+            var quote = await sdk
                 .ReceiveCrossChainAsync(route, amount, StablecoinPayments.MaxSlippageBps, cancellationToken)
                 .WaitAsync(StablecoinPayments.QuoteDeadline, _time, cancellationToken)
                 .ConfigureAwait(false);
+            return (quote, null);
         }
         catch (TimeoutException)
         {
-            return StablecoinQuoteResult.Refused(
-                $"Spark took too long to quote {asset.Symbol} on {network.Name}. Try again, or pick another network.");
+            return (null, StablecoinQuoteResult.Refused(
+                $"Spark took too long to quote {asset.Symbol} on {network.Name}. Try again, or pick another network."));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -440,84 +599,59 @@ public sealed class StablecoinPaymentService
                 invoice.StoreId, asset.Symbol, route.Chain, invoice.InvoiceId, reason);
             // The two typed refusals get the payer's own sentence; the provider's words, written for the integrator,
             // are in the log line above. Anything else is relayed, scrubbed, as the provider put it.
-            return StablecoinQuoteResult.Refused(
+            return (null, StablecoinQuoteResult.Refused(
                 SparkErrors.AmountOutOfRange(ex) is { } range
-                    ? OutOfRange(asset, network.Name, range, decimals, amount)
+                    ? OutOfRange(asset, network.Name, range, (int)route.Decimals, amount)
                     : SparkErrors.RouteUnavailable(ex) is { } temporary
                         ? temporary
                             ? $"{asset.Symbol} on {network.Name} is unavailable right now. Try again shortly, or choose another network."
                             : $"{asset.Symbol} on {network.Name} can't take this payment. Choose another network."
-                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}");
+                        : $"{asset.Symbol} on {network.Name} cannot take this payment right now: {reason}"));
         }
+    }
 
-        // What the payer is asked for: the SDK's deposit at the prompt's precision, nudged by millionths when
-        // another live quote on this route already asks exactly that.
-        var rounded = StablecoinAmounts.RoundUpToDivisibility(quote.DepositAmount, decimals, StablecoinPayments.Divisibility);
-        var taken = open
-            .Where(q => StablecoinPayments.Same(q.Chain, route.Chain)
-                        && StablecoinPayments.Same(q.Asset, route.Asset)
-                        && StablecoinPayments.Same(q.ContractAddress, route.ContractAddress))
-            .Select(q => q.Asked)
-            .ToHashSet();
-        if (StablecoinAmounts.UniqueAsk(rounded, decimals, StablecoinPayments.Divisibility, taken) is not { } ask)
-        {
-            _logger.LogWarning(
-                "Store {StoreId}: every amount near {Amount} {Asset} on {Chain} is already asked for by a live "
-                + "quote; refusing another for invoice {InvoiceId}",
-                invoice.StoreId, StablecoinAmounts.Format(rounded, decimals), asset.Symbol, route.Chain,
-                invoice.InvoiceId);
-            return StablecoinQuoteResult.Refused(
-                $"{asset.Symbol} payments are busy right now. Please try again shortly, or pay another way.");
-        }
+    private static StablecoinQuote NewRecord(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        SparkCrossChainReceiveRoute route,
+        SparkCrossChainReceiveQuote quote,
+        BigInteger ask,
+        decimal fee,
+        DateTimeOffset now) => new()
+    {
+        Id = Guid.NewGuid().ToString("N"),
+        StoreId = invoice.StoreId,
+        InvoiceId = invoice.InvoiceId,
+        PaymentMethodId = asset.PaymentMethodId.ToString(),
+        Chain = route.Chain,
+        ChainId = route.ChainId,
+        Asset = route.Asset,
+        ContractAddress = route.ContractAddress,
+        Decimals = (int)route.Decimals,
+        DepositAddress = quote.DepositAddress,
+        DepositBaseUnits = StablecoinQuote.FormatBaseUnits(quote.DepositAmount),
+        AskedBaseUnits = StablecoinQuote.FormatBaseUnits(ask),
+        PaymentRequest = PaymentRequestFor(route, quote.DepositAddress, ask),
+        DueAmount = invoice.Due,
+        FeeAmount = fee,
+        ExpectedReceivedBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ExpectedReceivedAmount),
+        DestinationAsset = quote.DestinationAsset,
+        ServiceFeeBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ServiceFeeAmount),
+        ServiceFeeAsset = quote.ServiceFeeAsset,
+        CreatedAt = now,
+        ExpiresAt = quote.ExpiresAt
+    };
 
-        var asked = StablecoinAmounts.FromBaseUnits(ask, decimals, StablecoinPayments.Divisibility);
-        var fee = Math.Max(0m, asked - invoice.Due);
-        if (fee > invoice.Due * MaxFeeShareOfDue)
-        {
-            return StablecoinQuoteResult.Refused(string.Format(
-                CultureInfo.InvariantCulture,
-                "Paying from {0} would add {1} {2} in network costs to this payment. Choose a cheaper network.",
-                network.Name, fee, asset.Symbol));
-        }
-
-        var record = new StablecoinQuote
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            StoreId = invoice.StoreId,
-            InvoiceId = invoice.InvoiceId,
-            PaymentMethodId = paymentMethodId.ToString(),
-            Chain = route.Chain,
-            ChainId = route.ChainId,
-            Asset = route.Asset,
-            ContractAddress = route.ContractAddress,
-            Decimals = decimals,
-            DepositAddress = quote.DepositAddress,
-            DepositBaseUnits = StablecoinQuote.FormatBaseUnits(quote.DepositAmount),
-            AskedBaseUnits = StablecoinQuote.FormatBaseUnits(ask),
-            PaymentRequest = PaymentRequestFor(route, quote.DepositAddress, ask),
-            DueAmount = invoice.Due,
-            FeeAmount = fee,
-            ExpectedReceivedBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ExpectedReceivedAmount),
-            DestinationAsset = quote.DestinationAsset,
-            ServiceFeeBaseUnits = StablecoinQuote.FormatBaseUnits(quote.ServiceFeeAmount),
-            ServiceFeeAsset = quote.ServiceFeeAsset,
-            CreatedAt = now,
-            ExpiresAt = quote.ExpiresAt
-        };
-
-        // Recorded before anyone is shown the address: the row is the only thing that will attribute a payment to
-        // it, so an address shown without one is money that arrives unattributable.
-        await _quotes.AddAsync(record, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Store {StoreId}: quoted {Amount} {Asset} on {Chain} for invoice {InvoiceId} (due {Due}, landing as {Destination})",
-            invoice.StoreId, StablecoinAmounts.Format(ask, decimals), asset.Symbol, route.Chain, invoice.InvoiceId,
-            invoice.Due, quote.DestinationAsset);
-
-        var active = ToActiveQuote(record);
-        await _invoices.ShowQuoteAsync(invoice.InvoiceId, paymentMethodId, active, cancellationToken)
+    private async Task<StablecoinQuoteResult> ShowAsync(
+        StablecoinInvoice invoice,
+        StablecoinAsset asset,
+        StablecoinQuote quote,
+        CancellationToken cancellationToken)
+    {
+        var shown = ToActiveQuote(quote);
+        await _invoices.ShowQuoteAsync(invoice.InvoiceId, asset.PaymentMethodId, shown, cancellationToken)
             .ConfigureAwait(false);
-        return new StablecoinQuoteResult(active, null);
+        return new StablecoinQuoteResult(shown, null);
     }
 
     /// <summary>
@@ -525,8 +659,8 @@ public sealed class StablecoinPaymentService
     /// </summary>
     /// <remarks>
     /// Built here rather than taken from the SDK, because the SDK's URI carries the deposit it sized and the payer
-    /// is asked for <paramref name="ask"/> — rounded to the prompt's precision and possibly nudged — which is the
-    /// amount that keeps an exact payment attributable. Solana and Tron wallets do not honour their schemes'
+    /// is asked for <paramref name="ask"/>, rounded up to the prompt's precision, and a wallet handed the unrounded
+    /// 18-decimal deposit would send a hair less than the prompt says. Solana and Tron wallets do not honour their schemes'
     /// parameters reliably (the SDK's own reasoning), so those get the address alone and the amount is shown
     /// beside it.
     /// </remarks>
@@ -574,6 +708,19 @@ public sealed class StablecoinPaymentService
     }
 
     /// <summary>
+    /// The expiry every quote an arrival at <paramref name="arrivedAt"/> could have paid is after: the match window,
+    /// measured back from the arrival — or from now, for an arrival stamped in the future.
+    /// </summary>
+    private DateTimeOffset CandidatesExpiringAfter(DateTimeOffset arrivedAt)
+    {
+        var now = _time.GetUtcNow();
+        var from = arrivedAt < now ? arrivedAt : now;
+        return from < DateTimeOffset.MinValue + StablecoinPayments.MatchWindow
+            ? DateTimeOffset.MinValue
+            : from - StablecoinPayments.MatchWindow;
+    }
+
+    /// <summary>
     /// Settles and credits one inbound payment if it is a completed cross-chain receive this plugin quoted.
     /// Safe to call any number of times for the same payment, from any path.
     /// </summary>
@@ -611,15 +758,16 @@ public sealed class StablecoinPaymentService
                 : StablecoinReceiveOutcome.AlreadyCredited;
         }
 
-        // Re-evaluated every time rather than remembered as lost: an arrival that fitted two quotes equally well
-        // becomes attributable once the other of them is settled by its own exact payment. Only the report is
-        // remembered, so the operator hears about each one once.
+        // Re-evaluated every time rather than remembered as lost, so a verdict reached before the quote row was
+        // readable is not final; the window is the arrival's own (see StablecoinQuoteMatcher), so the passing of
+        // time cannot turn an ambiguous arrival into a match. Only the report is remembered, so the operator hears
+        // about each one once.
         openQuotes ??= (await _quotes
-                .ListOpenAsync(storeId, _time.GetUtcNow() - StablecoinPayments.MatchWindow, cancellationToken)
+                .ListOpenAsync(storeId, CandidatesExpiringAfter(payment.Timestamp), cancellationToken)
                 .ConfigureAwait(false))
             .ToList();
 
-        var match = StablecoinQuoteMatcher.Match(openQuotes, conversion);
+        var match = StablecoinQuoteMatcher.Match(openQuotes, conversion, payment.Timestamp);
         if (match is not { Kind: StablecoinMatchKind.Matched, Quote: { } quote })
         {
             ReportUnattributed(storeId, payment, conversion, match);
@@ -851,8 +999,14 @@ public sealed class StablecoinPaymentService
         if (open.Count == 0)
             return 0;
 
-        // Oldest first from the oldest quote that could still be paid: nothing earlier can be one of them.
+        // Oldest first from the oldest quote that could still be paid: nothing earlier can be one of them. Matched
+        // against every quote an arrival that early could have paid, which reaches further back than the quotes
+        // open now; see StablecoinQuoteMatcher on why the window is the arrival's.
         var from = open.Min(q => q.CreatedAt) - ScanSlack;
+        open = (await _quotes
+                .ListOpenAsync(storeId, CandidatesExpiringAfter(from), cancellationToken)
+                .ConfigureAwait(false))
+            .ToList();
         var credited = 0;
         for (var page = 0; page < MaxScanPages && open.Count > 0; page++)
         {
