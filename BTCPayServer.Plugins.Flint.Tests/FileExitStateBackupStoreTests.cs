@@ -174,6 +174,121 @@ public class FileExitStateBackupStoreTests
         Assert.Equal("first-backup", await reader.ReadToEndAsync());
     }
 
+    [Fact(Timeout = 60_000)]
+    public async Task Concurrent_writers_publish_one_whole_backup_and_leave_no_temporary_behind()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        // Big enough that the writes overlap in time, distinct enough that a mixture is detectable: with
+        // one shared temporary name, two writers wrote into the same file and the rename could publish
+        // the front of one and the back of the other.
+        var candidates = Enumerable.Range(0, 8)
+            .Select(i => new string((char)('a' + i), 512 * 1024))
+            .ToArray();
+
+        await Task.WhenAll(candidates.Select(content => Task.Run(() => store.WriteAsync(Store, content))));
+
+        var stored = await store.ReadAsync(Store);
+        Assert.Contains(stored, candidates);
+        Assert.Empty(Directory.GetFiles(store.StorageDirectory(), "*.tmp"));
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task The_tracked_store_s_belief_matches_the_file_after_concurrent_writes()
+    {
+        using var dir = new TempDirectory();
+        var scheduler = new ExitStateBackupScheduler();
+        var tracked = new TrackedExitStateBackupStore(Create(dir), scheduler);
+
+        var candidates = Enumerable.Range(0, 8)
+            .Select(i => new string((char)('a' + i), 256 * 1024))
+            .ToArray();
+
+        await Task.WhenAll(candidates.Select(content => Task.Run(() => tracked.WriteAsync(Store, content))));
+
+        // The note and the write are one step: whichever write landed last is the one the scheduler
+        // believes, so the next pass compares against the file that is really there.
+        var onDisk = await tracked.ReadAsync(Store);
+        Assert.NotNull(onDisk);
+        Assert.True(scheduler.ContentUnchanged(Store, onDisk));
+    }
+
+    [Fact]
+    public async Task A_failed_write_makes_the_tracked_belief_unknown_rather_than_stale()
+    {
+        var scheduler = new ExitStateBackupScheduler();
+        var inner = new FakeExitStateBackupStore();
+        var tracked = new TrackedExitStateBackupStore(inner, scheduler);
+
+        await tracked.WriteAsync(Store, "first");
+        Assert.True(scheduler.ContentUnchanged(Store, "first"));
+
+        inner.FailWriteWith = new IOException("disk full");
+        await Assert.ThrowsAsync<IOException>(() => tracked.WriteAsync(Store, "second"));
+
+        // Unknown, so the next pass re-seeds from the file instead of trusting a belief a failed write may
+        // have falsified.
+        Assert.False(scheduler.KnowsStoredContent(Store));
+    }
+
+    [Fact]
+    public async Task Reads_of_a_store_whose_directory_does_not_exist_yet_answer_absent()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        // No write has ever created the directory: "absent", not a DirectoryNotFoundException out of a
+        // download or a connect.
+        Assert.False(Directory.Exists(store.StorageDirectory()));
+        Assert.Null(await store.ReadAsync(Store));
+        await using (var stream = await store.OpenReadAsync(Store))
+            Assert.Null(stream);
+        Assert.Null(await store.TakenAtAsync(Store));
+    }
+
+    [Fact]
+    public async Task A_backup_an_earlier_build_left_readable_by_others_is_restricted_on_first_read()
+    {
+        Assert.SkipWhen(
+            !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(), "Unix file modes.");
+
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+
+        // What a file written before the owner-only temporary looks like: the secret at 0644 inside the
+        // 0700 directory, and it stays that way until its next changed write — never, on an idle wallet.
+        Directory.CreateDirectory(store.StorageDirectory());
+        await File.WriteAllTextAsync(store.PathFor(Store), "old-build-backup");
+        File.SetUnixFileMode(store.PathFor(Store),
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+        Assert.Equal("old-build-backup", await store.ReadAsync(Store));
+
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite,
+            File.GetUnixFileMode(store.PathFor(Store)));
+    }
+
+    [Fact]
+    public async Task A_temporary_abandoned_by_a_crashed_write_is_cleaned_up_by_a_later_write()
+    {
+        using var dir = new TempDirectory();
+        var store = Create(dir);
+        await store.WriteAsync(Store, "first-backup");
+
+        // A process killed mid-write leaves its uniquely named temporary behind, and nothing would ever
+        // look for it again. An hour old is old enough that no live writer can still own it.
+        var abandoned = store.PathFor(Store) + ".0123456789abcdef0123456789abcdef.tmp";
+        await File.WriteAllTextAsync(abandoned, "half-written");
+        File.SetLastWriteTimeUtc(abandoned, DateTime.UtcNow - TimeSpan.FromHours(2));
+
+        await store.WriteAsync(Store, "second-backup");
+
+        Assert.False(File.Exists(abandoned));
+        Assert.Equal("second-backup", await store.ReadAsync(Store));
+    }
+
     [Fact]
     public void A_store_id_that_could_escape_the_owner_only_directory_is_refused()
     {
