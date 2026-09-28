@@ -19,10 +19,12 @@ to choose between them, run a second plugin, or keep a token they do not want.
 Two more payment methods beside Lightning, **USDC** and **USDT**. Choosing one lists the networks it can be sent
 from, each with its icon; choosing a network fetches a quote from the conversion provider and shows:
 
-- a QR code of the bare deposit address with the network's icon in the middle (clicking it copies the address) —
-  and, on EVM chains, a *Pay in wallet* button whose link fills in the token, the amount and the address. The QR is
-  deliberately not that link: a scanner that does not understand token-transfer links would take the token contract
-  in it as the recipient;
+- a QR code with the network's icon in the middle — on EVM chains a token-transfer (EIP-681) link, so a wallet that
+  scans it fills in the token, the amount and the address, and the bare address on Solana and Tron — plus, on EVM
+  chains, a *Pay in wallet* button with the same link. Clicking the QR copies only the bare deposit address, never
+  the link: the link names the token contract first, and pasted where only an address is read, the contract would
+  become the recipient. A scanner that does not understand token-transfer links has the same problem, so check the
+  recipient your wallet shows against the address line;
 - the exact amount to send, which includes that network's cost;
 - the deposit address, labelled with the network and its icon.
 

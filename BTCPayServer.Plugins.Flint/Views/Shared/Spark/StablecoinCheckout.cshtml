@@ -103,16 +103,18 @@
             <div v-else-if="error && !picking" class="alert alert-danger" role="alert" id="FlintStablecoinError">{{ error }}</div>
 
             <template v-else-if="quote && !picking">
-                @* The bare deposit address, in the QR code and on the clipboard — never the EIP-681 URI. That URI's first
-                   address is the token contract ("ethereum:<contract>@<chain>/transfer?address=<deposit>&uint256=…"),
-                   and a scanner that does not understand token transfers — an exchange's withdrawal form, a wallet that
-                   reads only the address — takes the contract as the recipient, which burns the payment. A bare address
-                   is read the same way by everything; the payer enters the amount shown below, as they must for Tron
-                   and Solana anyway, and a rounded amount is still matched to this quote (StablecoinQuoteMatcher).
-                   Wallets that do honour EIP-681 get it from the "Pay in wallet" link. *@
-                <div class="qr-container clipboard-button" :data-qr-value="quote.address" :data-clipboard="quote.address" data-clipboard-confirm-element="#FlintStablecoinAddress [data-clipboard]" id="FlintStablecoinQr">
+                @* The QR code is the payment request — EIP-681 on an EVM chain, so a wallet that reads it (Cake, MetaMask,
+                   Trust and most others) fills in the token, the amount and the address; the bare address on Solana and
+                   Tron. The clipboard is always the bare deposit address, never the URI: the URI's first address is the
+                   token contract ("ethereum:<contract>@<chain>/transfer?address=<deposit>&uint256=…"), and pasted into
+                   something that reads only an address — an exchange's withdrawal form — the contract would become the
+                   recipient and the payment would be gone. A scanner that does not understand EIP-681 carries the same
+                   risk; that trade was taken knowingly for the wallets that do, which is nearly all of them, and the
+                   deposit address stays on its own line below to check against. A rounded or hand-typed amount
+                   is still matched to this quote (StablecoinQuoteMatcher). *@
+                <div class="qr-container clipboard-button" :data-qr-value="quote.paymentRequest" :data-clipboard="quote.address" data-clipboard-confirm-element="#FlintStablecoinAddress [data-clipboard]" id="FlintStablecoinQr">
                     <div>
-                        <qrcode :value="quote.address" tag="div" :options="qrOptions" />
+                        <qrcode :value="quote.paymentRequest" tag="div" :options="qrOptions" />
                     </div>
                     <img v-if="iconFor(quote.chain)" class="qr-icon" :src="iconFor(quote.chain)" :alt="quote.chainName" id="FlintStablecoinQrIcon" />
                 </div>

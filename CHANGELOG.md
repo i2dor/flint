@@ -51,9 +51,10 @@ All notable changes to this plugin are recorded here. The format follows
   networks the plugin has an icon for are offered. Mainnet only; built on Breez Spark SDK 0.26's cross-chain
   receive through Orchestra. Payments are matched to invoices by the figures the provider fixed for each quote,
   and no two open quotes on a network are allowed to share them — so a payer or exchange rounding the amount still
-  credits the right invoice, and anything that cannot be told apart is left for a person rather than guessed. The
-  QR code is the bare deposit address (a token-transfer link would put the token contract first, and a scanner that
-  does not read those would send to it); the *Pay in wallet* button keeps the full link. After a partial payment
+  credits the right invoice, and anything that cannot be told apart is left for a person rather than guessed. On EVM
+  networks the QR code is a token-transfer (EIP-681) link, so a scanning wallet fills in the amount, but clicking it
+  copies only the bare deposit address — the link names the token contract first, and pasted where only an address
+  is read, the contract would become the recipient. After a partial payment
   the checkout stops offering the old address and asks for a new one for the rest. Payments are credited exactly
   once through the same reconciliation discipline as Lightning, and money that reaches the wallet but lands on no
   invoice is listed on the store's Flint page. The plugin's default USDC/USDT rate rules cover exact pairs only,
