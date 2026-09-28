@@ -237,6 +237,33 @@ public class StablecoinPaymentMethodTests
         Assert.Equal(JTokenType.Null, data["quote"]!.Type);
         Assert.Null(model.InvoiceBitcoinUrl);
         Assert.Equal(2, data["networks"]!.Count());
+        // Named, so a page still holding it from its own quote request stops showing it (the component drops a
+        // local copy the model withdraws) and sends the payer for a fresh address for what is left.
+        Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
+        Assert.Equal("base", (string?)data["withdrawn"]!["chain"]);
+    }
+
+    [Fact]
+    public void A_current_quote_is_not_reported_as_withdrawn()
+    {
+        var (_, data) = Checkout(Details(), destination: "0xdep");
+
+        Assert.Equal(JTokenType.Null, data["withdrawn"]!.Type);
+    }
+
+    [Fact]
+    public void The_checkout_component_lets_go_of_a_quote_the_invoice_withdrew()
+    {
+        // The component is the other half of the rule above, and it is script in a Razor view with no test runner of
+        // its own: this pins the pieces it cannot work without. It once fell back to its own copy of a quote the
+        // invoice had stopped offering — after a short payment settled that quote — and kept a payer sending to it.
+        var view = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
+            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+
+        Assert.Contains("local.id !== this.withdrawnId", view);
+        Assert.Contains("id !== this.localBasis", view);
+        Assert.Contains("id=\"FlintStablecoinWithdrawn\"", view);
     }
 
     [Fact]
@@ -322,12 +349,27 @@ public class StablecoinPaymentMethodTests
         var link = new StablecoinPaymentLinkExtension(handler);
         var details = Details();
 
-        var shown = new PaymentPrompt { Destination = "0xdep", Details = JToken.FromObject(details, handler.Serializer) };
-        Assert.Equal(details.Quote!.PaymentRequest, link.GetPaymentLink(shown, null));
+        PaymentPrompt Prompt(string? destination, decimal netDue)
+        {
+            var invoice = new InvoiceEntity { Id = "invoice-1", Currency = "USD", StoreId = "store-1" };
+            invoice.AddRate(new CurrencyPair("USDC", "USD"), 1m);
+            invoice.SetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId, new PaymentPrompt
+            {
+                Currency = "USDC",
+                Divisibility = 6,
+                Destination = destination,
+                Details = JToken.FromObject(details, handler.Serializer)
+            });
+            invoice.NetDue = netDue;
+            return invoice.GetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId)!;
+        }
+
+        Assert.Equal(details.Quote!.PaymentRequest, link.GetPaymentLink(Prompt("0xdep", 10m), null));
+        // Withdrawn by a part payment, as at checkout.
+        Assert.Null(link.GetPaymentLink(Prompt("0xdep", 4m), null));
 
         details.Quote = null;
-        var unpicked = new PaymentPrompt { Details = JToken.FromObject(details, handler.Serializer) };
-        Assert.Null(link.GetPaymentLink(unpicked, null));
+        Assert.Null(link.GetPaymentLink(Prompt(null, 10m), null));
     }
 
     #endregion
