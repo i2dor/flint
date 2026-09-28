@@ -86,8 +86,9 @@ public sealed class StablecoinPaymentService
     /// <summary>How far before the oldest open quote the reconciliation scan starts, for clock skew.</summary>
     private static readonly TimeSpan ScanSlack = TimeSpan.FromMinutes(10);
 
-    private const int ScanPageSize = 50;
-    private const int MaxScanPages = 10;
+    internal const int ScanPageSize = 50;
+    /// <summary>Oldest-first pages the reconciliation sweep reads per rail per pass, after each rail's newest page.</summary>
+    internal const int MaxScanPages = 5;
     private const int MaxCreditsPerStorePerPass = 100;
     private const int MaxStoresPerPass = 500;
 
@@ -1048,58 +1049,137 @@ public sealed class StablecoinPaymentService
         return credited;
     }
 
+    /// <summary>
+    /// The two kinds of payment a cross-chain receive arrives as: a Spark transfer of sats, or a token transfer of
+    /// the store's Stable Balance token. Listed separately because the SDK can filter storage by either but not by
+    /// "has cross-chain details", and not by both at once.
+    /// </summary>
+    private static readonly SparkPaymentMethod[] ScanRails = [SparkPaymentMethod.Spark, SparkPaymentMethod.Token];
+
+    /// <summary>Where each store's sweep of each rail resumes: the window it was walking, and how far it got.</summary>
+    private readonly ConcurrentDictionary<(string StoreId, SparkPaymentMethod Rail), (DateTimeOffset From, int Offset)>
+        _scanResume = new();
+
+    /// <summary>
+    /// Credits what the event stream dropped: every completed cross-chain receive in the window of the store's
+    /// open quotes, bounded per pass.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Only the rails a cross-chain receive can arrive on.</b> The window reaches back to the oldest open quote —
+    /// two days and more — and a store's Lightning receives in that time can be thousands. Reading them all to find
+    /// the few cross-chain ones pushed a dropped event past the page limit on a busy store for up to two days, so the
+    /// scan asks the SDK for Spark transfers and token payments only.
+    /// </para>
+    /// <para>
+    /// <b>Newest first, then a resumable sweep.</b> Each rail's newest page is read on every pass, because a dropped
+    /// event is most likely a recent one. Then the sweep walks the window oldest first for at most
+    /// <see cref="MaxScanPages"/> pages and remembers where it stopped, so a window longer than one pass's budget is
+    /// covered over several passes instead of re-reading its first pages forever. Seeing a payment twice costs a
+    /// lookup; crediting is idempotent.
+    /// </para>
+    /// </remarks>
     private async Task<int> ScanStoreAsync(string storeId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
         if (sdk is null)
             return 0;
 
-        var open = (await _quotes
-                .ListOpenAsync(storeId, now - StablecoinPayments.MatchWindow, cancellationToken)
-                .ConfigureAwait(false))
-            .ToList();
+        var open = await _quotes
+            .ListOpenAsync(storeId, now - StablecoinPayments.MatchWindow, cancellationToken)
+            .ConfigureAwait(false);
         if (open.Count == 0)
+        {
+            foreach (var rail in ScanRails)
+                _scanResume.TryRemove((storeId, rail), out _);
             return 0;
+        }
 
-        // Oldest first from the oldest quote that could still be paid: nothing earlier can be one of them. Matched
-        // against every quote an arrival that early could have paid, which reaches further back than the quotes
-        // open now; see StablecoinQuoteMatcher on why the window is the arrival's.
+        // From the oldest quote that could still be paid: nothing earlier can be one of them. Matched against every
+        // quote an arrival that early could have paid, which reaches further back than the quotes open now; see
+        // StablecoinQuoteMatcher on why the window is the arrival's.
         var from = open.Min(q => q.CreatedAt) - ScanSlack;
-        open = (await _quotes
+        var candidates = (await _quotes
                 .ListOpenAsync(storeId, CandidatesExpiringAfter(from), cancellationToken)
                 .ConfigureAwait(false))
             .ToList();
-        var credited = 0;
-        for (var page = 0; page < MaxScanPages && open.Count > 0; page++)
-        {
-            var payments = await sdk
-                .ListPaymentsAsync(
-                    new SparkListPaymentsQuery(
-                        SparkPaymentDirection.Receive,
-                        CompletedOnly: true,
-                        From: from,
-                        Offset: page * ScanPageSize,
-                        Limit: ScanPageSize,
-                        Ascending: true),
-                    cancellationToken)
-                .ConfigureAwait(false);
 
-            foreach (var payment in payments)
+        var credited = 0;
+        foreach (var rail in ScanRails)
+        {
+            if (candidates.Count == 0)
+                break;
+
+            var (recent, _) = await ScanPageAsync(
+                    storeId, sdk, rail, from, 0, ascending: false, candidates, cancellationToken)
+                .ConfigureAwait(false);
+            credited += recent;
+
+            var key = (storeId, rail);
+            var offset = _scanResume.TryGetValue(key, out var resume) && resume.From == from ? resume.Offset : 0;
+            var finished = false;
+            for (var page = 0; page < MaxScanPages && candidates.Count > 0; page++)
             {
-                if (payment.Conversion is not { Provider: SparkCrossChainProvider.Orchestra, Status: SparkConversionStatus.Completed })
-                    continue;
-                if (await TryCreditAsync(storeId, payment, open, cancellationToken).ConfigureAwait(false)
-                    is StablecoinReceiveOutcome.Credited)
+                var (count, read) = await ScanPageAsync(
+                        storeId, sdk, rail, from, offset, ascending: true, candidates, cancellationToken)
+                    .ConfigureAwait(false);
+                credited += count;
+                offset += read;
+                if (read < ScanPageSize)
                 {
-                    credited++;
+                    finished = true;
+                    break;
                 }
             }
 
-            if (payments.Count < ScanPageSize)
-                break;
+            if (finished)
+                _scanResume.TryRemove(key, out _);
+            else
+                _scanResume[key] = (from, offset);
         }
 
         return credited;
+    }
+
+    /// <summary>One page of one rail: how many it credited, and how many payments it read.</summary>
+    private async Task<(int Credited, int Read)> ScanPageAsync(
+        string storeId,
+        ISparkSdkClient sdk,
+        SparkPaymentMethod rail,
+        DateTimeOffset from,
+        int offset,
+        bool ascending,
+        List<StablecoinQuote> candidates,
+        CancellationToken cancellationToken)
+    {
+        var payments = await sdk
+            .ListPaymentsAsync(
+                new SparkListPaymentsQuery(
+                    SparkPaymentDirection.Receive,
+                    CompletedOnly: true,
+                    From: from,
+                    Offset: offset,
+                    Limit: ScanPageSize,
+                    Ascending: ascending,
+                    Method: rail),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var credited = 0;
+        foreach (var payment in payments)
+        {
+            if (candidates.Count == 0)
+                break;
+            if (payment.Conversion is not { Provider: SparkCrossChainProvider.Orchestra, Status: SparkConversionStatus.Completed })
+                continue;
+            if (await TryCreditAsync(storeId, payment, candidates, cancellationToken).ConfigureAwait(false)
+                is StablecoinReceiveOutcome.Credited)
+            {
+                credited++;
+            }
+        }
+
+        return (credited, payments.Count);
     }
 
     #endregion

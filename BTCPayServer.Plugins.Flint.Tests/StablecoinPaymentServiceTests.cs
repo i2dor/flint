@@ -841,6 +841,60 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
+    public async Task A_busy_stores_lightning_receives_do_not_hide_a_dropped_arrival_from_the_pass()
+    {
+        // The window reaches back to the oldest open quote, and a store's Lightning receives in two days can run to
+        // thousands. Read unfiltered, they pushed the one cross-chain receive past the pass's page limit.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var start = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 1_000; i++)
+        {
+            setup.Sdk.Seed(new SparkPayment(
+                $"lightning-pay-{i}", SparkPaymentDirection.Receive, SparkPaymentStatus.Completed,
+                SparkPaymentMethod.Lightning, 1_000, 0, start.AddSeconds(i), PaymentFixture.PaymentHash, "lnbc1",
+                null, null));
+        }
+        setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000, at: start.AddSeconds(1_000)));
+
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        Assert.Single(invoice.Payments);
+        Assert.All(setup.Sdk.ListQueries, q => Assert.Contains(q.Method, new SparkPaymentMethod?[]
+        {
+            SparkPaymentMethod.Spark, SparkPaymentMethod.Token
+        }));
+    }
+
+    [Fact]
+    public async Task A_window_longer_than_one_pass_is_swept_across_passes_rather_than_restarted()
+    {
+        // More cross-chain receives in the window than one pass reads, none of them this quote's but one in the
+        // middle — past the newest page and past the first pass's sweep. The second pass carries on from where the
+        // first stopped instead of re-reading the same oldest pages.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var foreign = SdkQuoteFor(setup, shown) with { ExpectedReceivedAmount = 1 };
+        var start = DateTimeOffset.UtcNow;
+        var perPass = StablecoinPaymentService.MaxScanPages * StablecoinPaymentService.ScanPageSize;
+        var at = 0;
+        for (; at < perPass + 20; at++)
+            setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(foreign, $"foreign-{at}", at: start.AddSeconds(at)));
+        setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000, at: start.AddSeconds(at++)));
+        for (var i = 0; i < StablecoinPaymentService.ScanPageSize * 2; i++, at++)
+            setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(foreign, $"foreign-{at}", at: start.AddSeconds(at)));
+
+        Assert.Equal(0, await setup.Service.ReconcileAsync(Ct));
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        Assert.Single(invoice.Payments);
+    }
+
+    [Fact]
     public async Task A_store_with_no_open_quote_costs_the_pass_nothing_on_its_wallet()
     {
         var setup = Create();

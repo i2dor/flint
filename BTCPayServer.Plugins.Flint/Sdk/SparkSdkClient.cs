@@ -162,8 +162,18 @@ public sealed class SparkSdkClient : ISparkSdkClient
                 _ => null
             },
             statusFilter: query.CompletedOnly ? [Breez.Sdk.Spark.PaymentStatus.Completed] : null,
-            assetFilter: null,
-            paymentDetailsFilter: null,
+            // A token payment is one with token metadata. The SDK's Token details filter cannot say that on its own
+            // (alone it reads "not a Spark transfer", which Lightning and deposits also are), so it goes by asset.
+            assetFilter: query.Method switch
+            {
+                null or SparkPaymentMethod.Spark => null,
+                SparkPaymentMethod.Token => new AssetFilter.Token(null),
+                var other => throw new ArgumentOutOfRangeException(
+                    nameof(query), other, "Payments can only be listed by kind for Spark transfers and token payments.")
+            },
+            paymentDetailsFilter: query.Method is SparkPaymentMethod.Spark
+                ? [new PaymentDetailsFilter.Spark(null, null)]
+                : null,
             fromTimestamp: query.From is null ? null : (ulong)Math.Max(0, query.From.Value.ToUnixTimeSeconds()),
             toTimestamp: null,
             offset: (uint)Math.Max(0, query.Offset),

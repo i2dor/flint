@@ -163,6 +163,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             results = results.Where(p => p.Status is SparkPaymentStatus.Completed);
         if (query.From is { } from)
             results = results.Where(p => p.Timestamp >= from);
+        // The storage filters the real client maps a kind to: Spark transfers, or payments carrying token metadata.
+        if (query.Method is { } method)
+            results = results.Where(p => p.Method == method);
 
         // Honoured, because a caller that pages in the wrong direction walks away from what it is looking for
         // and a fake that ignored the flag would let that pass.
