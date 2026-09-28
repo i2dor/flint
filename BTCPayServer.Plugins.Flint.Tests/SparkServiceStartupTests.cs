@@ -113,6 +113,33 @@ public class SparkServiceStartupTests
     }
 
     /// <summary>
+    /// A store whose storage a newer plugin version migrated is reported as a downgrade, not as a broken
+    /// configuration.
+    /// </summary>
+    /// <remarks>
+    /// The generic start-failure line tells the operator the store is unavailable "until the configuration is
+    /// corrected" — which, for storage an SDK 0.26 has migrated forward and an older SDK refuses, sends them
+    /// through settings that are fine or into re-entering a seed. The line has to say what happened, what to
+    /// install, and that the funds are not affected; and the store's wallet is simply not running, like any
+    /// other failed connect.
+    /// </remarks>
+    [Fact]
+    public async Task Storage_written_by_a_newer_version_is_logged_as_a_downgrade_not_a_configuration_error()
+    {
+        using var h = SparkServiceHarness.Create();
+        h.SeedStore(ThrowingStore, SparkServiceHarness.MnemonicFor(3));
+        h.Sdk.FailFor[ThrowingStore] = new Breez.Sdk.Spark.SdkException.StorageException(
+            "@v1=Underlying implementation error: rusqlite_migrate error: MigrationDefinition(DatabaseTooFarAhead)");
+
+        StartWithinTimeout(h);
+
+        Assert.Null(await h.Service.GetClient(ThrowingStore));
+        Assert.Contains("written by a newer version of the Flint plugin", h.Log.AllText);
+        Assert.Contains("funds are not affected", h.Log.AllText);
+        Assert.DoesNotContain("until the configuration is corrected", h.Log.AllText);
+    }
+
+    /// <summary>
     /// A connect that throws must not lock its store out of its own wallet either.
     /// </summary>
     /// <remarks>
@@ -544,7 +571,7 @@ public class SparkServiceStartupTests
     /// connect that looked only at its own cache would find nothing.
     /// </remarks>
     private static Task WithExitStateBackup(SparkServiceHarness h, string storeId, string backup) =>
-        h.ExitStateBackups.WriteAsync(storeId, backup);
+        h.ExitStateBackups.WriteAsync(storeId, backup, null);
 
 
     private static async Task WaitUntil(Func<bool> condition, string what)

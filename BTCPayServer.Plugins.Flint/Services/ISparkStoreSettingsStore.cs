@@ -1,3 +1,4 @@
+using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Flint.Sdk;
 
@@ -96,4 +97,87 @@ public interface ISparkStoreRuntime
 
     /// <summary>The store's live SDK handle, or null when it has no running instance.</summary>
     Task<ISparkSdkClient?> GetSdkClientAsync(string storeId);
+
+    /// <summary>
+    /// Imports every backup queued for this store (see <see cref="IExitStateBackupStore.AddPendingAsync"/>)
+    /// into its running wallet now, and reports what happened.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What a paste calls, so a pasted backup is in the wallet when the page says so.</b> Deferring the
+    /// import to the next restart was justified as avoiding a race with the running SDK — but the connect
+    /// already imports into a running SDK, whose import is built to merge into a live wallet, and a backup
+    /// that waits for a restart is a backup whose fate the operator cannot see.
+    /// </para>
+    /// <para>
+    /// A queued backup is removed only once an import of it has returned. One that fails stays queued and is
+    /// retried at every connect; the automatic pass never touches the queue. Never throws: every failure is
+    /// in the report.
+    /// </para>
+    /// </remarks>
+    Task<ExitStateImportReport> ImportPendingExitStateAsync(string storeId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exports the running wallet's exit state now, and stores it as the automatic backup when that is safe.
+    /// </summary>
+    /// <remarks>
+    /// The page's Export button. It does not store while the wallet's startup import is still in flight —
+    /// that import may be reading the very file this would replace — and says so in the result rather than
+    /// waiting. Never throws.
+    /// </remarks>
+    Task<ExitStateExportResult> ExportExitStateAsync(string storeId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>How an attempt to import a store's queued exit-state backups ended.</summary>
+public enum ExitStateImportOutcome
+{
+    /// <summary>Nothing was queued.</summary>
+    NothingPending,
+
+    /// <summary>Something is queued, but the store has no running wallet; it is imported at the next connect.</summary>
+    WalletNotRunning,
+
+    /// <summary>Another import for this store was still running; what is queued stays queued.</summary>
+    Busy,
+
+    /// <summary>Every queued backup was imported (which may still have restored nothing — see the counts).</summary>
+    Imported,
+
+    /// <summary>At least one queued backup could not be imported; it stays queued for the next connect.</summary>
+    Failed
+}
+
+/// <summary>
+/// What <see cref="ISparkStoreRuntime.ImportPendingExitStateAsync"/> did, in counts — never content.
+/// </summary>
+/// <param name="Outcome">How it ended.</param>
+/// <param name="Imported">How many queued backups were imported and left the queue.</param>
+/// <param name="Failed">How many could not be, and stay queued.</param>
+/// <param name="RestoredLeaves">Leaves restored, summed over every import that returned.</param>
+/// <param name="ForeignLeaves">Leaves skipped as another wallet's.</param>
+/// <param name="ConflictingLeaves">Leaves refused because they disagree with data the wallet holds.</param>
+/// <param name="SkippedChains">Leaves the wallet already had usable data for.</param>
+/// <param name="Reason">For a failure, a merchant-facing sentence that carries nothing of the blob.</param>
+public sealed record ExitStateImportReport(
+    ExitStateImportOutcome Outcome,
+    int Imported = 0,
+    int Failed = 0,
+    uint RestoredLeaves = 0,
+    uint ForeignLeaves = 0,
+    uint ConflictingLeaves = 0,
+    uint SkippedChains = 0,
+    string? Reason = null)
+{
+    public static readonly ExitStateImportReport NothingPending = new(ExitStateImportOutcome.NothingPending);
+}
+
+/// <summary>What <see cref="ISparkStoreRuntime.ExportExitStateAsync"/> produced.</summary>
+/// <param name="ExitState">The exported blob, for one render only; null when the export failed.</param>
+/// <param name="Stored">Whether it was also stored as the automatic backup.</param>
+/// <param name="Error">Why there is no blob — merchant-facing, and carrying nothing of one.</param>
+/// <param name="NotStoredReason">When there is a blob but it was not stored, why.</param>
+public sealed record ExitStateExportResult(
+    string? ExitState,
+    bool Stored,
+    string? Error = null,
+    string? NotStoredReason = null);

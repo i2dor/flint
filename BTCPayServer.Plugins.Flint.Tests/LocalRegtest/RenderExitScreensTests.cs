@@ -387,7 +387,7 @@ public class RenderExitScreensTests
         // never the blob, so this scripts the file store a real backup would have left behind.
         if (storedBackup)
         {
-            await h.ExitStateBackups.WriteAsync(Store, """{"version":1,"leaves":[]}""", CancellationToken.None);
+            await h.ExitStateBackups.WriteAsync(Store, """{"version":1,"leaves":[]}""", null, CancellationToken.None);
             h.ExitStateBackups.TakenAt = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
         }
 

@@ -57,7 +57,8 @@ public sealed class SparkServiceHarness : IDisposable
     private sealed record Deadlines(
         TimeSpan Connect,
         TimeSpan ConfirmStatus,
-        TimeSpan AbandonedConnectGrace);
+        TimeSpan AbandonedConnectGrace,
+        TimeSpan ExitStateCall);
 
     /// <summary>
     /// The chain the service's network provider reports, carried across a <see cref="Restart"/>.
@@ -171,7 +172,8 @@ public sealed class SparkServiceHarness : IDisposable
         TimeSpan? abandonedConnectGrace = null,
         bool failWalletAdoption = false,
         ChainName? chain = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        TimeSpan? exitStateCallDeadline = null)
     {
         var dataDir = Path.Combine(
             Path.GetTempPath(), "spark-service-tests", Guid.NewGuid().ToString("N"));
@@ -191,7 +193,9 @@ public sealed class SparkServiceHarness : IDisposable
                 confirmStatusDeadline ?? Constants.SdkCallDeadline,
                 // Long by default so the existing abandon tests still observe a late connect being adopted and
                 // shut down; the release-the-lock test shortens it deliberately.
-                abandonedConnectGrace ?? TimeSpan.FromMinutes(5)),
+                abandonedConnectGrace ?? TimeSpan.FromMinutes(5),
+                // The production two minutes unless a test is about the deadline itself.
+                exitStateCallDeadline ?? TimeSpan.FromMinutes(2)),
             chain ?? ChainName.Regtest,
             failWalletAdoption,
             timeProvider);
@@ -211,11 +215,13 @@ public sealed class SparkServiceHarness : IDisposable
     /// fail to start for a reason that has nothing to do with what the test is asking.
     /// </para>
     /// </remarks>
-    public SparkServiceHarness Restart()
+    public SparkServiceHarness Restart(Action<string, FakeSparkSdkClient>? onConnect = null)
     {
         StopService();
         _ownsDataDir = false;
-        return Create(_dataDir, _durable, _deadlines, _chain, timeProvider: _timeProvider);
+        var next = Create(_dataDir, _durable, _deadlines, _chain, timeProvider: _timeProvider);
+        next.Sdk.OnConnect = onConnect;
+        return next;
     }
 
     private static SparkServiceHarness Create(
@@ -278,6 +284,7 @@ public sealed class SparkServiceHarness : IDisposable
             deadlines.Connect,
             deadlines.ConfirmStatus,
             deadlines.AbandonedConnectGrace,
+            deadlines.ExitStateCall,
             new BTCPayServer.EventAggregator(logs),
             stores,
             dataDirectories,
@@ -377,11 +384,13 @@ public sealed class SparkServiceHarness : IDisposable
         private readonly TimeSpan _connectDeadline;
         private readonly TimeSpan _confirmStatusDeadline;
         private readonly TimeSpan _abandonedConnectGrace;
+        private readonly TimeSpan _exitStateCall;
 
         public TestableSparkService(
             TimeSpan connectDeadline,
             TimeSpan confirmStatusDeadline,
             TimeSpan abandonedConnectGrace,
+            TimeSpan exitStateCall,
             BTCPayServer.EventAggregator eventAggregator,
             BTCPayServer.Abstractions.Contracts.IStoreRepository storeRepository,
             IOptions<DataDirectories> dataDirectories,
@@ -409,10 +418,12 @@ public sealed class SparkServiceHarness : IDisposable
             _connectDeadline = connectDeadline;
             _confirmStatusDeadline = confirmStatusDeadline;
             _abandonedConnectGrace = abandonedConnectGrace;
+            _exitStateCall = exitStateCall;
         }
 
         protected override TimeSpan ConnectDeadline => _connectDeadline;
         protected override TimeSpan ConfirmStatusDeadline => _confirmStatusDeadline;
         protected override TimeSpan AbandonedConnectGraceDeadline => _abandonedConnectGrace;
+        protected override TimeSpan ExitStateCallDeadline => _exitStateCall;
     }
 }

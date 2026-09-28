@@ -1282,6 +1282,18 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     public Exception? FailImportWith { get; set; }
 
     /// <summary>
+    /// When set, what an export returns instead of <see cref="ExitStateToExport"/> — for a test that needs the
+    /// export to do something while it runs (an event arriving mid-export) or never to finish at all.
+    /// </summary>
+    public Func<Task<string>>? ExportOverride { get; set; }
+
+    /// <summary>
+    /// When set, what an import returns instead of <see cref="ExitStateImportResult"/> — for a test that needs
+    /// an import that hangs, or that answers differently per blob.
+    /// </summary>
+    public Func<string, Task<SparkExitStateImport>>? ImportOverride { get; set; }
+
+    /// <summary>
     /// The blob <see cref="ExportUnilateralExitStateAsync"/> hands back.
     /// </summary>
     /// <remarks>
@@ -1572,7 +1584,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     public Task<string> ExportUnilateralExitStateAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        ExitExportCalls.Add("export");
+        lock (ExitExportCalls)
+            ExitExportCalls.Add("export");
+
+        if (ExportOverride is { } exportOverride)
+            return exportOverride();
 
         return FailExportWith is not null
             ? Task.FromException<string>(FailExportWith)
@@ -1584,7 +1600,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        ExitImportCalls.Add(exitState);
+        lock (ExitImportCalls)
+            ExitImportCalls.Add(exitState);
+
+        if (ImportOverride is { } importOverride)
+            return importOverride(exitState);
 
         return FailImportWith is not null
             ? Task.FromException<SparkExitStateImport>(FailImportWith)
