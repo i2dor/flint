@@ -83,7 +83,7 @@ All notable changes to this plugin are recorded here. The format follows
 
 - **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
   a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
-  out of the leaf rather than paid by the funding UTXO, so a step left unsent for a day or more pays part of
+  out of the leaf rather than paid by the funding UTXO, so a step left unsent for more than those ~8 hours pays part of
   its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
   page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
   tells the operator that following the Status column is what matters, since broadcasting an already-sent

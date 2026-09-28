@@ -167,15 +167,21 @@
   a leaf is only exitable this second way once its chain has been synced at least once so its data exists to
   be collected. So the path now covers operators who are gone, given a backup taken in time — not a wallet
   that was never online with them. The fees are paid from a **separate on-chain output the operator funds by
-  hand**, as a single output covering the quoted amount, on an address derived from the store's seed at a
-  documented path. And settlement is **not fast**: refunds carry multi-day CSV timelocks, and nothing in the
+  hand**, as a single output covering the quoted amount for the first build, on an address derived from the
+  store's seed at a documented path; once built, a rebuild (after a Redo, an unverified status, or to raise the
+  fee) hands Spark the funding already committed to follow and adds anything else sent to that address. And settlement is **not fast**: refunds carry multi-day CSV timelocks, and nothing in the
   plugin watches the chain on the operator's behalf. That last point has a cost worth naming: about 50 blocks
   after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose fee is
-  taken out of the leaf rather than paid by the funding UTXO — so a step left unbroadcast for a day or more
-  can end up paying for parts of itself out of the money being recovered. Checking the exit page daily is the
-  mitigation. Funding discovery also asks a block explorer (mempool.space by default on mainnet,
-  configurable) about the funding address, which discloses that address to a third party unless an own
-  instance is configured.
+  taken out of the leaf rather than paid by the funding UTXO — so a step left unbroadcast for more than about
+  eight hours after it became ready can end up paying for parts of itself out of the money being recovered.
+  Checking the exit page every few hours while steps mature is the mitigation; its statuses refresh only when
+  you press Check progress (which needs the store's wallet running) or build, and the page shows when they
+  were last read. Packages need Bitcoin Core 29 or later (the zero-value P2A anchors). While an exit is in
+  progress Flint pauses its own sweeps for that store, but Lightning payments, payouts, Stable Balance and
+  Spark's own leaf optimisation are not paused and can invalidate the exit — building then refuses, and the
+  exit has to be quoted again. Funding discovery also asks a block explorer (mempool.space by default on
+  mainnet) about the funding address, which discloses that address to a third party unless an own instance
+  is configured; only a server administrator can set that override.
 - **Neither post-MVP feature can be tested off mainnet.** Cross-chain sending is hard-gated — the SDK throws
   at connect on any other network — and Stable Balance is *accepted* on regtest and then never converts,
   because USDB does not exist there. So the unit tests run against a fake built to model the real SDK's

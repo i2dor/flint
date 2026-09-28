@@ -29,13 +29,16 @@ before counting on it:
   gone, and a leaf is only exitable this way once its chain has been synced at least once.
 - **You have to fund it on-chain first.** The tree transactions cannot pay their own fees, so the exit is
   bumped by CPFP from a native-SegWit UTXO you send to an address the plugin derives from the store's seed at
-  its own hardened account. Too little there and nothing gets built.
+  its own hardened account. Too little there and nothing gets built. Fan-out and fee-bumping fees come out
+  of that funding and the final sweep's fee out of the recovered value; unspent funding is swept to the
+  destination with the rest, and funding for an exit that is never broadcast is not spent.
 - **It settles in days, not seconds.** The outputs are behind CSV timelocks measured in blocks; the money is
   spendable when the last one expires, not when the transactions are signed. That window has a cost: about 50
   blocks after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose
-  fee comes out of the leaf rather than the funding UTXO — so a step left unbroadcast for a day or more pays
-  part of its own cost out of the money being recovered. The exit page reports each step's readiness, and the
-  operator is expected to check it daily.
+  fee comes out of the leaf rather than the funding UTXO — so a step left unbroadcast for more than about
+  eight hours after it became ready pays part of its own cost out of the money being recovered. The exit page
+  reports each step's readiness as of the last check or build, and the operator is expected to check it every
+  few hours while steps mature.
 
 So it is a last resort that costs days and attention, not a second sweep destination. If the operators
 became unavailable and this path did not get you out, recovering funds still means using the store's recovery
