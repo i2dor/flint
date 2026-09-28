@@ -275,9 +275,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // settings form and the Greenfield sweep endpoints so a configuration one accepts is one the other accepts.
         services.AddSingleton<SparkSweepSettingsService>();
 
-        // Experimental unilateral exit, behind Constants.UnilateralExitEnabled. Registered unconditionally: the
-        // gate is enforced inside the service and the controller, not by whether the type exists, so a host that
-        // sets the variable after startup does not get a half-wired graph.
+        // Unilateral exit. Every guard on it — the store's stored disclosure acknowledgement first — lives inside
+        // the service, not in whether the type is registered.
         //
         // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
         // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora

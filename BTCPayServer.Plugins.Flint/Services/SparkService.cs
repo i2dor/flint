@@ -969,12 +969,6 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     private async Task RestoreExitStateAsync(SparkStoreInstance instance)
     {
-        // Off unless the host turned the feature on. A store can carry backups from a host that had the gate
-        // set, and importing them on a host that did not would be this plugin acting on exit data for a
-        // feature that is otherwise absent — including on the connect path, where no operator asked.
-        if (!Constants.UnilateralExitEnabled)
-            return;
-
         var identity = await ReadWalletIdentityAsync(instance).ConfigureAwait(false);
 
         // Held for the whole restore. Unbounded here, because this is the first taker of this instance's gate
@@ -2075,12 +2069,6 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </remarks>
     public async Task TakeDueExitStateBackupsAsync(CancellationToken cancellationToken)
     {
-        // The feature gate first, on the whole pass: with the experiment off nothing here is reachable
-        // from the UI either, and exporting a wallet's exit data on a server that has no exit feature is
-        // this plugin acting on a secret for no one.
-        if (!Constants.UnilateralExitEnabled)
-            return;
-
         await _startupGate.Task.ConfigureAwait(false);
 
         // One clock reading for the whole walk, so two stores cannot disagree about the same pass.
@@ -2297,7 +2285,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     public async Task<ExitStateImportReport> ImportPendingExitStateAsync(
         string storeId, CancellationToken cancellationToken = default)
     {
-        if (!Constants.UnilateralExitEnabled || string.IsNullOrEmpty(storeId))
+        if (string.IsNullOrEmpty(storeId))
             return ExitStateImportReport.NothingPending;
 
         try
@@ -2349,8 +2337,8 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     public async Task<ExitStateExportResult> ExportExitStateAsync(
         string storeId, CancellationToken cancellationToken = default)
     {
-        if (!Constants.UnilateralExitEnabled || string.IsNullOrEmpty(storeId))
-            return new ExitStateExportResult(null, false, "Unilateral exit is not enabled on this server.");
+        if (string.IsNullOrEmpty(storeId))
+            return new ExitStateExportResult(null, false, "No store was named, so there is nothing to export.");
 
         try
         {

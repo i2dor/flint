@@ -5,6 +5,45 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+The unilateral exit stops being an experiment behind a server switch and becomes a supported feature on every
+server. Nothing about what it is changes — it is still a manual last resort that the plugin never broadcasts —
+but every store can now reach it, and the machinery that makes it work when Spark's operators are gone (the
+automatic exit-state backup and its import) now runs on every host, not only on those that opted in.
+
+### Changed
+
+- **The unilateral exit is available on every server, without an environment variable.**
+  `FLINT_EXPERIMENTAL_UNILATERAL_EXIT` is no longer read: setting it does nothing, and it can be removed from
+  BTCPay's environment. The exit page is linked from every store's Advanced page, and quoting and building are
+  still refused until someone with store-settings rights has read and accepted what an exit costs. On a host
+  that never set the variable, this newly means:
+  - **Automatic exit-state backups are written for every running store**, under
+    `<DataDir>/Plugins/Flint/exit-state/<storeId>.txt`, owner-only: once after each wallet start, when money
+    moves or the SDK reports its exit data changed (debounced to two minutes), and at least hourly, rewritten
+    only when the content changed. A file can run to several megabytes. It discloses the wallet's balance, how
+    it is split and its history, and a copy on the server's own disk does not survive that disk — download it
+    from the Advanced page and keep it off the server, encrypted. A wallet that starts with empty storage
+    imports its stored backup back, and a pasted backup is imported at once or queued until it can be.
+  - **Flint's own sweeps pause while a store has an exit quoted or built**, refused with `ExitInProgress` in
+    the sweep history until the exit is completed or abandoned. Every sweep and preview makes one indexed
+    lookup for this; if the lookup fails the sweep is refused and retried rather than run blind.
+  - **The block explorer (mempool.space by default on mainnet) is contacted only from the exit page, and only
+    once the disclosure has been accepted**: for a suggested fee rate while the quote form is shown, for the
+    funding address's balance each time the page is opened while an exit awaits funding, and for its outputs
+    when an exit is built. Opening the page only to read the disclosure contacts no explorer — in 1.2.0 it
+    fetched a fee rate even then — and neither do quoting, checking progress, the Advanced page, the backups or
+    any background task. The last two lookups disclose the funding address; a server administrator can point
+    the page at an own esplora instance instead.
+
+  Every limit the exit carried is unchanged: the plugin never broadcasts; packages go out by hand through
+  Bitcoin Core 29 or later; the fees come from an on-chain output the operator funds first; settlement waits
+  on multi-day CSV timelocks, with about eight hours after each step becomes ready before Spark's watchtowers
+  can broadcast their own version at the leaf's expense; and only leaves whose exit data was collected while
+  the operators were reachable, or restored from a backup, can be exited. See
+  [Known limitations](docs/limitations.md) and [Trust model](docs/trust-model.md).
+
 ## [1.2.0] — 2026-09-28
 
 The first feature release since 1.0. Customers can pay in **USDC or USDT** from eight networks while the store

@@ -859,12 +859,8 @@ public class SparkController : Controller
             // When the stored backup was last written. Read from the store rather than the settings blob
             // because the plugin refreshes this file on its own as the wallet's leaves change — this page is
             // showing the operator how current the automation is, not asking whether they want a backup.
-            ExitStateBackupTakenAt = Constants.UnilateralExitEnabled
-                ? await ReadBackupTakenAtAsync(storeId, cancellationToken).ConfigureAwait(false)
-                : null,
-            PendingExitStateBackups = Constants.UnilateralExitEnabled
-                ? await ReadPendingBackupsAsync(storeId, cancellationToken).ConfigureAwait(false)
-                : []
+            ExitStateBackupTakenAt = await ReadBackupTakenAtAsync(storeId, cancellationToken).ConfigureAwait(false),
+            PendingExitStateBackups = await ReadPendingBackupsAsync(storeId, cancellationToken).ConfigureAwait(false)
         };
     }
 
@@ -981,23 +977,7 @@ public class SparkController : Controller
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Every action in this region begins by pretending the feature does not exist.</b>
-    /// <see cref="Constants.UnilateralExitEnabled"/> is off by default, so each action answers
-    /// <c>NotFound</c> rather than a 403 or a validation error that would confirm the route is wired up —
-    /// the GET included, because a probe of the page answers as much as a probe of the write.
-    /// </para>
-    /// <para>
-    /// <b>What that hides, and what it does not.</b> The gate runs inside the action, so the filters in front
-    /// of it still answer first: an anonymous or under-privileged caller gets the pipeline's 401/403 and a
-    /// POST without a valid antiforgery token gets its 400, on a disabled feature exactly as on an enabled
-    /// one. Those answers are indistinguishable from any other route under this controller's
-    /// <c>CanViewStoreSettings</c> gate, which is the point — the thing kept from leaking is that
-    /// <em>this store's exit flow</em> exists to a caller who is otherwise entitled to be here, not the
-    /// existence of a route prefix. The service repeats the gate as the enforcement; this one keeps the page
-    /// and its writes from doing anything.
-    /// </para>
-    /// <para>
-    /// Beyond that gate these actions decide nothing at all. They read, they relay the service's own refusal
+    /// These actions decide nothing at all. They read, they relay the service's own refusal
     /// into the status banner, and they redirect back to the page — the same shape as
     /// <see cref="SweepNow"/>. The fee-rate bounds, the disclosure gate, the single-exit-per-store rule, the
     /// funding-sufficiency check and the explorer URL's validation all live in
@@ -1007,9 +987,6 @@ public class SparkController : Controller
     [HttpGet("exit")]
     public async Task<IActionResult> Exit([FromRoute] string storeId, CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1055,9 +1032,6 @@ public class SparkController : Controller
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> AcknowledgeExit([FromRoute] string storeId, CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1087,9 +1061,6 @@ public class SparkController : Controller
         SparkExitViewModel vm,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1128,9 +1099,6 @@ public class SparkController : Controller
         long? feeRateSatPerVbyte,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1172,9 +1140,6 @@ public class SparkController : Controller
         string recordId,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1227,9 +1192,6 @@ public class SparkController : Controller
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> ExportExitState([FromRoute] string storeId, CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1316,9 +1278,6 @@ public class SparkController : Controller
         [FromRoute] string storeId,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1388,9 +1347,6 @@ public class SparkController : Controller
         [FromForm] string? pendingId,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1466,9 +1422,6 @@ public class SparkController : Controller
         SparkAdvancedViewModel vm,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1700,9 +1653,6 @@ public class SparkController : Controller
         string recordId,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1737,9 +1687,6 @@ public class SparkController : Controller
         bool confirmedWithoutVerdict,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 
@@ -1785,9 +1732,6 @@ public class SparkController : Controller
         string? esploraApiUrl,
         CancellationToken cancellationToken)
     {
-        if (!Constants.UnilateralExitEnabled)
-            return NotFound();
-
         if (!ResolveStore(storeId, out var store))
             return NotFound();
 

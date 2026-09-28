@@ -92,8 +92,8 @@ public sealed record SweepPreview(
 /// <para>
 /// <b>Every sweep here is a cooperative exit</b> — <c>PrepareSendPayment</c>/<c>SendPayment</c> to a Bitcoin
 /// address through the service provider. There is no unilateral-exit path in this class or anywhere sweeping
-/// can reach; the plugin's only unilateral path is the experimental, gated flow on the Advanced page, entirely
-/// separate from this engine. "Drain" means the SDK's
+/// can reach; the plugin's only unilateral path is the manual, operator-driven flow reached from the Advanced page,
+/// entirely separate from this engine. "Drain" means the SDK's
 /// <c>FeePolicy.FeesIncluded</c> and nothing else.
 /// </para>
 /// <para>
@@ -2518,9 +2518,11 @@ public sealed class SparkSweepEngine
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Only while the exit feature is enabled on this server. A record left active from a time the feature was on
-    /// cannot be completed or abandoned while it is off — its page is gone — so honouring it then would pause a
-    /// store's sweeps with no way for anyone to lift the pause short of a database edit.
+    /// Asked on every sweep and preview, for every store, whether or not that store has ever opened the exit
+    /// page. That is one indexed lookup — on the <c>(StoreId, Status)</c> index in <c>SparkPluginDbContext</c> —
+    /// which on a store with no exit finds nothing, and the pause it can impose
+    /// is always liftable: the exit page, where the record is completed or abandoned, is reachable from every
+    /// store.
     /// </para>
     /// <para>
     /// A read that fails is a refusal, not a pass: the whole point is not to spend pinned leaves, and "could not
@@ -2529,7 +2531,7 @@ public sealed class SparkSweepEngine
     /// </remarks>
     private async Task<string?> DescribeActiveExitAsync(string storeId, CancellationToken cancellationToken)
     {
-        if (_unilateralExits is null || !Constants.UnilateralExitEnabled)
+        if (_unilateralExits is null)
             return null;
 
         try

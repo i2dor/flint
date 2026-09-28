@@ -60,7 +60,8 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// <b>Exit paths.</b> Every sweep this API can cause is a cooperative exit, by owner decision. There is no
 /// unilateral-exit endpoint, no parameter that selects one, and no way to
 /// reach one; "drain" in the sweep settings means the SDK's <c>FeesIncluded</c> fee policy and nothing else.
-/// The plugin's experimental unilateral-exit flow is deliberately UI-only and stays unreachable from here.
+/// The plugin's unilateral-exit flow is deliberately UI-only and stays unreachable from here: it ends in signed
+/// transactions an operator broadcasts by hand, after reading a disclosure an API client cannot be shown.
 /// </para>
 /// <para>
 /// <b>Not on the graph BTCPay builds at startup.</b> A controller is constructed per request, so nothing here

@@ -26,7 +26,6 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// own last export is imported back only when its storage was empty.
 /// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkExitStateRestoreTests
 {
     private const string StoreId = "store-restore";
@@ -42,7 +41,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task A_pasted_backup_is_imported_into_the_running_wallet_at_once_and_leaves_the_queue()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
         var wallet = h.Sdk.Clients[StoreId];
         wallet.ExitStateImportResult = new SparkExitStateImport(3, 0, 0, 1);
@@ -65,7 +63,6 @@ public class SparkExitStateRestoreTests
     public async Task A_pasted_backup_that_fails_to_import_survives_every_automatic_pass()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = await StartedAsync(clock);
         var wallet = h.Sdk.Clients[StoreId];
         wallet.FailImportWith = new InvalidOperationException("refused");
@@ -89,7 +86,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task The_page_s_export_never_touches_a_backup_waiting_to_be_imported()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
         h.Sdk.Clients[StoreId].FailImportWith = new InvalidOperationException("refused");
         await h.ExitStateBackups.AddPendingAsync(StoreId, "pasted-backup", Ct);
@@ -105,7 +101,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 120_000)]
     public async Task A_backup_queued_while_the_wallet_was_down_is_imported_at_its_next_connect()
     {
-        using var gate = FeatureGate();
         var first = await StartedAsync(new StubTimeProvider(Base));
         SparkServiceHarness? h = null;
         try
@@ -129,7 +124,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task A_backup_whose_every_leaf_is_another_wallet_s_is_kept_aside_rather_than_deleted()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
         h.Sdk.Clients[StoreId].ExitStateImportResult = new SparkExitStateImport(0, 12, 0, 0);
 
@@ -149,7 +143,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task The_automatic_pass_waits_for_the_wallet_s_startup_import()
     {
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create(timeProvider: new StubTimeProvider(Base));
         h.SeedStore(StoreId, SparkServiceHarness.MnemonicFor(1));
         await h.ExitStateBackups.WriteAsync(StoreId, "stored-before-the-restart", null, Ct);
@@ -175,7 +168,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 120_000)]
     public async Task A_stored_backup_the_connect_could_not_import_is_queued_before_the_pass_replaces_it()
     {
-        using var gate = FeatureGate();
         var first = await StartedAsync(new StubTimeProvider(Base));
         SparkServiceHarness? h = null;
         try
@@ -212,7 +204,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 120_000)]
     public async Task The_wallet_s_own_backup_is_not_imported_back_while_its_storage_is_intact()
     {
-        using var gate = FeatureGate();
         var first = await StartedAsync(new StubTimeProvider(Base));
         SparkServiceHarness? h = null;
         try
@@ -242,7 +233,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 120_000)]
     public async Task The_wallet_s_own_backup_is_imported_when_its_storage_was_lost()
     {
-        using var gate = FeatureGate();
         var first = await StartedAsync(new StubTimeProvider(Base));
         SparkServiceHarness? h = null;
         try
@@ -267,7 +257,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 120_000)]
     public async Task A_backup_no_stamp_describes_is_imported_once_and_then_recognised()
     {
-        using var gate = FeatureGate();
         var first = await StartedAsync(new StubTimeProvider(Base));
         SparkServiceHarness? second = null;
         SparkServiceHarness? third = null;
@@ -304,7 +293,6 @@ public class SparkExitStateRestoreTests
     public async Task A_hung_export_is_abandoned_and_not_started_again_while_it_still_runs()
     {
         var clock = new StubTimeProvider(Base);
-        using var gate = FeatureGate();
         using var h = SparkServiceHarness.Create(
             timeProvider: clock, exitStateCallDeadline: TimeSpan.FromMilliseconds(200));
         h.SeedStore(StoreId, SparkServiceHarness.MnemonicFor(1));
@@ -343,7 +331,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task Removing_Flint_keeps_the_store_s_backups_aside_under_names_that_say_so()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
         h.Sdk.Clients[StoreId].FailImportWith = new InvalidOperationException("refused");
@@ -362,7 +349,6 @@ public class SparkExitStateRestoreTests
     [Fact(Timeout = 60_000)]
     public async Task A_settings_write_cannot_bring_back_a_deprecated_backup_that_was_cleared()
     {
-        using var gate = FeatureGate();
         using var h = await StartedAsync(new StubTimeProvider(Base));
 
         // A whole-settings write built from a copy read before a clear: the deprecated slot is only ever
@@ -430,20 +416,4 @@ public class SparkExitStateRestoreTests
         }
     }
 
-    private static IDisposable FeatureGate() => new EnvironmentSwitch("FLINT_EXPERIMENTAL_UNILATERAL_EXIT");
-
-    private sealed class EnvironmentSwitch : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previous;
-
-        public EnvironmentSwitch(string name)
-        {
-            _name = name;
-            _previous = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, "1");
-        }
-
-        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
-    }
 }

@@ -24,14 +24,7 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// second exit committing the same leaves twice, and that stop "the explorer did not answer" reading as "no
 /// funding has arrived".
 /// </para>
-/// <para>
-/// <b>Why the whole class is one non-parallel collection.</b> The feature gate is an environment variable, which
-/// is process-global state: a test that toggles it while another class reads it would make both flaky in a way
-/// that reproduces once a week. Every test here therefore owns the variable for its duration through
-/// <see cref="Harness"/>, and the collection is serialised against the rest of the suite.
-/// </para>
 /// </remarks>
-[Collection(UnilateralExitTestCollection.Name)]
 public class SparkUnilateralExitServiceTests
 {
     private const string StoreId = "store-1";
@@ -71,68 +64,6 @@ public class SparkUnilateralExitServiceTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    #region The feature gate
-
-    /// <summary>
-    /// With the gate off the service behaves as if the feature does not exist, on every method.
-    /// </summary>
-    /// <remarks>
-    /// The controller's 404 is a courtesy and not the enforcement: a Greenfield endpoint, a scheduled task or a
-    /// second controller added later would each have to remember the gate, and this is the one place that cannot
-    /// forget it. The read reports an absent feature rather than the store's real acknowledgement, so nothing
-    /// leaks through a surface the gate is supposed to have closed.
-    /// </remarks>
-    [Fact]
-    public async Task Every_entry_point_behaves_as_if_the_feature_does_not_exist_when_the_gate_is_off()
-    {
-        using var harness = Harness.Create(featureEnabled: false);
-        harness.Configure(acknowledged: true);
-        harness.WithLeaves(("leaf-a", 500_000));
-
-        var page = await harness.Service.ReadAsync(StoreId, Ct);
-        Assert.False(page.WalletRunning);
-        Assert.False(page.DisclosureAcknowledged);
-        Assert.Equal(0, page.BalanceSats);
-        Assert.Null(page.ActiveRecord);
-        Assert.Empty(page.History);
-        Assert.Null(page.FundingReceivedSat);
-        Assert.Null(page.FundingLargestOutputSat);
-        Assert.Null(page.LeafCount);
-        Assert.Null(page.FundingKeyPath);
-        Assert.Null(page.Transactions);
-        Assert.False(page.TransactionsUnreadable);
-
-        foreach (var attempt in new[]
-                 {
-                     await harness.Service.AcknowledgeDisclosureAsync(StoreId, Ct),
-                     await harness.Service.SetExplorerUrlAsync(StoreId, "https://explorer.test/api", Ct),
-                     await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct),
-                     await harness.Service.BuildAsync(StoreId, "whatever", Ct),
-                     await harness.Service.MarkCompletedAsync(StoreId, "whatever", Ct),
-                     await harness.Service.AbandonAsync(StoreId, "whatever", Ct)
-                 })
-        {
-            Assert.False(attempt.Success);
-            Assert.Equal(SparkUnilateralExitService.FeatureDisabled, attempt.Error);
-        }
-
-        // And nothing reached the wallet or the database on the way to those refusals.
-        Assert.Empty(harness.Sdk.ExitQuoteCalls);
-        Assert.Empty(harness.Records.Records);
-        Assert.Empty(harness.Settings.Writes);
-
-        // And the exit-state surface, whose storage is a file rather than a settings write.
-        var backupAttempt = await harness.Service.SetExitStateBackupAsync(StoreId, "opaque-blob", Ct);
-        Assert.False(backupAttempt.Success);
-        Assert.Equal(SparkUnilateralExitService.FeatureDisabled, backupAttempt.Error);
-        Assert.Empty(harness.Backups.WriteCalls);
-        Assert.Empty(harness.Backups.PendingAddCalls);
-
-        Assert.Empty(harness.Backups.ReadCalls);
-    }
-
-    #endregion
-
     #region The disclosure gate
 
     /// <summary>
@@ -146,7 +77,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Quoting_and_building_are_refused_until_the_disclosure_is_stored()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: false);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -170,7 +101,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Acknowledging_the_disclosure_stores_it_once()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: false);
 
         var first = await harness.Service.AcknowledgeDisclosureAsync(StoreId, Ct);
@@ -191,7 +122,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_store_without_Flint_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
 
         var ack = await harness.Service.AcknowledgeDisclosureAsync(StoreId, Ct);
         var quote = await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct);
@@ -222,7 +153,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData(long.MaxValue)]
     public async Task A_fee_rate_outside_the_band_is_refused(long feeRate)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -238,7 +169,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData(500L)]
     public async Task The_band_ends_are_accepted(long feeRate)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -263,7 +194,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData(MainnetDestination)]
     public async Task A_destination_that_is_not_valid_here_is_refused(string destination)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -284,7 +215,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_empty_selection_says_there_is_nothing_worth_exiting()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
 
         var result = await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct);
@@ -299,7 +230,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_quote_whose_fee_exceeds_what_it_recovers_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Sdk.ExitTotalFeeSat = 4_000;
         harness.WithLeaves(("leaf-a", 3_500));
@@ -321,7 +252,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_successful_quote_persists_the_leaf_ids_the_funding_address_and_the_figures()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
 
@@ -367,7 +298,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Each_exit_gets_its_own_funding_address()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -404,7 +335,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData(UnilateralExitStatus.Built)]
     public async Task A_store_with_an_exit_in_flight_cannot_quote_another(UnilateralExitStatus status)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var existing = harness.Seed(status: status);
@@ -427,7 +358,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_second_operation_is_refused_while_one_is_in_flight()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -454,7 +385,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_store_whose_seed_cannot_be_read_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Settings.Settings[StoreId]!.ProtectedMnemonic = "not something this keyring can unprotect";
         harness.WithLeaves(("leaf-a", 500_000));
@@ -471,7 +402,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_stopped_wallet_cannot_quote()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true, walletRunning: false);
 
         var result = await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct);
@@ -495,7 +426,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_underfunded_exit_is_refused_and_the_reason_is_recorded()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(singleUtxoFundingSat: 4_200);
@@ -526,7 +457,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_unconfirmed_funding_output_does_not_count()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(singleUtxoFundingSat: 4_200);
@@ -554,7 +485,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Two_outputs_that_add_up_do_not_fund_an_exit()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(singleUtxoFundingSat: 4_200);
@@ -579,7 +510,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_unreachable_explorer_reports_unknown_rather_than_zero()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed();
         harness.ExplorerOffline();
@@ -594,7 +525,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_unreachable_explorer_refuses_the_build_readably()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed();
@@ -618,7 +549,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_regtest_store_with_no_explorer_configured_is_told_to_set_one()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true, esploraApiUrl: null);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed();
@@ -636,7 +567,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_reports_the_confirmed_funding_balance()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed();
         harness.Explorer(Utxo(5_000, vout: 0), Utxo(2_500, vout: 1), Utxo(9_000, vout: 2, confirmed: false));
@@ -661,7 +592,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_funded_exit_builds_and_persists_its_transactions_and_totals()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
         var record = harness.Seed(
@@ -721,7 +652,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_build_re_quotes_the_pinned_leaves()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000), ("leaf-c", 100_000));
         var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
@@ -750,7 +681,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_whose_leaves_have_vanished_is_refused_before_anything_is_signed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -783,7 +714,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_wallet_that_moves_between_the_re_price_and_the_build_is_vetoed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -820,7 +751,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_requirement_that_grew_is_re_priced_before_the_funding_is_selected()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -854,7 +785,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_that_would_now_cost_more_than_it_recovers_is_vetoed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -883,7 +814,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_veto_for_a_grown_requirement_reports_the_largest_output_on_the_address()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -919,7 +850,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_cancelled_after_signing_still_persists_its_transactions()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -953,7 +884,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_SDK_s_funding_failure_lands_on_the_record_as_words()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var shortfallRecord = harness.Seed(id: "exit-shortfall", leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -975,7 +906,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Building_an_unknown_or_finished_exit_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         harness.Explorer(Utxo(10_000));
@@ -1001,7 +932,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_exit_whose_funding_key_no_longer_derives_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(fundingAddress: "bcrt1qsomeotheraddressentirely");
@@ -1040,7 +971,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_that_returns_no_transactions_is_a_successful_build()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(
@@ -1093,7 +1024,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_partial_rebuild_replaces_the_stored_set_rather_than_merging_with_it()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
         var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
@@ -1144,7 +1075,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_refuses_when_a_pinned_leaf_has_gone_missing()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000));
         var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
@@ -1166,7 +1097,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_build_s_own_quote_is_held_to_the_pinned_leaves_too()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
         var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
@@ -1197,7 +1128,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Leaves_that_finished_on_chain_are_not_mistaken_for_missing_ones()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
 
@@ -1236,7 +1167,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_rebuild_hands_the_committed_funding_back_to_be_followed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
         var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
@@ -1289,7 +1220,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_rebuild_takes_a_top_up_alongside_the_committed_funding()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         var original = $"{FundingTxid}:0";
@@ -1335,7 +1266,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_rebuild_goes_ahead_on_the_committed_funding_when_the_explorer_is_down()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         harness.ExplorerOffline();
@@ -1367,7 +1298,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData("""[{"Txid":"not-a-txid","Vout":0,"ValueSat":1000,"PubkeyHex":"02"}]""")]
     public async Task An_unreadable_committed_funding_column_refuses_a_rebuild(string stored)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         harness.Records.Records[record.Id].FundingUtxosJson = stored;
@@ -1398,7 +1329,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_rebuild_at_a_higher_rate_signs_at_it_and_records_it()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         Assert.Equal(10, harness.Records.Records[record.Id].FeeRateSatPerVbyte);
@@ -1428,7 +1359,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_built_exit_refuses_a_lower_rate()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         var quotesBefore = harness.Sdk.ExitQuoteCalls.Count;
@@ -1457,7 +1388,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_fee_bump_that_fails_leaves_the_built_rate_and_figures_alone()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         var before = harness.Records.Records[record.Id];
@@ -1490,7 +1421,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_exit_awaiting_funding_takes_a_new_rate_with_its_requirement()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -1524,7 +1455,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Checking_a_built_exit_persists_the_refreshed_transactions()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = await BuiltExit(harness);
@@ -1559,7 +1490,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_check_verdict_is_reported_but_not_persisted()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = await BuiltExit(harness);
@@ -1598,7 +1529,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Checking_an_exit_that_is_not_built_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
 
@@ -1637,7 +1568,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Checking_a_built_exit_builds_and_spends_nothing()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = await BuiltExit(harness);
@@ -1669,7 +1600,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_check_that_cannot_write_its_refresh_back_reports_a_refusal()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = await BuiltExit(harness);
@@ -1693,7 +1624,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_check_that_fails_leaves_the_stored_set_untouched()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = await BuiltExit(harness);
@@ -1725,7 +1656,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Abandoning_an_exit_frees_the_store()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed();
@@ -1748,7 +1679,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Another_store_s_exit_cannot_be_built_or_abandoned()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         harness.Explorer(Utxo(10_000));
@@ -1775,7 +1706,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_abandon_that_read_a_stale_row_does_not_clobber_a_build()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -1824,7 +1755,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Marking_a_built_exit_completed_frees_the_store()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         harness.Sdk.CheckVerdict = SparkExitVerdict.Done;
@@ -1854,7 +1785,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Only_a_built_exit_can_be_marked_completed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
 
         var waiting = harness.Seed(id: "exit-waiting");
@@ -1877,7 +1808,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_completed_exit_cannot_be_abandoned()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = harness.Seed(status: UnilateralExitStatus.Built);
         Assert.True((await harness.Service.MarkCompletedAsync(
@@ -1911,7 +1842,7 @@ public class SparkUnilateralExitServiceTests
     public async Task An_unfinished_exit_is_not_marked_completed_on_a_plain_press(
         SparkExitVerdict verdict, string expected)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         harness.Sdk.CheckVerdict = verdict;
@@ -1928,7 +1859,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_stopped_wallet_blocks_the_check_but_not_the_operator_s_own_confirmation()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         harness.Runtime.Clients.Remove(StoreId);
@@ -1966,7 +1897,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_reports_when_the_statuses_were_last_read_from_the_chain()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
 
@@ -1989,7 +1920,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_set_stored_before_the_read_time_was_recorded_still_reads()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         var legacy = JsonSerializer.Serialize(StoredSet(harness.Records.Records[record.Id].TransactionsJson));
@@ -2025,7 +1956,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_quote_that_never_answers_gives_up_and_frees_the_store()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         harness.Service.QuoteDeadline = TimeSpan.FromMilliseconds(50);
@@ -2047,7 +1978,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_build_or_check_that_never_answers_gives_up_without_storing_anything()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = await BuiltExit(harness);
         var storedSet = harness.Records.Records[record.Id].TransactionsJson;
@@ -2087,7 +2018,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_explorer_url_is_stored_validated_and_clearable()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true, esploraApiUrl: null);
 
         var set = await harness.Service.SetExplorerUrlAsync(StoreId, " https://explorer.test/api/ ", Ct);
@@ -2115,7 +2046,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData("/relative/api")]
     public async Task An_unusable_explorer_url_is_refused_before_it_is_stored(string candidate)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true, esploraApiUrl: "https://good.test/api");
 
         var result = await harness.Service.SetExplorerUrlAsync(StoreId, candidate, Ct);
@@ -2130,7 +2061,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Setting_the_explorer_url_on_an_unconfigured_store_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
 
         var result = await harness.Service.SetExplorerUrlAsync(StoreId, "https://explorer.test/api", Ct);
 
@@ -2153,7 +2084,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_pasted_backup_is_queued_for_import_and_not_written_over_the_automatic_backup()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         await harness.Backups.WriteAsync(StoreId, "the-wallet-s-own-export", "02aa", Ct);
 
@@ -2174,7 +2105,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_pasted_backup_past_the_size_ceiling_is_refused_before_anything_is_stored()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var result = await harness.Service.SetExitStateBackupAsync(
             StoreId, new string('x', SparkUnilateralExitService.MaxExitStateBackupChars + 1), Ct);
@@ -2193,7 +2124,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Re_pasting_a_queued_backup_does_not_queue_it_twice()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
 
         Assert.True((await harness.Service.SetExitStateBackupAsync(StoreId, "same-blob", Ct)).Success);
@@ -2209,7 +2140,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Clearing_the_backup_removes_the_automatic_backup_and_the_queue()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         await harness.Backups.WriteAsync(StoreId, "automatic", "02aa", Ct);
         await harness.Service.SetExitStateBackupAsync(StoreId, "to-be-cleared", Ct);
@@ -2242,7 +2173,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Clearing_the_backup_clears_the_deprecated_slot_without_a_settings_write()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "legacy-blob";
 
@@ -2255,7 +2186,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Storing_a_backup_on_an_unconfigured_store_is_refused()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
 
         var result = await harness.Service.SetExitStateBackupAsync(StoreId, "some-blob", Ct);
 
@@ -2272,7 +2203,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_read_reports_the_wallet_the_balance_and_the_history()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Sdk.BalanceSats = 640_000;
         harness.Seed(id: "exit-old", status: UnilateralExitStatus.Abandoned, minutesOld: 60);
@@ -2308,7 +2239,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_read_separates_the_funding_total_from_its_largest_output()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed(singleUtxoFundingSat: 4_200);
         harness.Explorer(Utxo(2_500, vout: 0), Utxo(3_000, vout: 1));
@@ -2330,7 +2261,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_read_reports_funding_without_the_store_s_seed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed(fundingKeyIndex: 2);
         harness.Explorer(Utxo(4_200));
@@ -2354,7 +2285,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_read_hands_back_a_built_exit_s_transactions_typed()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
@@ -2401,7 +2332,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[null],"Kind":0,"Status":{"Readiness":1}}]""")]
     public async Task An_unreadable_transaction_column_is_reported_rather_than_thrown(string stored)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = harness.Seed(status: UnilateralExitStatus.Built);
         harness.Records.Records[record.Id].TransactionsJson = stored;
@@ -2434,7 +2365,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_database_that_will_not_answer_degrades_every_entry_point_instead_of_throwing()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed();
@@ -2478,7 +2409,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_read_survives_a_wallet_that_is_down()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed(id: "exit-live");
         harness.Sdk.FailWith = new InvalidOperationException("the wallet is wedged");
@@ -2500,7 +2431,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_built_exit_reports_no_funding_balance()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed(status: UnilateralExitStatus.Built);
         harness.Explorer(Utxo(4_200));
@@ -2521,7 +2452,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_page_carries_a_recommendation_only_while_nothing_is_in_flight()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.ExplorerBody("""{"halfHourFee":7}""");
 
@@ -2539,6 +2470,27 @@ public class SparkUnilateralExitServiceTests
         // Still one request in total, and a built exit asks for nothing at all — see
         // A_built_exit_reports_no_funding_balance — so this counts the recommendation and nothing else.
         Assert.Equal(1, harness.ExplorerRequests);
+    }
+
+    /// <summary>A store that has not accepted the disclosure is shown it, and the explorer is not asked anything.</summary>
+    /// <remarks>
+    /// The exit page is linked from every store's Advanced page, so it is opened by operators who only want to
+    /// read what an exit involves. Until they accept it the page shows the disclosure and no quote form, so a
+    /// market rate would be fetched for a field nobody sees — and on mainnet that fetch is this server telling
+    /// mempool.space it exists. Nothing is quoted before the acknowledgement, and nothing is looked up either.
+    /// </remarks>
+    [Fact]
+    public async Task An_unacknowledged_page_read_asks_the_explorer_nothing()
+    {
+        var harness = Harness.Create();
+        harness.Configure(acknowledged: false);
+        harness.ExplorerBody("""{"halfHourFee":7}""");
+
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+
+        Assert.False(page.DisclosureAcknowledged);
+        Assert.Null(page.RecommendedFeeRateSatPerVbyte);
+        Assert.Equal(0, harness.ExplorerRequests);
     }
 
     #endregion
@@ -2669,7 +2621,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task An_output_with_a_malformed_txid_is_dropped()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         harness.Seed();
         harness.ExplorerBody(
@@ -2696,7 +2648,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_well_formed_answer_is_the_half_hour_rate_clamped_to_the_suggestion_cap()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.ExplorerBody(
             """{"fastestFee":40,"halfHourFee":7,"hourFee":5,"economyFee":3,"minimumFee":1}""");
 
@@ -2773,7 +2725,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task A_failed_lookup_keeps_the_explorer_path_and_the_handler_s_words_out_of_logs_and_errors()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.Configure(acknowledged: true, esploraApiUrl: "https://esplora.example/api/SECRET-TOKEN");
         harness.WithLeaves(("leaf-a", 500_000));
         var record = harness.Seed(leafIds: ["leaf-a"]);
@@ -2812,28 +2764,28 @@ public class SparkUnilateralExitServiceTests
     {
         var settings = new UnilateralExitSettings { EsploraApiUrl = "http://explorer.test/api" };
 
-        using (var offline = Harness.Create())
         {
+            var offline = Harness.Create();
             offline.ExplorerOffline();
             Assert.Null(await offline.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
         }
 
-        using (var refused = Harness.Create())
         {
+            var refused = Harness.Create();
             // An explorer rate-limiting this plugin, which is the answer that most needs to not become a retry.
             refused.ExplorerFails(HttpStatusCode.TooManyRequests);
             Assert.Null(await refused.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
         }
 
-        using (var junk = Harness.Create())
         {
+            var junk = Harness.Create();
             // A captive portal or a proxy's error page: a 200 whose body is not this API's JSON.
             junk.ExplorerBody("<html><body>maintenance</body></html>");
             Assert.Null(await junk.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
         }
 
-        using (var endless = Harness.Create())
         {
+            var endless = Harness.Create();
             endless.ExplorerEndless();
             Assert.Null(await endless.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(true, settings, Ct));
         }
@@ -2857,7 +2809,7 @@ public class SparkUnilateralExitServiceTests
     [InlineData("""{"halfHourFee":-3}""")]
     public async Task A_body_with_no_usable_rate_is_null(string body)
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         harness.ExplorerBody(body);
 
         Assert.Null(await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
@@ -2876,7 +2828,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task Off_mainnet_with_no_override_a_recommendation_is_not_even_attempted()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
 
         Assert.Null(await harness.ExplorerClient.RecommendFeeRateSatPerVbyteAsync(
             mainnet: false, new UnilateralExitSettings(), Ct));
@@ -2896,7 +2848,7 @@ public class SparkUnilateralExitServiceTests
     [Fact]
     public async Task The_recommendation_is_cached_rather_than_fetched_per_render()
     {
-        using var harness = Harness.Create();
+        var harness = Harness.Create();
         var settings = new UnilateralExitSettings();
         harness.ExplorerBody("""{"halfHourFee":7}""");
 
@@ -2967,7 +2919,7 @@ public class SparkUnilateralExitServiceTests
             confirmed ? "true" : "false");
 
     /// <summary>
-    /// The service under test with every collaborator faked, and the feature gate held for the test's duration.
+    /// The service under test with every collaborator faked.
     /// </summary>
     /// <remarks>
     /// The settings store is built <em>without</em> a runtime on purpose: modelling the SDK reconnect a settings
@@ -2975,18 +2927,12 @@ public class SparkUnilateralExitServiceTests
     /// acknowledgement landing in storage rather than the reconnect that follows it. The reconnect itself is
     /// covered where it matters, in the Stable Balance tests.
     /// </remarks>
-    private sealed class Harness : IDisposable
+    private sealed class Harness
     {
-        private const string Variable = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
-
-        private readonly string? _previous;
         private readonly ExplorerHandler _handler = new();
 
-        private Harness(bool featureEnabled)
+        private Harness()
         {
-            _previous = Environment.GetEnvironmentVariable(Variable);
-            Environment.SetEnvironmentVariable(Variable, featureEnabled ? "1" : null);
-
             Protector = new SparkMnemonicProtector(new EphemeralDataProtectionProvider());
             Runtime.Clients[StoreId] = Sdk;
 
@@ -3009,7 +2955,7 @@ public class SparkUnilateralExitServiceTests
                 NullLogger<SparkUnilateralExitService>.Instance);
         }
 
-        public static Harness Create(bool featureEnabled = true) => new(featureEnabled);
+        public static Harness Create() => new();
 
         public DateTimeOffset Now { get; } = new(2026, 8, 20, 12, 0, 0, TimeSpan.Zero);
 
@@ -3159,8 +3105,6 @@ public class SparkUnilateralExitServiceTests
             }
         }
 
-        public void Dispose() => Environment.SetEnvironmentVariable(Variable, _previous);
-
         /// <summary>
         /// An esplora endpoint a test can change after the service has been built.
         /// </summary>
@@ -3223,20 +3167,6 @@ public class SparkUnilateralExitServiceTests
             public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
         }
     }
-}
-
-/// <summary>
-/// Serialises everything that toggles the unilateral-exit feature gate.
-/// </summary>
-/// <remarks>
-/// The gate is an environment variable, and an environment variable is shared by every test in the process. A
-/// class that flips it while another reads it produces a failure that reproduces about once a week, which is the
-/// worst kind — so the collection is not parallelised against the rest of the suite.
-/// </remarks>
-[CollectionDefinition(Name, DisableParallelization = true)]
-public sealed class UnilateralExitTestCollection
-{
-    public const string Name = "UnilateralExitFeatureGate";
 }
 
 /// <summary>

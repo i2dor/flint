@@ -18,9 +18,8 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Every guard is here.</b> The controller renders, redirects and decides nothing; the feature gate is
-/// re-checked in every method because a controller's 404 is a courtesy and not the enforcement, and the
-/// disclosure is re-read from storage before each write because a checkbox enforced in a view is enforced
+/// <b>Every guard is here.</b> The controller renders, redirects and decides nothing; the disclosure is re-read
+/// from storage before each quote and build because a checkbox enforced in a view is enforced
 /// nowhere — the same arrangement <see cref="SparkStableBalanceService"/> uses for a comparably irreversible
 /// action.
 /// </para>
@@ -79,9 +78,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// explorer cannot be read — the operator sees a usable rate and can always type another one.
     /// </remarks>
     internal const long DefaultFeeRateSatPerVbyte = 2;
-
-    internal const string FeatureDisabled =
-        "Unilateral exit is not enabled on this server.";
 
     internal const string NotConfigured =
         "Flint is not set up for this store.";
@@ -211,13 +207,13 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private static readonly JsonSerializerOptions JsonOptions = new();
 
     /// <summary>
-    /// What the page data looks like when there is no feature, or no Flint on this store.
+    /// What the page data looks like when there is no Flint on this store, or nothing could be read.
     /// </summary>
     /// <remarks>
     /// Spelled out once rather than at each return, because a positional record of twelve members is exactly the
     /// shape where two "empty" literals drift apart from one another.
     /// </remarks>
-    private static UnilateralExitPageData AbsentFeature =>
+    private static UnilateralExitPageData NothingToShow =>
         new(false, false, 0, null, null, [], null, null, null, null, null, false, null);
 
     private readonly ISparkStoreSettingsStore _settingsStore;
@@ -294,7 +290,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             _logger.LogError(ex,
                 "Store {StoreId}: could not read the unilateral-exit page data ({Reason})",
                 storeId, SparkErrors.Describe(ex));
-            return AbsentFeature with { LoadError = ExitsUnreadable };
+            return NothingToShow with { LoadError = ExitsUnreadable };
         }
     }
 
@@ -304,15 +300,9 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
-        // Feature-off reads as "there is no such feature": no wallet, no history, nothing acknowledged. The page
-        // is unreachable anyway, and a read that reported a store's real acknowledgement through a disabled
-        // feature would be a surface the gate does not cover.
-        if (!Constants.UnilateralExitEnabled)
-            return AbsentFeature;
-
         var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
         if (settings is null)
-            return AbsentFeature;
+            return NothingToShow;
 
         var exitSettings = settings.UnilateralExit ?? new UnilateralExitSettings();
 
@@ -357,13 +347,16 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             keyPath = DescribeKeyPath(active);
         }
 
-        // Only when the quote form will actually render, which is only when nothing is in flight. A store with an
-        // exit already awaiting funding or built has its rate on the record, so asking the explorer for a market
-        // rate here would be an external round trip on every page view that decides nothing — and the exit page is
-        // reachable from any store view. Null, not the fallback, when there is no recommendation: the fallback is
-        // the caller's decision, and a service that returned a market rate it did not have would be claiming one.
+        // Only when the quote form will actually render: the disclosure has been accepted and nothing is in
+        // flight. A store with an exit already awaiting funding or built has its rate on the record, and a store
+        // that has not acknowledged sees only the disclosure — so asking the explorer for a market rate in either
+        // case would be an external round trip that decides nothing. The second one matters more than it looks:
+        // the exit page is linked from every store's Advanced page, and an operator who opens it only to read
+        // what an exit involves must not have this server announce itself to mempool.space for it. Null, not
+        // the fallback, when there is no recommendation: the fallback is the caller's decision, and a service
+        // that returned a market rate it did not have would be claiming one.
         long? recommendedFeeRate = null;
-        if (active is null)
+        if (active is null && exitSettings.DisclosureAcknowledged)
         {
             recommendedFeeRate = await _explorer
                 .RecommendFeeRateSatPerVbyteAsync(Mainnet, exitSettings, cancellationToken)
@@ -416,9 +409,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
-
         if (!_running.TryAdd(storeId, 0))
             return Refuse(OperationInFlight);
 
@@ -459,9 +449,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
 
         // Blank clears it, which is the only way back to the mainnet default once an override has been set.
         string? normalised = null;
@@ -520,9 +507,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
 
         if (string.IsNullOrWhiteSpace(recordId))
             return Refuse(ExitNotFound);
@@ -693,10 +677,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         string? exitState,
         CancellationToken cancellationToken)
     {
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
-
         // Blank clears it, so the only way back to "no backup configured" is the same form that set one.
         string? normalised = null;
         if (!string.IsNullOrWhiteSpace(exitState))
@@ -800,9 +780,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
 
         var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
         if (settings is null)
@@ -1002,9 +979,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
 
         if (string.IsNullOrWhiteSpace(recordId))
             return Refuse(ExitNotFound);
@@ -1475,9 +1449,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
-
         if (string.IsNullOrWhiteSpace(recordId))
             return Refuse(ExitNotFound);
 
@@ -1565,9 +1536,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
-
-        if (!Constants.UnilateralExitEnabled)
-            return Refuse(FeatureDisabled);
 
         if (string.IsNullOrWhiteSpace(recordId))
             return Refuse(ExitNotFound);

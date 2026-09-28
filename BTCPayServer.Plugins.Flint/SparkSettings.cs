@@ -65,16 +65,13 @@ public class SparkSettings
     public StableBalanceSettings StableBalance { get; set; } = new();
 
     /// <summary>
-    /// Experimental unilateral-exit configuration. Inert on any host that has not set
-    /// <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c> (<see cref="Constants.UnilateralExitEnabled"/>). Coalesce
-    /// before use, as with <see cref="Sweep"/>.
+    /// Unilateral-exit configuration. Coalesce before use, as with <see cref="Sweep"/>.
     /// </summary>
     /// <remarks>
-    /// Present on every settings blob written from this version on, whether or not the host has the gate set,
-    /// because the alternative — writing the section only when the feature is enabled — would mean a store's
-    /// acknowledgement silently disappearing from the blob the first time an operator saved settings with the
-    /// gate off. The section existing is not the feature being available; see
-    /// <see cref="UnilateralExitSettings"/>.
+    /// Present on every settings blob, whether or not the store has ever opened the exit page, so a store's
+    /// acknowledgement cannot silently disappear from the blob because some other form saved settings without
+    /// knowing about it. The section existing is not an exit being possible: quoting and building still refuse
+    /// until <see cref="UnilateralExitSettings.DisclosureAcknowledged"/> is set.
     /// <para>
     /// <b>Never null, including after a read.</b> A property initialiser covers a blob with no
     /// <c>UnilateralExit</c> key at all, but a blob carrying an explicit <c>"UnilateralExit": null</c> — a hand
@@ -465,17 +462,15 @@ public class StableBalanceSettings
 }
 
 /// <summary>
-/// Experimental unilateral exit: recovering the store's Spark balance on-chain without the operators
-/// cooperating on an exit transaction.
+/// Unilateral exit: recovering the store's Spark balance on-chain without the operators cooperating on an
+/// exit transaction.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Nothing in this section is reachable unless the host sets
-/// <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c></b> — see <see cref="Constants.UnilateralExitEnabled"/>. With the
-/// gate off the Advanced page shows no entry point and every controller action returns 404, so a blob carrying
-/// an acknowledgement is inert rather than dangerous. The section is still written and still cloned, because a
-/// setting that only exists while a feature flag is on is a setting that vanishes the first time somebody saves
-/// with the flag off.
+/// <b>Available to every store, and still refused until acknowledged.</b> The exit page is linked from every
+/// store's Advanced page, but nothing on it quotes or builds until <see cref="DisclosureAcknowledged"/> is
+/// stored — an operator has to have read what an exit costs before one can start. Until then the section is
+/// inert: a blob that never acknowledged carries nothing that can move money.
 /// </para>
 /// <para>
 /// <b>What it is, stated plainly, because the word oversells it.</b> A cooperative exit — every sweep this
@@ -487,7 +482,7 @@ public class StableBalanceSettings
 /// privacy or cost option, and the copy on the page says so.
 /// </para>
 /// <para>
-/// <b>Three traps that are the reason this is experimental rather than a feature.</b> First, an exit can only
+/// <b>Three traps that are the reason this is a last resort rather than an option.</b> First, an exit can only
 /// be built for leaves whose exit data is already on this server: since Breez.Sdk.Spark 0.25 quoting and building
 /// read each leaf's pre-signed chain from local storage, so they work with the operators unreachable — but that
 /// data is collected from the operators while they are still reachable, so a leaf never synced, or a server
@@ -639,8 +634,8 @@ public enum SweepDestinationMode
     /// Not a Bitcoin address and not a cooperative exit: the wallet transfers to the bridge provider's Spark
     /// deposit address and the provider settles on the destination chain. It is still an ordinary Spark
     /// transfer at the point money leaves this wallet, so the exit-path policy is untouched — no exit of
-    /// either kind happens here. A unilateral exit is reachable only from the experimental, env-gated flow on
-    /// the Advanced page (<see cref="UnilateralExitSettings"/>), never from a sweep.
+    /// either kind happens here. A unilateral exit is reachable only from the manual, operator-driven flow
+    /// linked from the Advanced page (<see cref="UnilateralExitSettings"/>), never from a sweep.
     /// </para>
     /// <para>
     /// <b>Mainnet only</b>, hard-gated by the SDK: a connect that carries a cross-chain configuration on
@@ -796,8 +791,8 @@ public class SweepSettings
     /// <b>On by default, and this is a cooperative exit either way.</b> "Drain" here means only that the fee
     /// is netted out of the amount, so the balance lands on exactly <see cref="ReserveSats"/>; it has nothing
     /// to do with a unilateral exit. Sweeping — automatic or manual — is cooperative, always; the only
-    /// unilateral-exit path in the plugin is the experimental, env-gated, manually-broadcast one on the
-    /// Advanced page (<see cref="UnilateralExitSettings"/>), which no sweep setting can reach. It
+    /// unilateral-exit path in the plugin is the manual, disclosure-gated, hand-broadcast one linked from
+    /// the Advanced page (<see cref="UnilateralExitSettings"/>), which no sweep setting can reach. It
     /// defaults on because the default <see cref="ReserveSats"/> is zero, and with
     /// the fee charged on top a zero reserve leaves nothing to charge it against.
     /// </remarks>

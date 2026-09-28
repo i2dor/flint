@@ -13,9 +13,9 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This service holds every guard; the controller renders and redirects and decides nothing. All five
-/// methods behave as if the feature does not exist when <see cref="Constants.UnilateralExitEnabled"/>
-/// is false, because the controller's gate is a courtesy, not the enforcement.
+/// This service holds every guard; the controller renders and redirects and decides nothing. The one that
+/// matters most — the store's stored disclosure acknowledgement — is re-read here before every quote and
+/// build, because a check the controller made is a courtesy, not the enforcement.
 /// </para>
 /// <para>
 /// <b>Nothing here broadcasts.</b> Phase 0 ends at a signed, ordered transaction set persisted on the
@@ -50,7 +50,7 @@ public interface ISparkUnilateralExitService
     /// Quotes an auto-selected exit and persists it as the store's active record, awaiting funding.
     /// </summary>
     /// <remarks>
-    /// Guards: feature gate, wallet running, disclosure acknowledged, fee rate in [1, 500], destination
+    /// Guards: wallet running, disclosure acknowledged, fee rate in [1, 500], destination
     /// parses for the store's network, no other active record. An empty auto-selection (nothing worth
     /// exiting at this rate) and a quote whose fee exceeds what it recovers are refusals, not errors.
     /// The quoted leaf ids are persisted on the record so the build re-quotes those exact leaves.
