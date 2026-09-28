@@ -132,8 +132,9 @@
         @if (!Model.WalletRunning)
         {
             <div class="alert alert-danger" role="alert" id="SparkExitWalletStopped">
-                This store's Spark wallet is not running, so nothing here can be quoted or built. Any exit
-                already built is still shown below — the signed transactions do not need the wallet.
+                This store's Spark wallet is not running, so nothing here can be quoted, built or checked
+                against the chain. Any exit already built is still shown below — broadcasting its signed
+                transactions does not need the wallet, but refreshing their statuses does.
             </div>
         }
 
@@ -884,8 +885,9 @@
                     progress rather than asking for an action, and it is the one thing an operator wants in
                     *every* built state — including the empty and unreadable ones, where "what does the chain
                     say about this record" is the question they actually have. It posts rather than being a
-                    link because it re-reads the chain and rewrites the stored statuses, and it works with this
-                    store's Spark wallet stopped, so it is not gated on the wallet.
+                    link because it re-reads the chain and rewrites the stored statuses. It is not hidden when
+                    the wallet is stopped — the service refuses with a reason that says to start it — because the
+                    SDK's check, though it reads only the chain, is made through the running wallet.
                 *@
                 <div permission="@Policies.CanModifyStoreSettings">
                     <form method="post" asp-action="CheckExit" asp-route-storeId="@Model.StoreId"
@@ -897,7 +899,9 @@
                         <div class="form-text">
                             Asks the chain how far this exit has got and updates every status above.
                             <strong>It broadcasts nothing and signs nothing</strong>, so it is safe to press as
-                            often as you like. Checking daily is the point: a step left unsent for a day or more
+                            often as you like. It needs this store's Spark wallet running — the check goes
+                            through the wallet's connection to the chain — though the transactions themselves do
+                            not. Checking daily is the point: a step left unsent for a day or more
                             can start paying its own fee out of the money it is recovering.
                         </div>
                     </form>
@@ -913,14 +917,27 @@
                     <h3 class="mt-5 mb-3">When it is done</h3>
                     <form method="post" asp-action="CompleteExit" asp-route-storeId="@Model.StoreId">
                         <input type="hidden" name="recordId" value="@record.Id" />
+                        <div class="form-check mb-2">
+                            @*
+                                The override, and deliberately not pre-ticked: completing takes the signed set off
+                                this page, so the default is to complete only when Spark's own check says Done.
+                            *@
+                            <input type="checkbox" class="form-check-input" name="confirmedWithoutVerdict"
+                                   value="true" id="SparkExitCompleteConfirmed" />
+                            <label class="form-check-label" for="SparkExitCompleteConfirmed">
+                                I have confirmed myself that the sweep is in a block — complete it without a check
+                            </label>
+                        </div>
                         <button type="submit" class="btn btn-outline-success" id="SparkExitComplete">
                             Mark this exit completed
                         </button>
                         <div class="form-text">
-                            Records <em>your</em> confirmation that you broadcast the set and the sweep confirmed
-                            on-chain. <strong>It moves nothing and broadcasts nothing</strong> — Flint has no way
-                            to check the chain itself here, so this is a note you are writing, not a verification.
-                            It frees this store to quote another exit and keeps the record out of the way.
+                            Asks Spark to check the chain first, and completes the exit only if every transaction,
+                            the sweep included, is in a block — completing takes these transactions off this page,
+                            so doing it early hides the steps still to send. Tick the box only when a check cannot
+                            answer (the wallet will not start, or no chain service responds) and you have seen the
+                            sweep confirm yourself. <strong>It moves nothing and broadcasts nothing</strong>, and
+                            it frees this store to quote another exit.
                         </div>
                     </form>
                 </div>

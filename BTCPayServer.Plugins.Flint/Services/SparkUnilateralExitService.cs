@@ -149,6 +149,36 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         + "there is nothing here to check against the chain. If its sweep has already confirmed, the exit is "
         + "finished and you can mark it completed. Otherwise build it again, which re-reads the chain.";
 
+    /// <summary>A check needs the wallet: see <see cref="CheckBuiltLockedAsync"/>.</summary>
+    internal const string CheckNeedsWallet =
+        "This store's Spark wallet is not running, and checking an exit against the chain needs it: the check is "
+        + "made through the wallet's own connection to the chain. The signed transactions below do not need it — "
+        + "you can keep broadcasting what you know is ready — but start the wallet to see fresh statuses.";
+
+    /// <summary>
+    /// Why an exit was not marked completed, when the operator asked the chain to confirm it.
+    /// </summary>
+    private static string DescribeNotDone(UnilateralExitOpResult check)
+    {
+        const string Override =
+            " If you have confirmed yourself that the sweep is in a block, tick the confirmation beside the button "
+            + "and mark it completed again.";
+
+        if (!check.Success)
+        {
+            return "This exit was not marked completed, because Spark could not confirm it is finished: "
+                   + (check.Error ?? "the check did not answer.") + Override;
+        }
+
+        return check.Verdict is SparkExitVerdict.Redo
+            ? "This exit was not marked completed: Spark's check says this set of transactions can no longer "
+              + "finish, so its money is not at the destination yet. Build it again rather than setting it aside."
+              + Override
+            : "This exit was not marked completed: Spark's check says it is still on track but not finished — "
+              + "something is still to be broadcast or confirmed, and completing it now would take its signed "
+              + "transactions off this page. Keep broadcasting what is ready." + Override;
+    }
+
     /// <summary>A re-quote found every pinned leaf's exit already over on-chain.</summary>
     internal const string AllLeavesFinished =
         "Every leaf this exit was pinned to has already finished on-chain — its refund was swept, or its branch can "
@@ -517,6 +547,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     record);
             }
 
+            return await CheckBuiltLockedAsync(storeId, record).ConfigureAwait(false);
+        }
+        finally
+        {
+            _running.TryRemove(storeId, out _);
+        }
+    }
+
+    /// <summary>
+    /// Asks the chain about a built record and stores the refreshed statuses. The caller holds the store's gate.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <see cref="CheckAsync"/> and <see cref="MarkCompletedAsync"/>, which needs a fresh verdict to
+    /// complete on and must not release the gate between asking and completing. Never takes the request's
+    /// token: what it writes is the chain's answer, and a browser that went away is not a reason to drop it.
+    /// </remarks>
+    private async Task<UnilateralExitOpResult> CheckBuiltLockedAsync(string storeId, UnilateralExitRecord record)
+    {
+        {
             // The status every compare-and-set below is guarded on, read once: the row must still be Built when
             // the refreshed set lands, because anything else means the operator finished or abandoned it while the
             // chain was being asked.
@@ -546,38 +595,40 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
             // The SDK checks a whole exit response, and the record only stores the transactions — see
             // UnilateralExitRecord. The two totals and the leaf set it echoes back are not inputs to the check,
-            // so the stored figures are passed through as they are rather than re-quoted: quoting is what this
-            // read path must not do, because a check has to work when the wallet is gone.
+            // so the stored figures are passed through as they are rather than re-quoted: the check reads the
+            // chain and nothing else, and re-quoting would make it depend on the wallet's leaves as well.
             var stored2 = new SparkExitResult(
                 record.RecoverableValueSat,
                 record.TotalFeeSat,
                 stored,
                 DeserializeLeafIds(record).Select(id => new SparkExitLeaf(id, 0)).ToArray());
 
-            // The client can be gone — the wallet failed to start, or was stopped while the exit sat built — and
-            // reporting that as a chain failure would send the operator to look at the wrong thing. A built exit
-            // is checkable from a store whose wallet is down, which is the case this feature exists for, so a null
-            // client is a refusal here rather than a silent no-op.
+            // The SDK's check reads only the chain, but it is a method on a connected SDK instance, and this plugin
+            // has one only while the store's wallet runs — there is no chain-only handle to ask instead. So a
+            // stopped wallet cannot check, and says so in its own words rather than as a chain failure, which
+            // would send the operator to look at the wrong thing. The broadcasting itself needs no wallet: the
+            // signed set on the page is complete without one.
             var sdk = await _runtime.GetSdkClientAsync(storeId).ConfigureAwait(false);
             if (sdk is null)
-                return new UnilateralExitOpResult(false, WalletNotRunning, record);
+                return new UnilateralExitOpResult(false, CheckNeedsWallet, record);
 
             SparkExitProgress progress;
             try
             {
-                progress = await sdk.CheckUnilateralExitAsync(stored2, cancellationToken)
+                progress = await WithinDeadlineAsync(
+                        sdk.CheckUnilateralExitAsync(stored2, CancellationToken.None), CheckDeadline, "checking")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not check unilateral exit {ExitId} against the chain ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not read the chain for this exit: " + SparkErrors.Describe(ex)
+                        "Spark could not read the chain for this exit: " + DescribeSdkFailure(ex)
                         + ". The stored transactions are unchanged and nothing was broadcast.")
                     .ConfigureAwait(false);
             }
@@ -603,10 +654,6 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 progress.Transactions.Count);
 
             return new UnilateralExitOpResult(true, null, record, progress.Verdict);
-        }
-        finally
-        {
-            _running.TryRemove(storeId, out _);
         }
     }
 
@@ -809,19 +856,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             SparkExitQuote quote;
             try
             {
-                quote = await sdk
-                    .PrepareUnilateralExitAsync(
-                        (ulong)feeRateSatPerVbyte, destination, leafIds: null, cancellationToken)
+                quote = await WithinDeadlineAsync(
+                        sdk.PrepareUnilateralExitAsync(
+                            (ulong)feeRateSatPerVbyte, destination, leafIds: null, cancellationToken),
+                        QuoteDeadline,
+                        "quoting")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not quote a unilateral exit ({Reason})",
-                    storeId, SparkErrors.Describe(ex));
+                    storeId, DescribeSdkFailure(ex));
 
                 return Refuse(
-                    "Spark could not quote a unilateral exit: " + SparkErrors.Describe(ex)
+                    "Spark could not quote a unilateral exit: " + DescribeSdkFailure(ex)
                     + ". Nothing has been recorded, so trying again is safe.");
             }
 
@@ -1085,24 +1134,26 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             SparkExitQuote fresh;
             try
             {
-                fresh = await sdk
-                    .PrepareUnilateralExitAsync(
-                        (ulong)feeRate,
-                        record.DestinationAddress,
-                        leafIds,
-                        cancellationToken)
+                fresh = await WithinDeadlineAsync(
+                        sdk.PrepareUnilateralExitAsync(
+                            (ulong)feeRate,
+                            record.DestinationAddress,
+                            leafIds,
+                            cancellationToken),
+                        QuoteDeadline,
+                        "re-pricing")
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not re-quote unilateral exit {ExitId} ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not re-price this exit: " + SparkErrors.Describe(ex)
+                        "Spark could not re-price this exit: " + DescribeSdkFailure(ex)
                         + ". Nothing was signed, so trying again is safe.")
                     .ConfigureAwait(false);
             }
@@ -1226,7 +1277,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             SparkExitQuote? committed = null;
             try
             {
-                result = await sdk
+                result = await WithinDeadlineAsync(sdk
                     .UnilateralExitAsync(
                         (ulong)feeRate,
                         record.DestinationAddress,
@@ -1266,7 +1317,9 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
                             return null;
                         },
-                        cancellationToken)
+                        cancellationToken),
+                        BuildDeadline,
+                        "building")
                     .ConfigureAwait(false);
             }
             catch (SparkExitRefusedException refused)
@@ -1298,15 +1351,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             {
                 _logger.LogWarning(ex,
                     "Store {StoreId}: could not build unilateral exit {ExitId} ({Reason})",
-                    storeId, record.Id, SparkErrors.Describe(ex));
+                    storeId, record.Id, DescribeSdkFailure(ex));
 
                 if (awaiting)
                     ApplyQuote(record, committed);
                 return await FailAsync(
                         record,
                         from,
-                        "Spark could not build this exit: " + SparkErrors.Describe(ex)
-                        + ". Nothing was signed or broadcast, so trying again is safe.")
+                        ex is SparkExitDeadlineException
+                            // Worded apart from the others because "nothing was signed" is not something a
+                            // timeout can promise: the SDK may still be signing. What it can promise is the part
+                            // that matters — nothing is broadcast by the SDK, ever, so whatever it signs is inert.
+                            ? "Spark could not build this exit: " + DescribeSdkFailure(ex)
+                              + ". Nothing was broadcast and nothing was stored; building again is safe."
+                            : "Spark could not build this exit: " + DescribeSdkFailure(ex)
+                              + ". Nothing was signed or broadcast, so trying again is safe.")
                     .ConfigureAwait(false);
             }
 
@@ -1378,16 +1437,34 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// <b>Completing on the chain's word, not only the operator's.</b> Completing an exit takes it off the page,
+    /// and the page is the only place its signed transactions are shown — so completing one early is how an
+    /// operator loses sight of the steps still to broadcast. The SDK can tell a finished exit from an unfinished
+    /// one, so this asks it first and completes only on <see cref="SparkExitVerdict.Done"/>. The operator can still
+    /// complete on their own word, with <paramref name="confirmedWithoutVerdict"/>, for the cases a check cannot
+    /// answer — a wallet that will not start, a chain service that will not respond, an empty set — and the log
+    /// records which of the two it was.
+    /// </remarks>
+    public Task<UnilateralExitOpResult> MarkCompletedAsync(
+        string storeId,
+        string recordId,
+        bool confirmedWithoutVerdict,
+        CancellationToken cancellationToken = default) =>
+        GuardAsync(storeId, "completing",
+            () => MarkCompletedCoreAsync(storeId, recordId, confirmedWithoutVerdict, cancellationToken));
+
+    /// <inheritdoc />
     public Task<UnilateralExitOpResult> MarkCompletedAsync(
         string storeId,
         string recordId,
         CancellationToken cancellationToken = default) =>
-        GuardAsync(storeId, "completing",
-            () => MarkCompletedCoreAsync(storeId, recordId, cancellationToken));
+        MarkCompletedAsync(storeId, recordId, false, cancellationToken);
 
     private async Task<UnilateralExitOpResult> MarkCompletedCoreAsync(
         string storeId,
         string recordId,
+        bool confirmedWithoutVerdict,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
@@ -1422,22 +1499,46 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     record);
             }
 
+            SparkExitVerdict? verdict = null;
+            if (!confirmedWithoutVerdict)
+            {
+                var check = await CheckBuiltLockedAsync(storeId, record).ConfigureAwait(false);
+                if (!check.Success || check.Verdict is not SparkExitVerdict.Done)
+                {
+                    return new UnilateralExitOpResult(
+                        false, DescribeNotDone(check), check.Record ?? record, check.Verdict);
+                }
+
+                verdict = check.Verdict;
+                record = check.Record ?? record;
+            }
+
             record.Status = UnilateralExitStatus.Completed;
             record.UpdatedUtc = _timeProvider.GetUtcNow();
 
             if (!await _records
-                    .UpdateAsync(record, UnilateralExitStatus.Built, cancellationToken)
+                    .UpdateAsync(record, UnilateralExitStatus.Built, CancellationToken.None)
                     .ConfigureAwait(false))
             {
                 return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
             }
 
-            _logger.LogInformation(
-                "Store {StoreId}: unilateral exit {ExitId} marked completed by the operator. The plugin watches "
-                + "no chain, so this is their statement rather than an observation",
-                storeId, record.Id);
+            if (verdict is SparkExitVerdict.Done)
+            {
+                _logger.LogInformation(
+                    "Store {StoreId}: unilateral exit {ExitId} marked completed; Spark's check confirmed every "
+                    + "transaction, the sweep included, is in a block",
+                    storeId, record.Id);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Store {StoreId}: unilateral exit {ExitId} marked completed on the operator's word, without a "
+                    + "check confirming it finished",
+                    storeId, record.Id);
+            }
 
-            return new UnilateralExitOpResult(true, null, record);
+            return new UnilateralExitOpResult(true, null, record, verdict);
         }
         finally
         {
@@ -1745,6 +1846,59 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
 
     private static UnilateralExitOpResult Refuse(string error) => new(false, error, null);
 
+    /// <summary>How long a quote (prepare) may take before the request stops waiting for it.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why any of these exist: the store's gate is held for the whole call, and the SDK's exit calls take no
+    /// cancellation.</b> Preparing an exit starts with a best-effort refresh from the Spark operators
+    /// (<c>refresh_before_exit</c>) — the one step that needs them — and an operator that accepts a connection
+    /// and never answers holds that call, the request thread and this store's exit gate with it. The binding has
+    /// no token to cancel it by, so the request stops <em>waiting</em> instead: the gate is released and the
+    /// operator gets an answer, while the native call finishes or fails on its own and is observed and dropped.
+    /// </para>
+    /// <para>
+    /// Safe because nothing here broadcasts. A dropped quote recorded nothing; a dropped build may still sign,
+    /// but what it signs is inert and never stored, and a later build starts from the chain as usual. The
+    /// figures are generous — an exit is dozens of chain lookups and signatures — because the failure they guard
+    /// against is a hang, not slowness. Settable for tests only.
+    /// </para>
+    /// </remarks>
+    internal TimeSpan QuoteDeadline { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>How long a build may take before the request stops waiting. See <see cref="QuoteDeadline"/>.</summary>
+    internal TimeSpan BuildDeadline { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How long a chain check may take before the request stops waiting. See <see cref="QuoteDeadline"/>.</summary>
+    internal TimeSpan CheckDeadline { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Waits for one SDK exit call for at most <paramref name="deadline"/>, then gives up waiting.
+    /// </summary>
+    /// <remarks>
+    /// The abandoned call is not cancelled — it cannot be — so its eventual fault is observed here rather than
+    /// left to surface as an unobserved task exception long after the request that started it.
+    /// </remarks>
+    private static async Task<T> WithinDeadlineAsync<T>(Task<T> call, TimeSpan deadline, string what)
+    {
+        try
+        {
+            return await call.WaitAsync(deadline).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _ = call.ContinueWith(
+                abandoned => _ = abandoned.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw new SparkExitDeadlineException(what, deadline);
+        }
+    }
+
+    /// <summary>A failure from an SDK exit call, in merchant-facing words, including a missed deadline.</summary>
+    private static string DescribeSdkFailure(Exception exception) =>
+        exception is SparkExitDeadlineException deadline ? deadline.Message : SparkErrors.Describe(exception);
+
     /// <summary>
     /// Runs one operation, turning anything it failed to anticipate into a refusal instead of an exception.
     /// </summary>
@@ -2049,5 +2203,27 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         destination = candidate!.Trim();
         error = string.Empty;
         return true;
+    }
+}
+
+/// <summary>
+/// An SDK exit call that did not answer inside its deadline, so the request stopped waiting for it.
+/// </summary>
+/// <remarks>
+/// A <see cref="TimeoutException"/> so a caller that only knows the base type still reads it as one. Its message
+/// is written for a merchant, and names the one step of an exit that needs the Spark operators, because that is
+/// the usual reason: see <see cref="SparkUnilateralExitService.QuoteDeadline"/>.
+/// </remarks>
+internal sealed class SparkExitDeadlineException : TimeoutException
+{
+    public SparkExitDeadlineException(string what, TimeSpan deadline)
+        : base(string.Format(
+            CultureInfo.InvariantCulture,
+            "Spark did not finish {0} this exit within {1:N0} seconds. Preparing an exit first tries to refresh the "
+            + "wallet from the Spark operators, and that can hang while they are unreachable; the wait was abandoned "
+            + "so this store is not held up behind it",
+            what,
+            deadline.TotalSeconds))
+    {
     }
 }

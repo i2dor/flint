@@ -82,7 +82,7 @@ public class SparkExitPageTests
                 CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(Store, "some-record", CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", false, CancellationToken.None));
         Assert.IsType<NotFoundResult>(
             await h.Mvc.SetExitExplorer(Store, "https://esplora.example/api", CancellationToken.None));
 
@@ -112,7 +112,7 @@ public class SparkExitPageTests
                 CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(victim, "record-7", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(victim, "record-7", CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(victim, "record-7", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(victim, "record-7", false, CancellationToken.None));
         Assert.IsType<NotFoundResult>(
             await h.Mvc.SetExitExplorer(victim, "https://esplora.example/api", CancellationToken.None));
 
@@ -580,6 +580,37 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public async Task Completing_on_the_operator_s_own_word_is_a_separate_deliberate_tick()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        // Completing takes the signed set off the page, so the plain press asks the chain first and the override
+        // is a box the operator has to tick — never pre-ticked, never hidden in the button.
+        var view = ExitTemplate();
+        Assert.Contains("name=\"confirmedWithoutVerdict\"", view);
+        Assert.DoesNotContain("name=\"confirmedWithoutVerdict\" value=\"true\" checked", view);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
+        await h.Mvc.CompleteExit(Store, "record-7", true, CancellationToken.None);
+
+        Assert.Equal(["Complete:record-7", "Complete:record-7:confirmed"], exit.Calls);
+    }
+
+    [Fact]
+    public void The_page_does_not_claim_a_check_works_with_the_wallet_stopped()
+    {
+        // The SDK's check reads only the chain, but it is made through the running wallet: there is no
+        // chain-only handle. The page used to say the opposite.
+        var view = ExitTemplate();
+
+        Assert.DoesNotContain("works with this", view);
+        Assert.Contains("It needs this store's Spark wallet running", view);
+    }
+
+    [Fact]
     public async Task A_fee_bump_reaches_the_service_with_its_rate()
     {
         using var gate = FeatureGate(enabled: true);
@@ -693,7 +724,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(true, null, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        var result = await h.Mvc.CompleteExit(Store, "record-7", CancellationToken.None);
+        var result = await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
 
         var redirect = Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(nameof(h.Mvc.Exit), redirect.ActionName);
@@ -715,7 +746,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        await h.Mvc.CompleteExit(Store, "record-7", CancellationToken.None);
+        await h.Mvc.CompleteExit(Store, "record-7", false, CancellationToken.None);
 
         Assert.Equal(refusal, h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
         Assert.Null(h.Mvc.TempData[WellKnownTempData.SuccessMessage]);
@@ -1075,9 +1106,10 @@ public class SparkExitPageTests
         }
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default)
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default)
         {
-            Calls.Add($"Complete:{recordId}");
+            Calls.Add(confirmedWithoutVerdict ? $"Complete:{recordId}:confirmed" : $"Complete:{recordId}");
             return Task.FromResult(Result);
         }
 

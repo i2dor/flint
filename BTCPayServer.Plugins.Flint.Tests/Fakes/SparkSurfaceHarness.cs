@@ -407,7 +407,8 @@ public sealed class SparkSurfaceHarness
             Task.FromResult(Refused);
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default) =>
             Task.FromResult(Refused);
 
         public Task<UnilateralExitOpResult> CheckAsync(

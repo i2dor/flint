@@ -1367,19 +1367,22 @@ public class SparkController : Controller
     }
 
     /// <summary>
-    /// Records the operator's own statement that they broadcast the set and the sweep confirmed.
+    /// Completes the exit once Spark's check confirms it finished, or on the operator's own word when they say
+    /// a check cannot answer.
     /// </summary>
     /// <remarks>
-    /// Nothing here watches the chain in Phase 0, so this button is a note, not a verification — and it moves
-    /// no money either way. It exists because without it the only way a finished exit leaves the active state
-    /// is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page teaches
-    /// somebody to distrust it.
+    /// It moves no money either way. It exists because without it the only way a finished exit leaves the
+    /// active state is "abandon", and telling a merchant to abandon the exit that just succeeded is how a page
+    /// teaches somebody to distrust it. Whether a check is needed, and what counts as finished, is the
+    /// service's judgement.
     /// </remarks>
+    /// <param name="confirmedWithoutVerdict">The page's "I confirmed the sweep myself" box.</param>
     [HttpPost("exit/complete")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
     public async Task<IActionResult> CompleteExit(
         [FromRoute] string storeId,
         string recordId,
+        bool confirmedWithoutVerdict,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1391,13 +1394,16 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .MarkCompletedAsync(storeId, recordId, cancellationToken)
+            .MarkCompletedAsync(storeId, recordId, confirmedWithoutVerdict, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(
             result,
-            "Recorded as completed. Nothing was broadcast or moved by this — it is your confirmation that the "
-            + "sweep confirmed, and it frees this store to quote another exit.");
+            result.Verdict is SparkExitVerdict.Done
+                ? "Recorded as completed: Spark's check confirmed every transaction, the sweep included, is in a "
+                  + "block. Nothing was broadcast or moved by this, and this store can quote another exit."
+                : "Recorded as completed on your confirmation that the sweep is in a block. Nothing was broadcast "
+                  + "or moved by this, and this store can quote another exit.");
         return RedirectToAction(nameof(Exit), new { storeId });
     }
 

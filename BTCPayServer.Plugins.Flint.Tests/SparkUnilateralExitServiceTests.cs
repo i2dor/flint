@@ -1815,24 +1815,28 @@ public class SparkUnilateralExitServiceTests
     #region Finishing
 
     /// <summary>
-    /// Marking a built exit completed frees the store, and it is the right verb for a finished exit.
+    /// Marking a built exit completed frees the store, and it is the right verb for a finished exit — once the
+    /// chain says it is finished.
     /// </summary>
     /// <remarks>
-    /// Nothing here watches the chain, so this is the operator's statement rather than an observation. Without it
-    /// abandoning would be the only way a finished exit ever left the active state — and telling a merchant to
-    /// "abandon" the exit that recovered their money is a lie the page would have to keep telling.
+    /// Without it abandoning would be the only way a finished exit ever left the active state — and telling a
+    /// merchant to "abandon" the exit that recovered their money is a lie the page would have to keep telling.
+    /// The completion asks Spark's check first, and completes on its Done.
     /// </remarks>
     [Fact]
     public async Task Marking_a_built_exit_completed_frees_the_store()
     {
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
-        harness.WithLeaves(("leaf-a", 500_000));
-        var record = harness.Seed(status: UnilateralExitStatus.Built);
+        var record = await BuiltExit(harness);
+        harness.Sdk.CheckVerdict = SparkExitVerdict.Done;
+        harness.Sdk.ExitReadiness = SparkExitTxReadiness.Confirmed;
 
         var completed = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
 
         Assert.True(completed.Success, completed.Error);
+        Assert.Equal(SparkExitVerdict.Done, completed.Verdict);
+        Assert.Single(harness.Sdk.ExitCheckCalls);
         Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
 
         // Idempotent, like abandoning: a second press is not an error.
@@ -1878,13 +1882,139 @@ public class SparkUnilateralExitServiceTests
         using var harness = Harness.Create();
         harness.Configure(acknowledged: true);
         var record = harness.Seed(status: UnilateralExitStatus.Built);
-        Assert.True((await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct)).Success);
+        Assert.True((await harness.Service.MarkCompletedAsync(
+            StoreId, record.Id, confirmedWithoutVerdict: true, Ct)).Success);
 
         var abandoned = await harness.Service.AbandonAsync(StoreId, record.Id, Ct);
 
         Assert.False(abandoned.Success);
         Assert.Contains("already recorded as finished", abandoned.Error);
         Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
+    }
+
+    /// <summary>
+    /// An exit the chain does not call finished is not marked completed unless the operator says so themselves.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Completing takes the signed set off the page — the only place it is shown — so completing early is how an
+    /// operator loses sight of steps still to broadcast, and the SDK can tell. "On track" is not finished, and
+    /// "can no longer finish" is not finished either: each gets its own refusal, because the next step differs.
+    /// </para>
+    /// <para>
+    /// The override exists for the cases a check cannot answer. A stopped wallet is the obvious one: the check is
+    /// made through the running SDK, so it refuses, and the operator who has watched the sweep confirm in their
+    /// own node must still be able to close the record.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(SparkExitVerdict.Valid, "still on track")]
+    [InlineData(SparkExitVerdict.Redo, "can no longer finish")]
+    public async Task An_unfinished_exit_is_not_marked_completed_on_a_plain_press(
+        SparkExitVerdict verdict, string expected)
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Sdk.CheckVerdict = verdict;
+
+        var result = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains(expected, result.Error);
+        Assert.Contains("tick the confirmation", result.Error);
+        Assert.Equal(verdict, result.Verdict);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+    }
+
+    [Fact]
+    public async Task A_stopped_wallet_blocks_the_check_but_not_the_operator_s_own_confirmation()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Runtime.Clients.Remove(StoreId);
+
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        // Said as what it is: a check needs the wallet. Not a chain failure, and not a claim that it works stopped.
+        Assert.Equal(SparkUnilateralExitService.CheckNeedsWallet, check.Error);
+
+        var plain = await harness.Service.MarkCompletedAsync(StoreId, record.Id, Ct);
+        Assert.False(plain.Success);
+        Assert.Contains(SparkUnilateralExitService.CheckNeedsWallet, plain.Error);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+
+        var confirmed = await harness.Service.MarkCompletedAsync(
+            StoreId, record.Id, confirmedWithoutVerdict: true, Ct);
+        Assert.True(confirmed.Success, confirmed.Error);
+        Assert.Null(confirmed.Verdict);
+        Assert.Equal(UnilateralExitStatus.Completed, harness.Records.Records[record.Id].Status);
+    }
+
+    #endregion
+
+    #region Deadlines on the SDK's exit calls
+
+    /// <summary>
+    /// An SDK exit call that never answers releases the store's gate at its deadline, instead of holding it for
+    /// as long as an unreachable operator holds the call.
+    /// </summary>
+    /// <remarks>
+    /// Preparing an exit begins with a best-effort refresh from the Spark operators, and the binding offers no
+    /// cancellation. Without a deadline an operator that accepts connections and never answers would hold the
+    /// request, and every other exit action for the store would answer "already running" until the process
+    /// restarted. The call is abandoned, not cancelled — nothing it could do is broadcast — and the store's
+    /// next action goes through.
+    /// </remarks>
+    [Fact]
+    public async Task A_quote_that_never_answers_gives_up_and_frees_the_store()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        harness.Service.QuoteDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Sdk.HoldExitCalls = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var result = await harness.Service.QuoteAsync(StoreId, 10, Destination, Ct);
+
+        Assert.False(result.Success);
+        Assert.Contains("did not finish quoting this exit", result.Error);
+        Assert.Empty(harness.Records.Records);
+
+        // The gate is free: the next action is answered on its merits, not with "already running".
+        var acknowledged = await harness.Service.AcknowledgeDisclosureAsync(StoreId, Ct);
+        Assert.NotEqual(SparkUnilateralExitService.OperationInFlight, acknowledged.Error);
+
+        harness.Sdk.HoldExitCalls.SetResult();
+    }
+
+    [Fact]
+    public async Task A_build_or_check_that_never_answers_gives_up_without_storing_anything()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var storedSet = harness.Records.Records[record.Id].TransactionsJson;
+        harness.Service.QuoteDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Service.BuildDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Service.CheckDeadline = TimeSpan.FromMilliseconds(50);
+        harness.Sdk.HoldExitCalls = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+        Assert.False(rebuilt.Success);
+        Assert.Contains("did not finish re-pricing this exit", rebuilt.Error);
+
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.Contains("did not finish checking this exit", check.Error);
+
+        // The stored set is untouched by either, and the exit is still the operator's to act on.
+        Assert.Equal(storedSet, harness.Records.Records[record.Id].TransactionsJson);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
+        Assert.True((await harness.Service.AbandonAsync(StoreId, record.Id, Ct)).Success);
+
+        harness.Sdk.HoldExitCalls.SetResult();
     }
 
     #endregion

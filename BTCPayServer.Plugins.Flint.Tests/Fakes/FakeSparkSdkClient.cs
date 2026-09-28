@@ -1321,11 +1321,34 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// </remarks>
     public Action? WhenExitQuoted { get; set; }
 
-    public Task<SparkExitQuote> PrepareUnilateralExitAsync(
+    /// <summary>
+    /// When set, every prepare, build and check waits on it before doing anything — and ignores the caller's
+    /// token while it waits.
+    /// </summary>
+    /// <remarks>
+    /// The binding's exit calls take no cancellation, and a prepare begins with a refresh from the Spark
+    /// operators that can hang while they are unreachable. A fake that honoured the token would let a caller
+    /// look bounded without bounding anything; this one waits exactly as long as the native call would, which is
+    /// for as long as the test says.
+    /// </remarks>
+    public TaskCompletionSource? HoldExitCalls { get; set; }
+
+    private Task HeldExitCall() => HoldExitCalls?.Task ?? Task.CompletedTask;
+
+    public async Task<SparkExitQuote> PrepareUnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await PrepareUnilateralExitCoreAsync(feeRateSatPerVbyte, destinationAddress, leafIds);
+    }
+
+    private Task<SparkExitQuote> PrepareUnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds)
     {
         ThrowIfConfigured();
         ExitQuoteCalls.Add(new ExitQuoteCall(feeRateSatPerVbyte, destinationAddress, leafIds?.ToList()));
@@ -1338,7 +1361,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         return Task.FromResult(quote);
     }
 
-    public Task<SparkExitResult> UnilateralExitAsync(
+    public async Task<SparkExitResult> UnilateralExitAsync(
         ulong feeRateSatPerVbyte,
         string destinationAddress,
         IReadOnlyList<string>? leafIds,
@@ -1346,6 +1369,19 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         byte[] fundingSecretKey,
         Func<SparkExitQuote, string?> approveQuote,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await UnilateralExitCoreAsync(
+            feeRateSatPerVbyte, destinationAddress, leafIds, fundingUtxos, fundingSecretKey, approveQuote);
+    }
+
+    private Task<SparkExitResult> UnilateralExitCoreAsync(
+        ulong feeRateSatPerVbyte,
+        string destinationAddress,
+        IReadOnlyList<string>? leafIds,
+        IReadOnlyList<SparkExitFundingUtxo> fundingUtxos,
+        byte[] fundingSecretKey,
+        Func<SparkExitQuote, string?> approveQuote)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(fundingUtxos);
@@ -1499,9 +1535,15 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         _ => new SparkExitTxStatus(ExitReadiness)
     };
 
-    public Task<SparkExitProgress> CheckUnilateralExitAsync(
+    public async Task<SparkExitProgress> CheckUnilateralExitAsync(
         SparkExitResult exit,
         CancellationToken cancellationToken = default)
+    {
+        await HeldExitCall();
+        return await CheckUnilateralExitCoreAsync(exit);
+    }
+
+    private Task<SparkExitProgress> CheckUnilateralExitCoreAsync(SparkExitResult exit)
     {
         ThrowIfConfigured();
         ArgumentNullException.ThrowIfNull(exit);

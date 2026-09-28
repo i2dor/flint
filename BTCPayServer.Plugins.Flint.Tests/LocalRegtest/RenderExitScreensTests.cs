@@ -408,7 +408,8 @@ public class RenderExitScreensTests
             string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> MarkCompletedAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> CheckAsync(
             string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
