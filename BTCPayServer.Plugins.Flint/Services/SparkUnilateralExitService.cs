@@ -901,6 +901,14 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// that top-up ignored — selection would keep picking the smaller output that satisfied the stale figure, and
     /// the veto would keep refusing it, for ever. So this re-quotes first, persists the fresh requirement so that
     /// the number on the page is the number that will be judged, and only then selects.
+    /// <para>
+    /// <b>A rebuild funds differently from a first build, and that difference is the SDK's contract.</b> Once a
+    /// build has succeeded, the outputs it was given are recorded (<see cref="UnilateralExitRecord.FundingUtxosJson"/>)
+    /// and every later build passes them back, with anything else confirmed on the funding address alongside —
+    /// the SDK's documented "funding a second attempt". It follows each outpoint to whatever an earlier attempt
+    /// turned it into, so a Redo, a rebuild after an unverified status, or a fee bump spends the money already
+    /// committed instead of demanding a second full funding and stranding the first on per-branch outputs.
+    /// </para>
     /// </remarks>
     public Task<UnilateralExitOpResult> BuildAsync(
         string storeId,
@@ -1003,7 +1011,25 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     .ConfigureAwait(false);
             }
 
-            if (!SparkExitFundingExplorer.TryResolveBaseUrl(exitSettings, Mainnet, out var baseUrl, out var urlError))
+            // What this exit has already committed to signed transactions. Empty for a first build; set by every
+            // successful one — see UnilateralExitRecord.FundingUtxosJson and the remarks on this method.
+            if (!TryReadCommittedFunding(record, funding.PubkeyHex, out var committedFunding))
+                return await FailAsync(record, from, DescribeCommittedFundingUnreadable(record)).ConfigureAwait(false);
+
+            var following = committedFunding.Count > 0;
+
+            // Only a first build writes a fresh quote's figures over the row before it succeeds. A built row's
+            // figures describe the transaction set stored beside them, and a failed rebuild must not leave the page
+            // showing a fee and a total that belong to transactions nobody signed.
+            var awaiting = from is UnilateralExitStatus.AwaitingFunding;
+
+            // The explorer is how a first build finds the output the operator sent, so without one it cannot
+            // start. A rebuild already holds the outpoints it committed, and the SDK follows those through its own
+            // chain service — so for a rebuild the explorer only adds any fresh top-up, and its absence is not a
+            // reason to refuse.
+            var haveExplorer = SparkExitFundingExplorer.TryResolveBaseUrl(
+                exitSettings, Mainnet, out var baseUrl, out var urlError);
+            if (!haveExplorer && !following)
                 return await FailAsync(record, from, urlError!).ConfigureAwait(false);
 
             // Step one: re-quote the record's own leaves. This happens before funding is even looked at, because
@@ -1043,46 +1069,104 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 return await FailAsync(record, from, DescribeUneconomic(fresh)).ConfigureAwait(false);
             }
 
-            // Step two: persist the fresh figures before selecting against them, so the requirement the operator
-            // reads on the page and the requirement the selection uses are the same number. Written even though
-            // the build may still fail — especially then, because a failed attempt's whole value to the operator
-            // is telling them what to fund.
-            ApplyQuote(record, fresh);
-            record.LastError = null;
-            record.UpdatedUtc = _timeProvider.GetUtcNow();
-
-            if (!await _records.UpdateAsync(record, from, cancellationToken).ConfigureAwait(false))
-                return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
-
-            var required = fresh.SingleUtxoFundingSat;
-
-            var lookup = await _explorer
-                .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (lookup.Utxos is not { } confirmed)
-                return await FailAsync(record, from, lookup.Error!).ConfigureAwait(false);
-
-            var largest = confirmed.Count == 0 ? 0 : confirmed.Max(utxo => utxo.ValueSat);
-
-            // One output, not a sum. CPFP funding spends a single P2WPKH outpoint, so two outputs each half the
-            // required size do not fund the exit however encouraging their total looks — which is exactly why the
-            // funding instructions say "as one output" and why the check is not against the balance.
-            //
-            // The smallest output that suffices, so an operator who over-funded (or funded twice) keeps the larger
-            // one intact for a later attempt rather than having it committed to this one.
-            var chosen = confirmed
-                .Where(utxo => utxo.ValueSat >= required)
-                .OrderBy(utxo => utxo.ValueSat)
-                .FirstOrDefault();
-
-            if (chosen is null)
+            if (awaiting)
             {
-                return await FailAsync(
-                        record,
-                        from,
-                        DescribeShortfall(required, record.FundingAddress, confirmed))
+                // Step two, for a first build: persist the fresh figures before selecting against them, so the
+                // requirement the operator reads on the page and the requirement the selection uses are the same
+                // number. Written even though the build may still fail — especially then, because a failed
+                // attempt's whole value to the operator is telling them what to fund.
+                ApplyQuote(record, fresh);
+                record.LastError = null;
+                record.UpdatedUtc = _timeProvider.GetUtcNow();
+
+                if (!await _records.UpdateAsync(record, from, cancellationToken).ConfigureAwait(false))
+                    return new UnilateralExitOpResult(false, ExitChangedUnderneath, record);
+            }
+
+            IReadOnlyList<SparkExitFundingUtxo> inputs;
+            SparkExitFundingUtxo? chosen = null;
+            long largest = 0;
+            var explorerMissed = false;
+
+            if (following)
+            {
+                // Step three, for a rebuild: hand back what the last build committed, and let the SDK follow it.
+                // This is the SDK's own documented second attempt ("pass back the funding inputs the stored
+                // response carries"): an outpoint an earlier attempt spent is not an error, the SDK walks it to
+                // whatever it became — fan-out outputs, CPFP change, several steps of both — and keeps an outpoint
+                // spent only by an unconfirmed transaction, because that is this exit's own in-flight child and a
+                // rebuild replaces it. Listing the address instead cannot see any of that: an output spent by an
+                // in-flight child is not unspent, and a fan-out's per-branch outputs are each below a whole-exit
+                // requirement, so every Redo would have demanded a second full funding and stranded the first.
+                //
+                // Anything else confirmed on the address is added alongside, which is how a top-up reaches the
+                // exit — the funding address belongs to this exit alone, so everything on it was sent for it. The
+                // SDK de-duplicates by outpoint, so an output that is both listed and reached by following (a
+                // confirmed fan-out output, say) is counted once; the list is de-duplicated here as well so the
+                // record stores each outpoint once.
+                var added = new List<SparkExitFundingUtxo>();
+                if (haveExplorer)
+                {
+                    var lookup = await _explorer
+                        .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (lookup.Utxos is { } listed)
+                    {
+                        added.AddRange(listed.Where(utxo =>
+                            committedFunding.All(existing => existing.OutPoint != utxo.OutPoint)));
+                    }
+                    else
+                    {
+                        explorerMissed = true;
+                        _logger.LogWarning(
+                            "Store {StoreId}: rebuilding unilateral exit {ExitId} from its committed funding alone, "
+                            + "because the funding address could not be listed ({Reason})",
+                            storeId, record.Id, lookup.Error);
+                    }
+                }
+                else
+                {
+                    explorerMissed = true;
+                }
+
+                inputs = committedFunding.Concat(added).ToArray();
+            }
+            else
+            {
+                var required = fresh.SingleUtxoFundingSat;
+
+                var lookup = await _explorer
+                    .ListConfirmedAsync(baseUrl!, record.FundingAddress, funding.PubkeyHex, cancellationToken)
                     .ConfigureAwait(false);
+
+                if (lookup.Utxos is not { } confirmed)
+                    return await FailAsync(record, from, lookup.Error!).ConfigureAwait(false);
+
+                largest = confirmed.Count == 0 ? 0 : confirmed.Max(utxo => utxo.ValueSat);
+
+                // One output, not a sum, for a first build. The quote's requirement is sized for exactly one
+                // funding input, so two outputs each half of it are short by the second input's weight — and
+                // the funding instructions say "as one output" so the rule the page states is the rule applied.
+                //
+                // The smallest output that suffices, so an operator who over-funded (or funded twice) keeps the
+                // larger one out of this build. It is not lost to a later one either way: once this build has
+                // committed an output, a rebuild follows it and adds whatever else is on the address.
+                chosen = confirmed
+                    .Where(utxo => utxo.ValueSat >= required)
+                    .OrderBy(utxo => utxo.ValueSat)
+                    .FirstOrDefault();
+
+                if (chosen is null)
+                {
+                    return await FailAsync(
+                            record,
+                            from,
+                            DescribeShortfall(required, record.FundingAddress, confirmed))
+                        .ConfigureAwait(false);
+                }
+
+                inputs = [chosen];
             }
 
             SparkExitResult result;
@@ -1094,7 +1178,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                         (ulong)record.FeeRateSatPerVbyte,
                         record.DestinationAddress,
                         leafIds,
-                        [chosen],
+                        inputs,
                         funding.Secret,
                         second =>
                         {
@@ -1111,7 +1195,11 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                             if (second.RecoverableValueSat <= second.TotalFeeSat)
                                 return DescribeUneconomic(second);
 
-                            if (second.SingleUtxoFundingSat > chosen.ValueSat)
+                            // A first build is judged here against its one output. A rebuild is not: what its
+                            // funding is worth is only known once the SDK has followed it, and the SDK's own
+                            // shortfall is the answer to that — a plugin-side guess would refuse funding that is
+                            // in fact sufficient.
+                            if (chosen is not null && second.SingleUtxoFundingSat > chosen.ValueSat)
                             {
                                 return string.Format(
                                     CultureInfo.InvariantCulture,
@@ -1129,16 +1217,24 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             }
             catch (SparkExitRefusedException refused)
             {
-                // The veto above. Already written for a merchant, so it is passed through verbatim — and the
-                // quote it judged by is persisted, so the next attempt selects against the same requirement the
-                // operator was just asked to fund.
-                ApplyQuote(record, committed);
+                // The veto above. Already written for a merchant, so it is passed through verbatim — and, for a
+                // first build, the quote it judged by is persisted, so the next attempt selects against the same
+                // requirement the operator was just asked to fund.
+                if (awaiting)
+                    ApplyQuote(record, committed);
                 return await FailAsync(record, from, refused.Reason).ConfigureAwait(false);
             }
             catch (SparkExitFundingShortfallException shortfall)
             {
-                ApplyQuote(record, committed);
-                return await FailAsync(record, from, shortfall.Message).ConfigureAwait(false);
+                if (awaiting)
+                    ApplyQuote(record, committed);
+                return await FailAsync(
+                        record,
+                        from,
+                        following
+                            ? DescribeFollowedShortfall(shortfall.RequiredSat, record.FundingAddress, explorerMissed)
+                            : shortfall.Message)
+                    .ConfigureAwait(false);
             }
             // No catch for a funding conflict, and its absence is the 0.25 change: the SDK removed
             // FundingUtxoConflict entirely, because a spent funding output is no longer an error — it follows
@@ -1150,7 +1246,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                     "Store {StoreId}: could not build unilateral exit {ExitId} ({Reason})",
                     storeId, record.Id, SparkErrors.Describe(ex));
 
-                ApplyQuote(record, committed);
+                if (awaiting)
+                    ApplyQuote(record, committed);
                 return await FailAsync(
                         record,
                         from,
@@ -1168,7 +1265,11 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             record.RecoverableValueSat = result.RecoverableValueSat;
             record.TotalFeeSat = result.TotalFeeSat;
             record.SingleUtxoFundingSat = committed?.SingleUtxoFundingSat ?? record.SingleUtxoFundingSat;
-            record.FundingUtxosJson = JsonSerializer.Serialize(new[] { chosen }, JsonOptions);
+            // Everything this build was handed, which is exactly what the SDK echoes back as the response's
+            // funding inputs (breez-sdk core unilateral_exit.rs: `funding_inputs: supplied_funding`) and what its
+            // documented second attempt passes back. A superset of what was stored before, never a replacement, so
+            // no outpoint the signed set may spend is ever forgotten.
+            record.FundingUtxosJson = JsonSerializer.Serialize(inputs.ToArray(), JsonOptions);
             // Replaced with exactly what the SDK returned, however short that is. Since 0.25 the build continues
             // from confirmed chain state, so a partial set is the normal result of a resumed attempt and an empty
             // one means everything it planned has already been seen on-chain. Merging the previous set back in
@@ -1633,6 +1734,95 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 required,
                 largest)
         };
+    }
+
+    /// <summary>
+    /// Why a rebuild came up short once the SDK had followed the funding, in terms an operator can act on.
+    /// </summary>
+    /// <remarks>
+    /// The opposite instruction to <see cref="DescribeShortfall"/>, deliberately. A first build funds from one
+    /// output, so topping up does not help there; a rebuild hands the SDK everything this exit committed plus
+    /// everything else on the address, and the SDK sums what that has become — so here more funding of any shape
+    /// does help, and saying "the full amount again as one output" would overstate what is needed while still
+    /// being safe. Both are said: the minimum, and the amount that always suffices.
+    /// </remarks>
+    private static string DescribeFollowedShortfall(long required, string fundingAddress, bool explorerMissed) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            "Spark followed the funding this exit already committed to whatever it has become, and together with "
+            + "any other output on the funding address it does not cover what is left to build: Spark needs at "
+            + "least {0:N0} sat available in total. Send more to {1} — a new output of {0:N0} sat always "
+            + "suffices, and whatever is not spent on fees is swept to your destination with the recovered coins — "
+            + "and build again once it confirms. The earlier funding is not wasted: the next build follows it "
+            + "again.{2}",
+            required,
+            fundingAddress,
+            explorerMissed
+                ? " The block explorer could not be read this time, so any new output already on the address was "
+                  + "not included; that may be the whole shortfall."
+                : string.Empty);
+
+    private string DescribeCommittedFundingUnreadable(UnilateralExitRecord record) =>
+        "This exit's record of the funding it has already committed could not be read, so a rebuild cannot hand "
+        + "it back to Spark to follow — and building without it would ask you to fund the exit a second time. "
+        + "Nothing was signed. Anything left on the funding address is recoverable from this store's recovery "
+        + $"phrase at {DescribeKeyPath(record) ?? "the exit's funding key path"}; abandon this exit and quote a "
+        + "new one, which picks the leaves up from wherever they are on-chain.";
+
+    /// <summary>
+    /// The funding outputs a previous build committed, re-tagged with the funding key's public key.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Empty — and true — for a record no build has succeeded on yet. False only for a column that is present
+    /// but unusable: that is a row the service did not write, and guessing at its contents would hand the SDK
+    /// outpoints this exit may never have committed.
+    /// </para>
+    /// <para>
+    /// The public key is re-attached from the derivation rather than trusted from the column, for the reason
+    /// <see cref="SparkExitFundingExplorer.ListConfirmedAsync"/> gives: an output tagged with the wrong key fails
+    /// deep inside the SDK's witness construction. The caller has already established that the derivation
+    /// produces this record's funding address, so the key is the right one for every output that pays it.
+    /// </para>
+    /// </remarks>
+    private bool TryReadCommittedFunding(
+        UnilateralExitRecord record,
+        string pubkeyHex,
+        out IReadOnlyList<SparkExitFundingUtxo> committed)
+    {
+        committed = [];
+
+        if (string.IsNullOrWhiteSpace(record.FundingUtxosJson))
+            return true;
+
+        SparkExitFundingUtxo?[]? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<SparkExitFundingUtxo?[]>(record.FundingUtxosJson, JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex,
+                "Store {StoreId}: unilateral exit {ExitId} has an unreadable committed-funding column",
+                record.StoreId, record.Id);
+            return false;
+        }
+
+        if (parsed is null ||
+            parsed.Any(utxo => utxo is null || !SparkExitTransaction.IsTxid(utxo.Txid) || utxo.ValueSat <= 0))
+        {
+            _logger.LogError(
+                "Store {StoreId}: unilateral exit {ExitId} has a committed-funding column that parsed but is not "
+                + "usable",
+                record.StoreId, record.Id);
+            return false;
+        }
+
+        committed = parsed
+            .Select(utxo => utxo! with { PubkeyHex = pubkeyHex })
+            .DistinctBy(utxo => utxo.OutPoint)
+            .ToArray();
+        return true;
     }
 
     /// <summary>

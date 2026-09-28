@@ -57,6 +57,18 @@ public class SparkUnilateralExitServiceTests
     private const string FundingTxid =
         "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
+    /// <summary>The fan-out a first build's funding became once it confirmed.</summary>
+    private const string FanoutTxid =
+        "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
+
+    /// <summary>A CPFP child's change output, still on the funding script.</summary>
+    private const string ChangeTxid =
+        "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4";
+
+    /// <summary>A second payment the operator sent to the funding address.</summary>
+    private const string TopUpTxid =
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     #region The feature gate
@@ -1105,6 +1117,178 @@ public class SparkUnilateralExitServiceTests
         // The transaction the rebuild dropped is gone from the row, not left behind as a step to broadcast.
         Assert.NotEqual(4, second.Length);
         Assert.Contains(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-a"));
+    }
+
+    #endregion
+
+    #region Rebuilding: funding a second attempt
+
+    /// <summary>
+    /// A rebuild hands the funding the first build committed back to the SDK, which follows it, instead of
+    /// re-listing the address and asking for a second full funding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The scenario the SDK's "Funding a second attempt" exists for, and the one the page sends operators
+    /// into.</b> A multi-leaf exit is built, its fan-out is broadcast and confirms, and a later check says Redo.
+    /// The output the operator sent no longer exists: it became one fee output per branch, each well below a
+    /// whole-exit requirement. Re-listing the address and picking the one biggest output — what every build used
+    /// to do — finds nothing big enough and tells the operator to send the whole amount again, stranding the
+    /// per-branch outputs on an address no wallet scans.
+    /// </para>
+    /// <para>
+    /// The SDK's contract is to pass back the funding the stored response carries; it follows each outpoint to
+    /// what it became and funds from there. So the assertion is on what reached the SDK: the committed outpoint,
+    /// alongside what the address now shows.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_hands_the_committed_funding_back_to_be_followed()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 300_000), ("leaf-b", 200_000));
+        var record = harness.Seed(leafIds: ["leaf-a", "leaf-b"], singleUtxoFundingSat: 4_200);
+        harness.Explorer(Utxo(10_000));
+
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+        var original = $"{FundingTxid}:0";
+        Assert.Contains(original, harness.Records.Records[record.Id].FundingUtxosJson);
+
+        // The fan-out confirmed: the operator's 10,000 sat output is spent, and what it became is two 4,000 sat
+        // branch outputs on the same script. A rebuild at a higher requirement than either single one of them.
+        harness.Sdk.ExitFundingSpentInto[original] =
+        [
+            new SparkExitFundingUtxo(FanoutTxid, 0, 4_000, "pubkey"),
+            new SparkExitFundingUtxo(FanoutTxid, 1, 4_000, "pubkey")
+        ];
+        harness.Explorer(UtxoAt(FanoutTxid, 4_000, 0), UtxoAt(FanoutTxid, 4_000, 1));
+        harness.Sdk.ExitSingleUtxoFundingSat = 6_000;
+        var buildsBefore = harness.Sdk.ExitBuildCalls.Count;
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[buildsBefore];
+        // The committed outpoint went back, which is the whole fix: the SDK follows it.
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == original);
+        // And what the address shows went alongside, once each.
+        Assert.Equal(3, call.FundingUtxos.Select(utxo => utxo.OutPoint).Distinct().Count());
+        Assert.Equal(3, call.FundingUtxos.Count);
+        Assert.All(call.FundingUtxos, utxo => Assert.NotEqual("pubkey", utxo.PubkeyHex));
+
+        // The record remembers everything it was handed, so the next attempt can follow all of it again.
+        var stored = JsonSerializer.Deserialize<SparkExitFundingUtxo[]>(
+            harness.Records.Records[record.Id].FundingUtxosJson!)!;
+        Assert.Equal(
+            call.FundingUtxos.Select(utxo => utxo.OutPoint).Order(StringComparer.Ordinal),
+            stored.Select(utxo => utxo.OutPoint).Order(StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// A top-up sent to the funding address reaches a rebuild alongside the committed funding, and a rebuild
+    /// that is still short says to send more — not to send the whole amount again as one output.
+    /// </summary>
+    /// <remarks>
+    /// A first build funds from one output, so its shortfall has to say "topping up does not help". A rebuild is
+    /// the opposite: the SDK sums what the committed funding has become plus anything else it is handed, so more
+    /// of any shape helps, and the page's own advice for a fee that turned out too low — send more and build
+    /// again — is only true if the new output is actually passed in.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_takes_a_top_up_alongside_the_committed_funding()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var original = $"{FundingTxid}:0";
+        var builtFee = harness.Records.Records[record.Id].TotalFeeSat;
+
+        // What is left of the first funding after its children confirmed: 1,000 sat of change.
+        harness.Sdk.ExitFundingSpentInto[original] = [new SparkExitFundingUtxo(ChangeTxid, 0, 1_000, "pubkey")];
+        harness.Explorer(UtxoAt(ChangeTxid, 1_000));
+        harness.Sdk.ExitSingleUtxoFundingSat = 5_000;
+
+        var short1 = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(short1.Success);
+        Assert.Contains("Spark followed the funding", short1.Error);
+        Assert.Contains("5,000 sat", short1.Error);
+        Assert.DoesNotContain("topping up does not help", short1.Error);
+        // A built exit stays built, and a failed rebuild leaves the figures of the set that is actually stored.
+        var afterShort = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, afterShort.Status);
+        Assert.Equal(builtFee, afterShort.TotalFeeSat);
+        Assert.Equal(short1.Error, afterShort.LastError);
+
+        // The operator sends 4,500 more as a new output. 1,000 + 4,500 covers the 5,000 the SDK asked for, and
+        // no single output does.
+        harness.Explorer(UtxoAt(ChangeTxid, 1_000), UtxoAt(TopUpTxid, 4_500));
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[^1];
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == original);
+        Assert.Contains(call.FundingUtxos, utxo => utxo.OutPoint == $"{TopUpTxid}:0");
+        Assert.Null(harness.Records.Records[record.Id].LastError);
+    }
+
+    /// <summary>A rebuild does not need the explorer: the committed funding is followed by the SDK itself.</summary>
+    /// <remarks>
+    /// The explorer is how a first build finds the output the operator sent. A rebuild already holds its
+    /// outpoints, and the SDK reads the chain through its own chain service to follow them — so an explorer
+    /// outage must not block a Redo that needs no new money, and when it does turn out short the message says
+    /// that a top-up already on the address may not have been seen.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_goes_ahead_on_the_committed_funding_when_the_explorer_is_down()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.ExplorerOffline();
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.True(rebuilt.Success, rebuilt.Error);
+        var call = harness.Sdk.ExitBuildCalls[^1];
+        Assert.Equal([$"{FundingTxid}:0"], call.FundingUtxos.Select(utxo => utxo.OutPoint));
+
+        harness.Sdk.ExitSingleUtxoFundingSat = 50_000;
+        var shortfall = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(shortfall.Success);
+        Assert.Contains("block explorer could not be read", shortfall.Error);
+    }
+
+    /// <summary>
+    /// A committed-funding column that is present but unreadable stops a rebuild before anything is signed.
+    /// </summary>
+    /// <remarks>
+    /// Building without it is the old failure in disguise: the SDK would be handed only whatever the address
+    /// lists, and the operator asked to fund the exit a second time. The refusal names the key path, because
+    /// that is how whatever is left on the address is recovered by hand.
+    /// </remarks>
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("[null]")]
+    [InlineData("""[{"Txid":"not-a-txid","Vout":0,"ValueSat":1000,"PubkeyHex":"02"}]""")]
+    public async Task An_unreadable_committed_funding_column_refuses_a_rebuild(string stored)
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        harness.Records.Records[record.Id].FundingUtxosJson = stored;
+        var buildsBefore = harness.Sdk.ExitBuildCalls.Count;
+
+        var rebuilt = await harness.Service.BuildAsync(StoreId, record.Id, Ct);
+
+        Assert.False(rebuilt.Success);
+        Assert.Contains("funding it has already committed could not be read", rebuilt.Error);
+        Assert.Contains("m/84'/1'/4607060'/0/0", rebuilt.Error);
+        Assert.Equal(buildsBefore, harness.Sdk.ExitBuildCalls.Count);
+        Assert.Equal(UnilateralExitStatus.Built, harness.Records.Records[record.Id].Status);
     }
 
     #endregion
@@ -2256,6 +2440,15 @@ public class SparkUnilateralExitServiceTests
         Assert.True(built.Success, built.Error);
         return record;
     }
+
+    /// <summary>One confirmed entry of an esplora <c>/address/{address}/utxo</c> response, at a txid of the test's own.</summary>
+    private static string UtxoAt(string txid, long valueSat, uint vout = 0) =>
+        string.Format(
+            CultureInfo.InvariantCulture,
+            """{{"txid":"{0}","vout":{1},"value":{2},"status":{{"confirmed":true}}}}""",
+            txid,
+            vout,
+            valueSat);
 
     /// <summary>One entry of an esplora <c>/address/{address}/utxo</c> response.</summary>
     private static string Utxo(long valueSat, uint vout = 0, bool confirmed = true) =>

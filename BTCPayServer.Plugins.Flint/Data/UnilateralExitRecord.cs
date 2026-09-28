@@ -109,9 +109,12 @@ public class UnilateralExitRecord
     /// Sats the operator must put on <see cref="FundingAddress"/> in a <b>single</b> UTXO.
     /// </summary>
     /// <remarks>
-    /// Single is the SDK's requirement, not a simplification: CPFP funding spends one P2WPKH outpoint per
-    /// package, so two UTXOs adding up to this figure do not fund the exit. The funding instructions shown to the
-    /// operator have to say so, which is why the figure is stored per-row rather than recomputed.
+    /// Single because the SDK's quote sizes the requirement for exactly one funding input, and the first build
+    /// selects exactly one: two outputs adding up to this figure are short by the second input's weight, and the
+    /// funding instructions say "one output" so the rule the page states is the rule applied. A rebuild is
+    /// different — it hands the SDK everything this exit committed plus anything else on the address, and the
+    /// SDK sums what that has become (see <see cref="FundingUtxosJson"/>). Stored per row rather than recomputed
+    /// because it is what the page tells the operator to send.
     /// </remarks>
     public long SingleUtxoFundingSat { get; set; }
 
@@ -157,18 +160,25 @@ public class UnilateralExitRecord
     public long FundingKeyIndex { get; set; }
 
     /// <summary>
-    /// The funding UTXOs actually spent at build time, as a JSON <c>SparkExitFundingUtxo[]</c>. Null until the
-    /// build runs.
+    /// Every funding output a successful build was handed, as a JSON <c>SparkExitFundingUtxo[]</c>. Null until a
+    /// build succeeds.
     /// </summary>
     /// <remarks>
-    /// Recorded so an operator can see which outputs this exit already committed to, and because a later build
-    /// passes them back to the SDK, which follows each outpoint to whatever it became rather than rejecting a
-    /// spent one. That is the SDK's 0.25 behaviour and the reason this column is no longer merely explanatory:
-    /// the outpoints are an input to the next attempt. (It used to be recorded because the SDK reported
-    /// <c>FundingUtxoConflict</c> by outpoint; 0.25 no longer reports a conflict as an error at all.) Never
-    /// cleared once written: the signed transactions in <see cref="TransactionsJson"/> spend exactly this
-    /// outpoint, so losing it would leave a set of transactions whose input nobody can identify. The store's
-    /// update coalesces it for that reason.
+    /// <para>
+    /// <b>An input to the next attempt, not a note about the last one.</b> Every build after the first passes
+    /// these back to the SDK, which follows each outpoint to whatever an earlier attempt turned it into — a
+    /// fan-out output, the change of a fee-bumping child, several steps of both — and keeps one spent only by an
+    /// unconfirmed transaction, since that is this exit's own in-flight child and the rebuild replaces it. That is
+    /// the SDK's documented second attempt, and it is why a Redo or a fee bump does not ask for a second full
+    /// funding: re-listing the address would see neither an output spent by an in-flight child nor enough on any
+    /// single per-branch output. The service adds any other confirmed output on the address alongside, and
+    /// writes back the whole set it passed — which is exactly the <c>funding_inputs</c> the SDK's response echoes.
+    /// </para>
+    /// <para>
+    /// Never cleared once written, and only ever grown: the signed transactions in <see cref="TransactionsJson"/>
+    /// spend outpoints named here, so losing one would leave a set of transactions whose input nobody can
+    /// identify and a rebuild that could no longer follow it. The store's update coalesces it for that reason.
+    /// </para>
     /// </remarks>
     public string? FundingUtxosJson { get; set; }
 

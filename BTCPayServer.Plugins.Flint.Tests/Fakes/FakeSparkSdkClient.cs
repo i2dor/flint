@@ -1376,8 +1376,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             throw FailExitBuildWith;
 
         // The funding check the real SDK makes, reproduced rather than stipulated: the shortfall is discovered at
-        // build time and names the amount that would have worked.
-        var funded = fundingUtxos.Sum(utxo => utxo.ValueSat);
+        // build time and names the amount that would have worked — and it is judged on what the funding has
+        // become, not on what was handed in, exactly as the SDK's resolve_funding does.
+        var funded = FollowedFundingSat(fundingUtxos);
         if (funded < ExitSingleUtxoFundingSat)
             throw new SparkExitFundingShortfallException(ExitSingleUtxoFundingSat);
 
@@ -1437,6 +1438,51 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>Even-length hex standing in for a signed transaction, distinct per label.</summary>
     public static string ExitHex(string label) =>
         "02000000" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(label)).ToLowerInvariant();
+
+    /// <summary>
+    /// Funding outpoints an earlier attempt spent in a confirmed transaction, mapped to the outputs that spend
+    /// produced on the same script.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK's second-attempt contract, reproduced because it is the hazard: once a fan-out or a CPFP child
+    /// has confirmed, the output the operator sent no longer exists, and what the money became is a handful of
+    /// smaller outputs — each below a whole-exit requirement, and some of them possibly spent again. The real
+    /// SDK walks a supplied outpoint to those descendants and funds from them; a caller that instead re-lists the
+    /// address and picks the one biggest output asks the operator to fund the exit twice.
+    /// </para>
+    /// <para>
+    /// An outpoint absent from this map is taken at face value, which covers both the unspent case and the SDK's
+    /// "spent only by an unconfirmed transaction" rule: that spend is this exit's own in-flight child, which the
+    /// rebuild replaces, so the outpoint is still the caller's to spend. Descendants are de-duplicated by
+    /// outpoint, as the SDK does, so an output that is both passed in and reached by following counts once.
+    /// </para>
+    /// </remarks>
+    public Dictionary<string, List<SparkExitFundingUtxo>> ExitFundingSpentInto { get; } = new(StringComparer.Ordinal);
+
+    private long FollowedFundingSat(IReadOnlyList<SparkExitFundingUtxo> supplied)
+    {
+        var resolved = new Dictionary<string, long>(StringComparer.Ordinal);
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var frontier = new Stack<SparkExitFundingUtxo>(supplied);
+
+        while (frontier.TryPop(out var input))
+        {
+            if (!visited.Add(input.OutPoint))
+                continue;
+
+            if (ExitFundingSpentInto.TryGetValue(input.OutPoint, out var became))
+            {
+                foreach (var descendant in became)
+                    frontier.Push(descendant);
+                continue;
+            }
+
+            resolved[input.OutPoint] = input.ValueSat;
+        }
+
+        return resolved.Values.Sum();
+    }
 
     /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
     /// <remarks>

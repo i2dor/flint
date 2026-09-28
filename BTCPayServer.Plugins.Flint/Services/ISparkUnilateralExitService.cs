@@ -59,14 +59,17 @@ public interface ISparkUnilateralExitService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Discovers the funding UTXOs on the record's funding address, re-quotes the record's own leaves,
-    /// and builds the signed transaction set onto the record.
+    /// Re-quotes the record's own leaves, gathers its funding, and builds the signed transaction set onto the
+    /// record.
     /// </summary>
     /// <remarks>
-    /// Refuses when the discovered funding falls short of the quoted requirement, and re-checks
-    /// recoverable-exceeds-fee against the fresh quote before signing (the persisted quote is display
-    /// state, not the guard). Safe to call again after a failure: the SDK resumes from chain state and
-    /// a shortfall or spent-funding conflict lands on the record as <see cref="UnilateralExitRecord.LastError"/>.
+    /// A first build discovers the funding on the record's address and spends the smallest single output that
+    /// covers the fresh quote. A rebuild — after a Redo, an unverified status, or to raise the fee — passes back
+    /// every output earlier builds committed (<see cref="UnilateralExitRecord.FundingUtxosJson"/>) plus anything
+    /// else confirmed on the address, and the SDK follows the committed ones to whatever they became. It
+    /// re-checks recoverable-exceeds-fee against the fresh quote before signing (the persisted quote is display
+    /// state, not the guard). Safe to call again after a failure: the SDK resumes from chain state and a
+    /// shortfall lands on the record as <see cref="UnilateralExitRecord.LastError"/>.
     /// </remarks>
     Task<UnilateralExitOpResult> BuildAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
 

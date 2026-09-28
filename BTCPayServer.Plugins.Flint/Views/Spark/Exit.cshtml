@@ -510,7 +510,9 @@
                             stopped matching them, so broadcasting the rest will not complete this exit.
                             <strong>Your money is not lost</strong> — a new exit built from the same leaves
                             recovers it. Press <em>Build again</em> below and the plugin re-reads the chain and
-                            signs a fresh set; anything already confirmed is skipped rather than rebuilt.
+                            signs a fresh set; anything already confirmed is skipped rather than rebuilt. It pays
+                            for that from the funding this exit already committed, which Spark follows to wherever
+                            it went — you only need to send more if the rebuild says it is short.
                         </div>
                     }
                     else
@@ -609,9 +611,10 @@
                             Build again
                         </button>
                         <div class="form-text">
-                            Re-discovers the funding, prices this exit's own leaves again, signs, and replaces the
-                            stored set. <strong>It broadcasts nothing</strong> and anything already broadcast and
-                            confirmed is skipped rather than rebuilt.
+                            Prices this exit's own leaves again, hands Spark the funding this exit already
+                            committed plus anything new on the funding address, signs, and replaces the stored set.
+                            <strong>It broadcasts nothing</strong> and anything already broadcast and confirmed is
+                            skipped rather than rebuilt.
                         </div>
                     </form>
                 }
@@ -631,8 +634,8 @@
                             Build again
                         </button>
                         <div class="form-text">
-                            Prices this exit's leaves again against the funding on its address and signs the
-                            transactions. It broadcasts nothing.
+                            Prices this exit's leaves again against the funding it already committed plus anything
+                            new on its address, and signs the transactions. It broadcasts nothing.
                         </div>
                     </form>
                 }

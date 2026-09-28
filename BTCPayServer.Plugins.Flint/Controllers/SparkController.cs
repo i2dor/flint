@@ -1041,9 +1041,11 @@ public class SparkController : Controller
     /// Builds and signs the exit against the funding that has arrived. Broadcasts nothing.
     /// </summary>
     /// <remarks>
-    /// Safe to post again after a failure, and the page says so: the service re-discovers the funding UTXOs and
-    /// re-quotes the record's own leaves each time, so a build that failed for want of funding succeeds once
-    /// more has been sent, and steps already confirmed on-chain are skipped rather than rebuilt.
+    /// Safe to post again after a failure, and the page says so: the service re-quotes the record's own leaves
+    /// each time and, once a build has succeeded, hands the SDK the funding it committed to follow alongside
+    /// anything new on the address — so a build that failed for want of funding succeeds once more has been
+    /// sent, a rebuild never asks for the first funding twice, and steps already confirmed on-chain are skipped
+    /// rather than rebuilt.
     /// </remarks>
     [HttpPost("exit/build")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]

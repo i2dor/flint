@@ -465,10 +465,12 @@ public interface ISparkSdkClient : IDisposable
     /// the operator funded for, so the leaves and the funding requirement cannot drift apart underneath them.
     /// </param>
     /// <param name="fundingUtxos">
-    /// Confirmed P2WPKH outputs that will pay every fee in the exit. Must be non-empty. The SDK accepts
-    /// several and judges their combined value, but the reliable shape for a fresh exit is what
-    /// <see cref="SparkExitQuote.SingleUtxoFundingSat"/> quotes: <b>one</b> output of at least that amount,
-    /// which the SDK fans out across branches — the service layer passes exactly one for that reason. A
+    /// P2WPKH outputs that will pay every fee in the exit. Must be non-empty. The SDK accepts several and
+    /// judges their combined value <em>after following each one</em>: an outpoint an earlier attempt already
+    /// spent is walked to whatever it became (fan-out outputs, CPFP change) rather than rejected, and one spent
+    /// only by an unconfirmed transaction is kept, because the rebuild replaces that child. A first build passes
+    /// the single output <see cref="SparkExitQuote.SingleUtxoFundingSat"/> was sized for; a rebuild passes back
+    /// everything earlier builds were given, plus any fresh top-up — the SDK's documented second attempt. A
     /// shortfall surfaces as <see cref="SparkExitFundingShortfallException"/>.
     /// </param>
     /// <param name="fundingSecretKey">
