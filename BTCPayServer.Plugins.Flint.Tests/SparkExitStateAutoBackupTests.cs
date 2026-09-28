@@ -214,6 +214,31 @@ public class SparkExitStateAutoBackupTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task An_exit_state_change_event_requests_a_refresh_through_the_same_debounce()
+    {
+        var clock = new StubTimeProvider(Base);
+        using var gate = FeatureGate();
+        using var h = await StartedAsync(clock);
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        // The SDK's own "an earlier export no longer covers this wallet" — fired when a leaf's exit data is
+        // completed or rebuilt, which is how a send, a swap or a renewal reaches the backup at all: none of
+        // them is a receive, and none of them emits a deposit event.
+        Emit(h, StoreId, SparkEventKind.UnilateralExitStateChanged, payment: null);
+        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+            "the exit-state change never requested a refresh");
+
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
+
+        clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
+        await h.Service.TakeDueExitStateBackupsAsync(Ct);
+        Assert.Equal(2, h.Sdk.Clients[StoreId].ExitExportCalls.Count);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task An_inbound_payment_event_requests_a_refresh_through_the_same_debounce()
     {
         var clock = new StubTimeProvider(Base);

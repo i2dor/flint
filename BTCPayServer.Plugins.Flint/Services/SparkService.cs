@@ -1238,6 +1238,20 @@ private async Task WarmUpAsync(string storeId, ISparkSdkClient sdk)
                 _exitStateBackupScheduler.RequestRefresh(envelope.StoreId);
                 return;
 
+            case SparkEventKind.UnilateralExitStateChanged:
+                // The SDK's own statement that an exit-state export taken before now is out of date: a leaf's
+                // exit data was completed or rebuilt. It is the one trigger that covers every way the leaf set
+                // moves — sends, swaps, renewals and the SDK's background optimisation, none of which is a
+                // receive — and the only one that fires when a leaf that was exported *without* its data
+                // becomes exportable with it. Requested, never taken here, for the reason the deposit cases
+                // above give: this is the store's event loop and an export is a multi-megabyte SDK call; the
+                // scheduler's debounce coalesces the bursts an optimisation round produces.
+                _logger.LogDebug(
+                    "Store {StoreId}: Spark reported its unilateral-exit data changed; a backup refresh was "
+                    + "requested", envelope.StoreId);
+                _exitStateBackupScheduler.RequestRefresh(envelope.StoreId);
+                return;
+
             default:
                 _logger.LogTrace("Store {StoreId}: Spark event {Kind}", envelope.StoreId, envelope.Kind);
                 return;

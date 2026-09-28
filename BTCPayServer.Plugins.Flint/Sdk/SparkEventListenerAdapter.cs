@@ -44,6 +44,18 @@ public enum SparkEventKind
     /// </remarks>
     PaymentMetadataUpdated,
 
+    /// <summary>
+    /// The data a unilateral exit is built from changed, so any exit-state backup exported earlier no longer
+    /// covers the wallet.
+    /// </summary>
+    /// <remarks>
+    /// The SDK emits it once it has completed the exit data of a leaf that was missing it, and whenever it
+    /// rebuilds a leaf's data — which is what a send, a swap, a renewal or the SDK's own leaf optimisation does
+    /// to the leaf set. An export omits a leaf whose data is not collected yet, so this, not a payment event,
+    /// is the moment a fresh backup starts to cover a leaf the previous one could not.
+    /// </remarks>
+    UnilateralExitStateChanged,
+
     Other
 }
 
@@ -130,6 +142,8 @@ public sealed class SparkEventListenerAdapter : EventListener
                 SdkEvent.NewDeposits => new SparkEventEnvelope(_storeId, SparkEventKind.NewDeposits, null),
                 SdkEvent.PaymentMetadataUpdated updated =>
                     new SparkEventEnvelope(_storeId, SparkEventKind.PaymentMetadataUpdated, updated.payment),
+                SdkEvent.UnilateralExitStateChanged =>
+                    new SparkEventEnvelope(_storeId, SparkEventKind.UnilateralExitStateChanged, null),
                 _ => new SparkEventEnvelope(_storeId, SparkEventKind.Other, null)
             };
 

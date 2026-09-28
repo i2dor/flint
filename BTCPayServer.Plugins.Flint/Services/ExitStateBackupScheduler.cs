@@ -37,9 +37,10 @@ public sealed class ExitStateBackupScheduler
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Both of the events that request a refresh arrive as streams, not singletons: an on-chain deposit
+    /// Every event that requests a refresh arrives as a stream, not a singleton: an on-chain deposit
     /// burst lands as a <c>ClaimedDeposits</c> per claim plus a payment event per credit, and the SDK's
-    /// own background leaf optimisation emits its own stream independent of anything the merchant did.
+    /// <c>UnilateralExitStateChanged</c> fires per leaf whose exit data it completes or rebuilds — which
+    /// the SDK's own background leaf optimisation does in rounds, independent of anything the merchant did.
     /// Every export is a live SDK call producing a multi-megabyte blob and an equally large write, so
     /// reacting to each event individually would turn a deposit burst into N full exports of state that
     /// differs, at most, by the last claim — and would do it on the store's own event loop's time budget.

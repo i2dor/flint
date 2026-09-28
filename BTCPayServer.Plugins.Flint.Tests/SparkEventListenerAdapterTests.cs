@@ -139,6 +139,20 @@ public class SparkEventListenerAdapterTests
     }
 
     [Fact]
+    public void An_exit_state_change_is_forwarded_as_its_own_kind()
+    {
+        // The SDK's statement that an earlier exit-state export is out of date. Folded into Other, it reached
+        // only a trace line, and every send, swap and renewal left the backup stale until the hourly net.
+        var (adapter, channel) = Create();
+
+        adapter.OnEvent(new SdkEvent.UnilateralExitStateChanged());
+
+        Assert.True(channel.Reader.TryRead(out var envelope));
+        Assert.Equal(SparkEventKind.UnilateralExitStateChanged, envelope!.Kind);
+        Assert.Null(envelope.Payment);
+    }
+
+    [Fact]
     public void Deposit_events_are_forwarded()
     {
         // On-chain deposits are real money arriving and the operator should see them, even though they settle
