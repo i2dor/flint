@@ -50,7 +50,21 @@ The wallet's Spark identity, the recovery phrase's provenance, and seed replacem
 keys and clears the Lightning configuration the plugin wrote — but only if that configuration still points
 at this store's Spark wallet, so a merchant who moved to their own node keeps it. The wallet's local SDK
 database is deliberately left on disk, since it records payments already settled on a wallet whose phrase
-the merchant may still hold.
+the merchant may still hold. For the same reason, with the experimental unilateral exit enabled, the wallet's
+exit-state backups are kept in `<DataDir>/Plugins/Flint/exit-state/` as `<storeId>.removed-*` files (or
+`<storeId>.other-wallet-*` when a store is re-provisioned onto a new phrase); keep them until those funds are
+elsewhere. Exit records stay in the database too.
+
+### Exit-state backup (experimental)
+
+With `FLINT_EXPERIMENTAL_UNILATERAL_EXIT` set, Flint keeps an automatic copy of each wallet's exit data in
+`<DataDir>/Plugins/Flint/exit-state/`, refreshed as the wallet changes. Download it from the **Advanced** page
+and keep it off the server: it is the copy that lets an exit be built if the server's own storage is lost while
+Spark's operators are unreachable. To restore one, paste it or choose the downloaded file on the same page. It is
+imported into the running wallet immediately and the result is shown; if the wallet is not running or the import
+fails, it is listed as *waiting to be imported*, retried at every start, and never replaced by the automatic
+backup. The automatic copy is imported back only when a wallet starts with empty storage. The backup discloses
+the wallet's balance, how it is split and its history — treat it like a statement, not like a seed.
 
 ## How settlement is guaranteed
 

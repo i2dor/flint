@@ -85,14 +85,14 @@
   - **Only networks the plugin ships an icon for are offered** — eight today. The provider serves more; adding one
     is its icon and a line of code.
   - **A custom rate script needs USDC and USDT rules**, or the two payment methods cannot be priced. The plugin's
-    defaults (`USDC_USD = 1`, `USDT_USD = 1`, crossed through bitcoin for other currencies) apply only to stores on
-    BTCPay's default rules.
+    defaults are exact pairs (`USDC_USD = 1`, `USDT_USD = 1`, and 42 major fiat currencies through bitcoin) and
+    apply only to stores on BTCPay's default rules; other fiat falls to the store's catch-all.
   - **Replacing a store's recovery phrase strands its open quotes.** A quote names the wallet it pays into, and the
     old wallet stops running when its phrase is replaced, so a payment to a quote made before the replacement does
     not credit its invoice. Whatever the provider delivers for it is the old wallet's, reachable only with the old
     phrase. Replace a phrase when no USDC or USDT invoice is open.
-  - **Quotes are bounded**: ten per invoice and 500 unsettled per store, since each is a provider order the SDK
-    watches for a day.
+  - **Quotes are bounded**: ten per invoice and 500 still on offer per store, since each is a provider order the SDK
+    watches for a day. Only quotes a payer can still be shown count towards the store's 500.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
   logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into
   BTCPay's log. What it emits at each level was read line by line against a throwaway regtest wallet: at
@@ -163,7 +163,10 @@
   relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
   from data the SDK holds **locally**, so on the pinned SDK (0.26.0) it does not need the Spark operators to
   be reachable — but only for leaves whose data was collected while they still were. That is why the
-  exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage, and
+  exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage. An
+  imported out-of-date backup can make leaves spent since spendable again until the next sync, which is why Flint
+  imports its own automatic backup only when the wallet's storage is empty and imports a pasted one once; backups
+  kept aside on removal or a seed change are never deleted by the plugin. And
   a leaf is only exitable this second way once its chain has been synced at least once so its data exists to
   be collected. So the path now covers operators who are gone, given a backup taken in time — not a wallet
   that was never online with them. The fees are paid from a **separate on-chain output the operator funds by

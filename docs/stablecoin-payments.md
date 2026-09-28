@@ -19,8 +19,10 @@ to choose between them, run a second plugin, or keep a token they do not want.
 Two more payment methods beside Lightning, **USDC** and **USDT**. Choosing one lists the networks it can be sent
 from, each with its icon; choosing a network fetches a quote from the conversion provider and shows:
 
-- a QR code with the network's icon in the middle — and, on EVM chains, a *Pay in wallet* button whose link fills
-  in the token, the amount and the address;
+- a QR code of the bare deposit address with the network's icon in the middle (clicking it copies the address) —
+  and, on EVM chains, a *Pay in wallet* button whose link fills in the token, the amount and the address. The QR is
+  deliberately not that link: a scanner that does not understand token-transfer links would take the token contract
+  in it as the recipient;
 - the exact amount to send, which includes that network's cost;
 - the deposit address, labelled with the network and its icon.
 
@@ -66,8 +68,11 @@ another network rather than shown the provider's error.
 
 The provider pays every conversion into the same Spark wallet, and nothing in what arrives names an invoice. So the
 plugin records every quote it shows, and matches each arrival to its quote by the figures the provider fixed when it
-made that quote. Two live quotes on one network are never asked for exactly the same amount — a millionth is added
-where one would collide — so an exact payment is always attributable.
+made that quote. No two open quotes on one network ever carry the same figures: where a new quote would match one
+already open, the provider is asked again for a very slightly different amount until it does not. So an arrival is
+attributed by what the provider fixed, not by the exact amount the payer typed — a payer or exchange rounding the
+amount still credits the right invoice. Anything that still cannot be told apart (only quotes made before this
+safeguard) is reported on the store's Flint page rather than guessed at.
 
 What that asks of the payer: **send exactly the amount shown, in one transaction, on the network shown.** A
 different amount is still credited, with what actually arrived, whenever its quote can be told apart from the
@@ -87,7 +92,12 @@ already shown still settles. The same switch is on the API:
 ## Before you turn it on
 
 - **The conversion provider holds the payer's coin while it converts.** See [Trust model](trust-model.md).
-- **A custom rate script needs USDC and USDT rules.** The plugin registers default rules — `USDC_USD = 1` and
-  `USDT_USD = 1`, crossed through bitcoin for other currencies — and a store with its own rate script must carry
-  equivalents, or the payment methods cannot be priced.
+- **A custom rate script needs USDC and USDT rules.** The plugin registers default rules for exact pairs only —
+  `USDC_USD = 1`, `USDT_USD = 1`, and `USDC_{FIAT}` / `USDT_{FIAT}` as `BTC_{FIAT} / BTC_USD` for 42 major fiat
+  currencies — so they never reprice anything else (in particular `BTC_USDT` stays the store exchange's own
+  market). Another fiat currency is priced by the store's catch-all rule. A store with its own rate script must
+  carry equivalents, or the payment methods cannot be priced.
+- **Money that lands on no invoice is shown on the store's Flint page.** A USDC/USDT arrival that cannot be matched
+  to a quote, or a matched payment that could not be recorded on its invoice, is listed there for the store owner,
+  not only in the server log.
 - The rest is in [Known limitations](limitations.md).
