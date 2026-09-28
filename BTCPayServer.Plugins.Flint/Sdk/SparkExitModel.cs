@@ -284,6 +284,38 @@ public sealed record SparkExitTransaction(
     /// correspondence would silently drop a child the SDK started attaching elsewhere.
     /// </remarks>
     public bool RequiresPackageBroadcast => CpfpTxHex is not null;
+
+    /// <summary>True when <paramref name="value"/> is a txid as Bitcoin spells one: 64 hex digits.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>These two predicates exist because the page turns stored strings into a shell command.</b> The exit
+    /// page renders <c>bitcoin-cli submitpackage '["…","…"]'</c> for an operator to paste into a terminal, built
+    /// from <see cref="TxHex"/> and <see cref="CpfpTxHex"/> as they sit in the database. Hex cannot carry a quote,
+    /// a bracket or a semicolon, so a value that is hex cannot change what the pasted command does — and a value
+    /// that is not hex is not a transaction anyway, so refusing it costs nothing a real exit has.
+    /// </para>
+    /// <para>
+    /// Either case is accepted: Bitcoin Core accepts both, and a row that was written in upper case by some
+    /// earlier tool is no less a transaction for it.
+    /// </para>
+    /// </remarks>
+    public static bool IsTxid(string? value) => value is { Length: 64 } && IsHex(value);
+
+    /// <summary>True when <paramref name="value"/> is non-empty, even-length hex — a serialised transaction.</summary>
+    /// <remarks>See <see cref="IsTxid"/> for why this is checked at all.</remarks>
+    public static bool IsTransactionHex(string? value) =>
+        value is { Length: > 0 } && value.Length % 2 == 0 && IsHex(value);
+
+    private static bool IsHex(string value)
+    {
+        foreach (var character in value)
+        {
+            if (!char.IsAsciiHexDigit(character))
+                return false;
+        }
+
+        return true;
+    }
 }
 
 /// <summary>

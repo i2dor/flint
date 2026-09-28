@@ -460,6 +460,10 @@ public class SparkExitPageTests
 
         Assert.Contains("bitcoin-cli submitpackage", view);
         Assert.Contains("CpfpTxHex is { } cpfpTxHex", view);
+        // The command is built from stored strings and pasted into a shell, so it is only built from hex — both
+        // halves of a package, checked on the line that builds it rather than trusted from upstream.
+        Assert.Contains("!SparkExitTransaction.IsTransactionHex(tx.TxHex)", view);
+        Assert.Contains("!SparkExitTransaction.IsTransactionHex(tx.CpfpTxHex)", view);
         Assert.Contains("sendrawtransaction", view);
         Assert.Contains("SparkExitTransactions", view);
         Assert.Contains("SparkExitFundingAddress", view);

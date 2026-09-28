@@ -688,7 +688,7 @@ public class SparkUnilateralExitServiceTests
         var node = transactions.First(tx => tx.Kind is SparkExitTxKind.TreeNode);
         Assert.True(node.RequiresPackageBroadcast);
         Assert.Equal(1_008u, node.CsvTimelockBlocks!.Value);
-        Assert.Equal(["txid:fanout"], node.DependsOn);
+        Assert.Equal([FakeSparkSdkClient.ExitTxid("fanout")], node.DependsOn);
 
         // The build spent exactly the one output it was funded with, and it had a key for it.
         var call = Assert.Single(harness.Sdk.ExitBuildCalls);
@@ -1049,6 +1049,21 @@ public class SparkUnilateralExitServiceTests
         Assert.Equal("[]", stored.TransactionsJson);
         // The previous attempt's complaint does not sit next to a successful build.
         Assert.Null(stored.LastError);
+
+        // And it reads back as what it is — an empty set — rather than as a damaged one. Reporting it unreadable
+        // told the operator their only copy of the exit was broken and made the page's empty branch unreachable.
+        var page = await harness.Service.ReadAsync(StoreId, Ct);
+        Assert.False(page.TransactionsUnreadable);
+        Assert.NotNull(page.Transactions);
+        Assert.Empty(page.Transactions);
+        Assert.Null(page.PendingBroadcast);
+
+        // A check has nothing to ask the chain about, says so, and does not write that down as a failure.
+        var check = await harness.Service.CheckAsync(StoreId, record.Id, Ct);
+        Assert.False(check.Success);
+        Assert.Equal(SparkUnilateralExitService.EmptySetNothingToCheck, check.Error);
+        Assert.Empty(harness.Sdk.ExitCheckCalls);
+        Assert.Null(harness.Records.Records[record.Id].LastError);
     }
 
     /// <summary>
@@ -1075,7 +1090,7 @@ public class SparkUnilateralExitServiceTests
         var first = JsonSerializer.Deserialize<SparkExitTransaction[]>(
             harness.Records.Records[record.Id].TransactionsJson!)!;
         Assert.Equal(4, first.Length);
-        Assert.Contains(first, tx => tx.Txid == "txid:node:leaf-b");
+        Assert.Contains(first, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
 
         // leaf-b's branch has confirmed on chain, so the next build has nothing to do for it.
         harness.Sdk.ExitLeaves.RemoveAll(leaf => leaf.LeafId == "leaf-b");
@@ -1086,10 +1101,10 @@ public class SparkUnilateralExitServiceTests
             harness.Records.Records[record.Id].TransactionsJson!)!;
 
         Assert.Equal(3, second.Length);
-        Assert.DoesNotContain(second, tx => tx.Txid == "txid:node:leaf-b");
+        Assert.DoesNotContain(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-b"));
         // The transaction the rebuild dropped is gone from the row, not left behind as a step to broadcast.
         Assert.NotEqual(4, second.Length);
-        Assert.Contains(second, tx => tx.Txid == "txid:node:leaf-a");
+        Assert.Contains(second, tx => tx.Txid == FakeSparkSdkClient.ExitTxid("node:leaf-a"));
     }
 
     #endregion
@@ -1772,8 +1787,14 @@ public class SparkUnilateralExitServiceTests
     /// </remarks>
     [Theory]
     [InlineData("not json at all")]
-    [InlineData("[]")]
     [InlineData("[{}]")]
+    // Present but not what Bitcoin would produce. The page pastes the hex into a shell command, so a "hex" that
+    // could carry a quote must be refused here rather than rendered.
+    [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200'; rm -rf ~; '","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200","CpfpTxHex":"zz","DependsOn":[],"Kind":1,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"020","DependsOn":[],"Kind":0,"Status":{"Readiness":1}}]""")]
+    [InlineData("""[{"Txid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","TxHex":"0200","DependsOn":["not-a-txid"],"Kind":0,"Status":{"Readiness":1}}]""")]
     [InlineData("""[{"Txid":"aa","TxHex":"0200","DependsOn":[],"Kind":99,"Status":0}]""")]
     // The member most likely to be null, and the one that used to be dereferenced before it was checked: the
     // status is a reference record, and System.Text.Json fills an explicit or missing null into it regardless.

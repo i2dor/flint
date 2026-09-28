@@ -136,6 +136,12 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         "This store's unilateral-exit records could not be read, so this page cannot show whether an exit is in "
         + "progress. Nothing has been changed. The server log has the detail; try again shortly.";
 
+    /// <summary>A check of a built exit whose last build returned no transactions at all.</summary>
+    internal const string EmptySetNothingToCheck =
+        "This exit's last build returned no transactions — Spark found nothing left to sign for its leaves — so "
+        + "there is nothing here to check against the chain. If its sweep has already confirmed, the exit is "
+        + "finished and you can mark it completed. Otherwise build it again, which re-reads the chain.";
+
     internal const string BuiltButNotSaved =
         "The exit was built, but its signed transactions could not be saved, so they are lost. Nothing was "
         + "broadcast. Try again.";
@@ -503,17 +509,26 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // chain was being asked.
             var from = record.Status;
 
-            if (!TryReadTransactions(record, out var stored) || stored is not { Count: > 0 })
+            if (!TryReadTransactions(record, out var stored) || stored is null)
             {
                 // A built row whose set cannot be read has nothing to ask the chain about, and the SDK is handed
                 // the set — so this is a refusal rather than a call that would report on an exit that is not the
-                // one stored. The page reports the same condition from the same check.
+                // one stored. The page reports the same condition from the same check, and offers a rebuild: the
+                // advice is not to abandon, because the funding may already be committed to what was signed.
                 return await FailAsync(
                         record,
                         from,
                         "This exit's stored transactions could not be read back, so there is nothing to check "
-                        + "against the chain. Abandon it and quote a new one.")
+                        + "against the chain. Build it again, which re-reads the chain and stores a fresh set.")
                     .ConfigureAwait(false);
+            }
+
+            if (stored.Count == 0)
+            {
+                // Not a failure, and not written to the row as one: the last build legitimately returned nothing.
+                // The SDK's check over an empty set can only ever answer "valid", which would read as "on track"
+                // for an exit with nothing in it, so it is not asked.
+                return new UnilateralExitOpResult(false, EmptySetNothingToCheck, record);
             }
 
             // The SDK checks a whole exit response, and the record only stores the transactions — see
@@ -1670,7 +1685,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// </remarks>
     /// <returns>
     /// False when a built record's column could not be read as a well-formed set. True — with a null
-    /// <paramref name="transactions"/> — when there is simply nothing built yet.
+    /// <paramref name="transactions"/> — when there is simply nothing built yet, and true with an empty one when
+    /// the last build returned no transactions at all.
     /// </returns>
     private bool TryReadTransactions(
         UnilateralExitRecord? record,
@@ -1694,7 +1710,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return false;
         }
 
-        if (parsed is null || parsed.Length == 0 || parsed.Any(IsMalformed))
+        if (parsed is null || parsed.Any(IsMalformed))
         {
             _logger.LogError(
                 "Store {StoreId}: unilateral exit {ExitId} has a transaction set that parsed but is not usable",
@@ -1702,6 +1718,10 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return false;
         }
 
+        // An empty array is a readable answer, not a broken one. The build writes exactly what the SDK returned
+        // however short it is (see BuildAsync), and an empty set is one of those answers — Spark found nothing
+        // left to sign for these leaves. Calling it unreadable told the operator their only copy of the exit was
+        // damaged, and the page's own branch for an empty set could never render.
         transactions = parsed;
         return true;
 
@@ -1709,12 +1729,17 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         // SparkExitTxStatus is a reference record, and System.Text.Json fills a missing or explicit-null member of
         // a positional record with null whatever the declared nullability says. An exception here is not a page
         // error — it escapes a request, and BTCPay disables the plugin and restarts the server over it.
+        //
+        // The hex and the txids are checked for what they are, not only for being present: the page pastes the hex
+        // into a shell command for the operator to run (see SparkExitTransaction.IsTxid), so a row whose "hex"
+        // could carry a quote must never reach it.
         static bool IsMalformed(SparkExitTransaction? transaction) =>
             transaction is null
-            || string.IsNullOrWhiteSpace(transaction.Txid)
-            || string.IsNullOrWhiteSpace(transaction.TxHex)
+            || !SparkExitTransaction.IsTxid(transaction.Txid)
+            || !SparkExitTransaction.IsTransactionHex(transaction.TxHex)
+            || (transaction.CpfpTxHex is not null && !SparkExitTransaction.IsTransactionHex(transaction.CpfpTxHex))
             || transaction.DependsOn is null
-            || transaction.DependsOn.Any(string.IsNullOrWhiteSpace)
+            || transaction.DependsOn.Any(parent => !SparkExitTransaction.IsTxid(parent))
             || transaction.Status is null
             || !Enum.IsDefined(transaction.Kind)
             || !Enum.IsDefined(transaction.Status.Readiness);

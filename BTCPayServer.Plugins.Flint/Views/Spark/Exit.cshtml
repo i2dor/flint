@@ -58,9 +58,17 @@
     // string. It is a local function called from both the "send these now" list and the full table, so the two
     // cannot disagree about which command a given row needs: a merchant who ran one command from the summary
     // and a different one from the table would be right to stop trusting both.
-    static string BroadcastCommand(SparkExitTransaction tx) => tx.CpfpTxHex is { } cpfpTxHex
-        ? $"bitcoin-cli submitpackage '[\"{tx.TxHex}\",\"{cpfpTxHex}\"]'"
-        : $"bitcoin-cli sendrawtransaction {tx.TxHex}";
+    //
+    // The hex is checked again here although the service already refuses a set that is not hex, because this is
+    // the line that turns a database string into something an operator pastes into a shell. Hex cannot carry a
+    // quote or a semicolon; anything else is not a transaction and does not get a command.
+    static string BroadcastCommand(SparkExitTransaction tx) =>
+        !SparkExitTransaction.IsTransactionHex(tx.TxHex)
+        || (tx.CpfpTxHex is not null && !SparkExitTransaction.IsTransactionHex(tx.CpfpTxHex))
+            ? "(no command: this stored transaction is not valid hex, so it is not shown as one)"
+            : tx.CpfpTxHex is { } cpfpTxHex
+                ? $"bitcoin-cli submitpackage '[\"{tx.TxHex}\",\"{cpfpTxHex}\"]'"
+                : $"bitcoin-cli sendrawtransaction {tx.TxHex}";
 
     // The explorer form appears in two of this page's states — before anything is quoted, and beside the
     // funding panel — and never in both at once, so one local function serves both without colliding ids.
@@ -610,8 +618,10 @@
                 else if (Model.Transactions.Count == 0)
                 {
                     <div class="alert alert-warning" role="alert" id="SparkExitTransactionsEmpty">
-                        This exit is marked built but carries no transactions. Nothing has been broadcast and
-                        nothing can be; building again is safe.
+                        <strong>The last build returned no transactions.</strong> Spark found nothing left to sign
+                        for this exit's leaves, so there is nothing on this page to broadcast. If the sweep of an
+                        earlier set has already confirmed, the exit is finished and you can mark it completed below.
+                        Otherwise build again: it re-reads the chain and signs whatever is still outstanding.
                     </div>
 
                     <form method="post" asp-action="BuildExit" asp-route-storeId="@Model.StoreId"

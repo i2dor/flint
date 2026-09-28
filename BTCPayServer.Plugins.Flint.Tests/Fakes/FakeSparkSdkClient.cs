@@ -1395,30 +1395,48 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             return Task.FromResult(new SparkExitResult(
                 quote.RecoverableValueSat, quote.TotalFeeSat, [], quote.Leaves));
 
-        var sweepDependsOn = quote.Leaves.Select(leaf => $"txid:node:{leaf.LeafId}").ToList();
+        var sweepDependsOn = quote.Leaves.Select(leaf => ExitTxid($"node:{leaf.LeafId}")).ToList();
         var transactions = new List<SparkExitTransaction>
         {
-            new(SparkExitTxKind.Fanout, null, "txid:fanout", "0200fanout", null, null, [], ExitStatus())
+            new(SparkExitTxKind.Fanout, null, ExitTxid("fanout"), ExitHex("fanout"), null, null, [], ExitStatus())
         };
 
         transactions.AddRange(quote.Leaves.Select(leaf => new SparkExitTransaction(
             SparkExitTxKind.TreeNode,
             $"node:{leaf.LeafId}",
-            $"txid:node:{leaf.LeafId}",
-            $"0200node{leaf.LeafId}",
+            ExitTxid($"node:{leaf.LeafId}"),
+            ExitHex($"node:{leaf.LeafId}"),
             // A CPFP child, because a tree node pays no fee of its own and must go out as a package. A fake
             // that left this null would let a caller ship single-transaction broadcast instructions.
-            $"0200cpfp{leaf.LeafId}",
+            ExitHex($"cpfp:{leaf.LeafId}"),
             1_008,
-            ["txid:fanout"],
+            [ExitTxid("fanout")],
             ExitStatus())));
 
         transactions.Add(new SparkExitTransaction(
-            SparkExitTxKind.Sweep, null, "txid:sweep", "0200sweep", null, null, sweepDependsOn, ExitStatus()));
+            SparkExitTxKind.Sweep, null, ExitTxid("sweep"), ExitHex("sweep"), null, null, sweepDependsOn,
+            ExitStatus()));
 
         return Task.FromResult(new SparkExitResult(
             quote.RecoverableValueSat, quote.TotalFeeSat, transactions, quote.Leaves));
     }
+
+    /// <summary>
+    /// The txid this fake gives the exit transaction it labels <paramref name="label"/>: 64 hex digits, stable.
+    /// </summary>
+    /// <remarks>
+    /// Real-shaped rather than readable, because the service refuses a stored set whose txids and hex are not
+    /// what Bitcoin would produce — the page turns them into a shell command — and a fake that handed back
+    /// <c>"txid:fanout"</c> would have every build read back as unreadable. Tests name a transaction by passing
+    /// the same label here.
+    /// </remarks>
+    public static string ExitTxid(string label) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(label))).ToLowerInvariant();
+
+    /// <summary>Even-length hex standing in for a signed transaction, distinct per label.</summary>
+    public static string ExitHex(string label) =>
+        "02000000" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(label)).ToLowerInvariant();
 
     /// <summary>One transaction status, derived from the readiness this fake is configured with.</summary>
     /// <remarks>
