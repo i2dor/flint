@@ -230,7 +230,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private readonly ILogger<SparkUnilateralExitService> _logger;
 
     /// <summary>
-    /// Where a stored exit-state backup actually lives: one owner-only file per store, outside the
+    /// Where exit-state backups actually live: the automatic backup and the import queue, as owner-only files per
+    /// store, outside the
     /// settings blob. The settings write below is gone from this path deliberately — a several-megabyte
     /// value in the store's settings is deserialized on every settings read, and storing one there
     /// tore down and reconnected the store's wallet.

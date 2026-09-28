@@ -155,8 +155,11 @@ public interface ISparkUnilateralExitService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Stores an exported unilateral-exit backup blob where the automatic backups are kept (see
-    /// <see cref="IExitStateBackupStore"/>), or clears it when the argument is null or blank.
+    /// Queues a pasted unilateral-exit backup blob for import in the pending slot (see
+    /// <see cref="IExitStateBackupStore.AddPendingAsync"/>), where no automatic pass can overwrite it; or, when
+    /// the argument is null or blank, clears the queue, the automatic backup and the deprecated settings slot.
+    /// The caller imports the queue into the running wallet through
+    /// <c>ISparkStoreRuntime.ImportPendingExitStateAsync</c>.
     /// </summary>
     /// <remarks>
     /// <para>

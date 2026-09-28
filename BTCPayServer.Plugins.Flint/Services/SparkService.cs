@@ -1933,12 +1933,22 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
             return false;
         }
 
+        // Details normally follow within minutes. A transfer still bare an hour on is not waiting for them — the
+        // case that shows up is a second deposit to a quote that already settled, which the provider delivers
+        // after the SDK closed that quote's row, so no details ever come. Falling through hands it to the
+        // unattributable-transfer warning instead of leaving it at Debug for as long as any quote is open.
+        if (_timeProvider.GetUtcNow() - payment.Timestamp > StablecoinDetailsGrace)
+            return false;
+
         _logger.LogDebug(
             "Store {StoreId}: Spark payment {SdkPaymentId} has no payment hash and no conversion details yet while "
             + "USDC/USDT quotes are open; waiting for the provider's details to attribute it",
             instance.StoreId, payment.SdkPaymentId);
         return true;
     }
+
+    /// <summary>How long a bare transfer may wait for its conversion details before it is reported instead.</summary>
+    internal static readonly TimeSpan StablecoinDetailsGrace = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Re-reads a payment's status from the SDK, falling back to the event's own payload.

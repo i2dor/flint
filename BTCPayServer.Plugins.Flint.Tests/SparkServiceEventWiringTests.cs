@@ -268,14 +268,14 @@ public class SparkServiceEventWiringTests
     }
 
     /// <summary>The inbound transfer the provider delivers a USDC quote with, as the SDK reports it.</summary>
-    private static Payment CrossChainArrival(string id, bool withConversion = true) =>
+    private static Payment CrossChainArrival(string id, bool withConversion = true, DateTimeOffset? at = null) =>
         new(
             id: id,
             paymentType: PaymentType.Receive,
             status: SdkPaymentStatus.Completed,
             amount: new BigInteger(10_000),
             fees: BigInteger.Zero,
-            timestamp: (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            timestamp: (ulong)(at ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds(),
             method: PaymentMethod.Spark,
             details: new PaymentDetails.Spark(
                 invoiceDetails: null!,
@@ -344,6 +344,25 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentMetadataUpdated, CrossChainArrival("usdc-pay-1"));
         await WaitFor(() => h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments.Count == 1,
             "the USDC payment was never credited once its details arrived");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_transfer_still_without_details_an_hour_on_is_reported_rather_than_left_waiting()
+    {
+        // The case that produces one: a second deposit to a quote that already settled, delivered after the SDK
+        // closed that quote's row, so no details ever come. Left "waiting" it would sit at Debug for as long as
+        // any quote on the store is open — money on the wallet that nobody is told about.
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded,
+            CrossChainArrival("usdc-late", withConversion: false,
+                at: DateTimeOffset.UtcNow - SparkService.StablecoinDetailsGrace - TimeSpan.FromMinutes(5)));
+
+        await WaitFor(() => h.Log.AllText.Contains("cannot be matched to a BTCPay invoice"),
+            "a detail-less transfer past the grace period was never reported");
+        Assert.DoesNotContain("waiting for the provider's details", h.Log.AllText);
+        Assert.Empty(h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments);
     }
 
     // ---------------------------------------------------------------------------------------------------
