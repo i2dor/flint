@@ -57,38 +57,6 @@ public class StablecoinAmountsTests
         Assert.Equal(new BigInteger(10_087_341), StablecoinAmounts.RoundUpToDivisibility(10_087_341, 6, 6));
     }
 
-    [Fact]
-    public void A_unique_ask_takes_the_rounded_amount_when_nobody_else_asks_for_it()
-    {
-        Assert.Equal(
-            new BigInteger(10_087_341),
-            StablecoinAmounts.UniqueAsk(10_087_341, 6, 6, new HashSet<BigInteger>()));
-    }
-
-    [Fact]
-    public void A_unique_ask_steps_by_the_prompts_smallest_unit_past_every_live_ask()
-    {
-        var taken = new HashSet<BigInteger> { 10_087_341, 10_087_342 };
-        Assert.Equal(new BigInteger(10_087_343), StablecoinAmounts.UniqueAsk(10_087_341, 6, 6, taken));
-
-        // On an 18-decimal route the step is a millionth of a token, not a base unit: a payer's wallet shows six
-        // decimals, and an ask that differed only in the twelfth could not be told apart by what they send.
-        var step = BigInteger.Pow(10, 12);
-        var rounded = BigInteger.Parse("10087342000000000000");
-        var bscTaken = new HashSet<BigInteger> { rounded };
-        Assert.Equal(rounded + step, StablecoinAmounts.UniqueAsk(rounded, 18, 6, bscTaken));
-    }
-
-    [Fact]
-    public void A_unique_ask_gives_up_rather_than_nudging_without_bound()
-    {
-        var taken = Enumerable.Range(0, StablecoinAmounts.MaxUniquenessSteps + 1)
-            .Select(i => new BigInteger(10_000_000 + i))
-            .ToHashSet();
-
-        Assert.Null(StablecoinAmounts.UniqueAsk(10_000_000, 6, 6, taken));
-    }
-
     [Theory]
     [InlineData("10087341", 6, "10.087341")]
     [InlineData("10000000", 6, "10")]

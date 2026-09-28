@@ -130,26 +130,42 @@ public sealed class InMemoryStablecoinQuoteStore : IStablecoinQuoteStore
 
     public Task<IReadOnlyList<StablecoinQuote>> ListUncreditedAsync(
         string storeId,
+        DateTimeOffset settledFrom,
         int limit,
         CancellationToken cancellationToken = default)
     {
         lock (_gate)
             return Task.FromResult<IReadOnlyList<StablecoinQuote>>(Quotes
-                .Where(q => q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null)
+                .Where(q => q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null
+                            && q.SettledAt >= settledFrom)
                 .OrderBy(q => q.SettledAt)
                 .Take(limit)
                 .Select(Copy)
                 .ToList());
     }
 
-    public Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
+        CancellationToken cancellationToken = default)
     {
         lock (_gate)
             return Task.FromResult<IReadOnlyList<string>>(Quotes
-                .Where(q => q.SdkPaymentId is not null && q.CreditedAt is null)
+                .Where(q => q.SdkPaymentId is not null && q.CreditedAt is null && q.SettledAt >= settledFrom)
                 .Select(q => q.StoreId)
                 .Distinct()
                 .ToList());
+    }
+
+    /// <summary>Thrown by <see cref="CountUncreditedAsync"/>: a database that is down.</summary>
+    public Exception? FailUncreditedReadsWith { get; set; }
+
+    public Task<int> CountUncreditedAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (FailUncreditedReadsWith is not null)
+            throw FailUncreditedReadsWith;
+        lock (_gate)
+            return Task.FromResult(Quotes.Count(q =>
+                q.StoreId == storeId && q.SdkPaymentId is not null && q.CreditedAt is null));
     }
 
     public Task<int> DeleteFinishedAsync(DateTimeOffset before, CancellationToken cancellationToken = default)
@@ -315,11 +331,20 @@ public sealed class FakeStablecoinStoreConfig : IStablecoinStoreConfig
     public HashSet<string> KnownStores { get; } = [];
     public HashSet<string> Enabled { get; } = [];
 
-    public Task<bool?> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default) =>
-        Task.FromResult<bool?>(KnownStores.Count > 0 && !KnownStores.Contains(storeId) ? null : Enabled.Contains(storeId));
+    /// <summary>Thrown by both methods: the store repository's database is down.</summary>
+    public Exception? FailWith { get; set; }
+
+    public Task<bool?> IsEnabledAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        if (FailWith is not null)
+            throw FailWith;
+        return Task.FromResult<bool?>(KnownStores.Count > 0 && !KnownStores.Contains(storeId) ? null : Enabled.Contains(storeId));
+    }
 
     public Task<bool> SetEnabledAsync(string storeId, bool enabled, CancellationToken cancellationToken = default)
     {
+        if (FailWith is not null)
+            throw FailWith;
         if (KnownStores.Count > 0 && !KnownStores.Contains(storeId))
             return Task.FromResult(false);
         if (enabled)

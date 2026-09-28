@@ -1,8 +1,8 @@
 using System;
-using System.Globalization;
 using System.Linq;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Services;
+using BTCPayServer.Services.Invoices;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -86,17 +86,16 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
             : null;
         details ??= new StablecoinPromptDetails();
 
-        // A quote made for a different due — the invoice was part-paid since — is not offered for payment: it would
-        // ask for the wrong amount. The component shows the network picker instead, and picking re-quotes.
         var quote = details.Quote;
-        var current = quote is not null
-                      && context.Prompt.Destination == quote.DepositAddress
-                      && quote.Due == CurrentDue(context);
+        var current = IsCurrent(context.InvoiceEntity, context.Prompt, quote);
 
         if (current && quote is not null)
         {
+            // The link a wallet opens is the EIP-681 transfer; the QR code is the bare address, because a scanner that
+            // does not read token transfers takes that URI's first address — the token contract — as the recipient.
+            // See the component's note on its QR code.
             context.Model.InvoiceBitcoinUrl = quote.PaymentRequest;
-            context.Model.InvoiceBitcoinUrlQR = quote.PaymentRequest;
+            context.Model.InvoiceBitcoinUrlQR = quote.DepositAddress;
         }
         else
         {
@@ -117,32 +116,44 @@ public sealed class StablecoinCheckoutModelExtension : ICheckoutModelExtension
             networks = details.Networks
                 .Where(n => StablecoinPayments.NetworkIcon(n.Chain) is not null)
                 .Select(n => new { chain = n.Chain, name = n.Name }),
-            quote = current && quote is not null
-                ? new
-                {
-                    id = quote.QuoteId,
-                    chain = quote.Chain,
-                    chainName = quote.ChainName,
-                    address = quote.DepositAddress,
-                    amount = quote.Amount,
-                    paymentRequest = quote.PaymentRequest,
-                    contract = quote.ContractAddress,
-                    fee = quote.Fee.ToString(CultureInfo.InvariantCulture),
-                    offeredUntil = StablecoinPayments.OfferedUntil(quote.ExpiresAt).ToUnixTimeSeconds()
-                }
-                : null
+            quote = current && quote is not null ? Controllers.UIStablecoinCheckoutController.ToResponse(quote) : null,
+            // The quote the prompt last showed, once it is no longer offered. The payer's page may still hold it from
+            // its own quote request, and must stop showing it and send the payer for a fresh one — see IsCurrent.
+            withdrawn = !current && quote is not null ? new { id = quote.QuoteId, chain = quote.Chain } : null
         });
     }
 
+    /// <summary>
+    /// Whether the quote a prompt shows is still one to pay: its address is the prompt's destination, and it was made
+    /// for the invoice's due as it stands.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A quote made for a different due is withdrawn.</b> The invoice was part-paid since — most often by this
+    /// quote itself, a payer who sent too little — and the quote would ask for the whole original amount. Worse, a
+    /// second deposit to a quote's address is never linked to anything: the SDK closes a receive's provider row
+    /// once its first order completes, so a top-up sent there reaches the wallet with nothing to attribute it by.
+    /// The payer must get a fresh quote for the remainder, and the checkout says so.
+    /// </para>
+    /// <para>
+    /// Never throws: a due that cannot be computed (no rate) is a quote that cannot be confirmed current.
+    /// </para>
+    /// </remarks>
+    internal static bool IsCurrent(InvoiceEntity? invoice, PaymentPrompt prompt, StablecoinActiveQuote? quote) =>
+        quote is not null
+        && prompt.Destination == quote.DepositAddress
+        && invoice is not null
+        && quote.Due == CurrentDue(invoice, prompt);
+
     /// <summary>The invoice's net due in the prompt's currency, as the quote path computes it.</summary>
-    private static decimal? CurrentDue(CheckoutModelContext context)
+    private static decimal? CurrentDue(InvoiceEntity invoice, PaymentPrompt prompt)
     {
         try
         {
-            var netDue = context.InvoiceEntity.NetDue;
+            var netDue = invoice.NetDue;
             return netDue <= 0m
                 ? 0m
-                : BTCPayServer.Extensions.RoundUp(netDue / context.Prompt.Rate, StablecoinPayments.Divisibility);
+                : BTCPayServer.Extensions.RoundUp(netDue / prompt.Rate, StablecoinPayments.Divisibility);
         }
         catch (Exception)
         {

@@ -79,6 +79,24 @@ public class GreenfieldSparkStablecoinTests
         Assert.Empty(h.Stablecoins.StoreConfig.Enabled);
     }
 
+    [Fact]
+    public async Task A_database_that_does_not_answer_is_a_503_not_an_escaped_exception_or_a_false_off()
+    {
+        // BTCPay answers an exception escaping a plugin's request by disabling the plugin and restarting the server;
+        // and "enabled: false" would be a guess the caller could act on.
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, mainnet: true);
+        h.Stablecoins.StoreConfig.FailWith = new InvalidOperationException("database unavailable");
+
+        var read = Assert.IsType<ObjectResult>(await h.Api.GetStablecoins(Store, CancellationToken.None));
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, read.StatusCode);
+        Assert.Equal("stablecoins-unavailable", Assert.IsType<GreenfieldAPIError>(read.Value).Code);
+
+        var write = Assert.IsType<ObjectResult>(await h.Api.UpdateStablecoins(
+            Store, new SparkStablecoinsInput { Enabled = true }, CancellationToken.None));
+        Assert.Equal(StatusCodes.Status500InternalServerError, write.StatusCode);
+        Assert.Equal("stablecoins-not-updated", Assert.IsType<GreenfieldAPIError>(write.Value).Code);
+    }
+
     private static SparkStablecoinsData AssertOk(IActionResult result) =>
         Assert.IsType<SparkStablecoinsData>(Assert.IsType<OkObjectResult>(result).Value);
 }

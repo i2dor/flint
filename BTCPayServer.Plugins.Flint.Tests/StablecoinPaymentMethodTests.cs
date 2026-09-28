@@ -207,6 +207,9 @@ public class StablecoinPaymentMethodTests
         Assert.Equal("10.08", (string?)data["quote"]!["amount"]);
         Assert.Equal("0xdep", (string?)data["quote"]!["address"]);
         Assert.Equal("ethereum:0xabc@8453/transfer?address=0xdep&uint256=10080000", model.InvoiceBitcoinUrl);
+        // The QR code is the bare deposit address: a scanner that does not read EIP-681 would take the URI's first
+        // address — the token contract — as the recipient.
+        Assert.Equal("0xdep", model.InvoiceBitcoinUrlQR);
         Assert.Equal("UIStablecoinCheckout/Quote?invoiceId=invoice-1&paymentMethodId=USDC-FLINT", (string?)data["quoteUrl"]);
     }
 
@@ -237,6 +240,51 @@ public class StablecoinPaymentMethodTests
         Assert.Equal(JTokenType.Null, data["quote"]!.Type);
         Assert.Null(model.InvoiceBitcoinUrl);
         Assert.Equal(2, data["networks"]!.Count());
+        // Named, so a page still holding it from its own quote request stops showing it (the component drops a
+        // local copy the model withdraws) and sends the payer for a fresh address for what is left.
+        Assert.Equal("q1", (string?)data["withdrawn"]!["id"]);
+        Assert.Equal("base", (string?)data["withdrawn"]!["chain"]);
+    }
+
+    [Fact]
+    public void A_current_quote_is_not_reported_as_withdrawn()
+    {
+        var (_, data) = Checkout(Details(), destination: "0xdep");
+
+        Assert.Equal(JTokenType.Null, data["withdrawn"]!.Type);
+    }
+
+    [Fact]
+    public void The_checkout_component_lets_go_of_a_quote_the_invoice_withdrew()
+    {
+        // The component is the other half of the rule above, and it is script in a Razor view with no test runner of
+        // its own: this pins the pieces it cannot work without. It once fell back to its own copy of a quote the
+        // invoice had stopped offering — after a short payment settled that quote — and kept a payer sending to it.
+        var view = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
+            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+
+        Assert.Contains("local.id !== this.withdrawnId", view);
+        Assert.Contains("id !== this.localBasis", view);
+        Assert.Contains("id=\"FlintStablecoinWithdrawn\"", view);
+    }
+
+    [Fact]
+    public void The_checkout_qr_code_and_its_copy_button_are_the_bare_deposit_address()
+    {
+        // An EIP-681 URI names the token contract first; scanned or pasted by something that does not read token
+        // transfers, the contract becomes the recipient and the payment is gone.
+        var view = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
+            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+        var qr = System.Text.RegularExpressions.Regex.Match(
+            view, "<div class=\"qr-container[^>]*>\\s*<div>\\s*<qrcode[^>]*>", System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        Assert.True(qr.Success);
+        Assert.Contains(":data-qr-value=\"quote.address\"", qr.Value);
+        Assert.Contains(":data-clipboard=\"quote.address\"", qr.Value);
+        Assert.Contains("<qrcode :value=\"quote.address\"", qr.Value);
+        Assert.DoesNotContain("paymentRequest", qr.Value);
     }
 
     [Fact]
@@ -322,12 +370,27 @@ public class StablecoinPaymentMethodTests
         var link = new StablecoinPaymentLinkExtension(handler);
         var details = Details();
 
-        var shown = new PaymentPrompt { Destination = "0xdep", Details = JToken.FromObject(details, handler.Serializer) };
-        Assert.Equal(details.Quote!.PaymentRequest, link.GetPaymentLink(shown, null));
+        PaymentPrompt Prompt(string? destination, decimal netDue)
+        {
+            var invoice = new InvoiceEntity { Id = "invoice-1", Currency = "USD", StoreId = "store-1" };
+            invoice.AddRate(new CurrencyPair("USDC", "USD"), 1m);
+            invoice.SetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId, new PaymentPrompt
+            {
+                Currency = "USDC",
+                Divisibility = 6,
+                Destination = destination,
+                Details = JToken.FromObject(details, handler.Serializer)
+            });
+            invoice.NetDue = netDue;
+            return invoice.GetPaymentPrompt(StablecoinPayments.Usdc.PaymentMethodId)!;
+        }
+
+        Assert.Equal(details.Quote!.PaymentRequest, link.GetPaymentLink(Prompt("0xdep", 10m), null));
+        // Withdrawn by a part payment, as at checkout.
+        Assert.Null(link.GetPaymentLink(Prompt("0xdep", 4m), null));
 
         details.Quote = null;
-        var unpicked = new PaymentPrompt { Details = JToken.FromObject(details, handler.Serializer) };
-        Assert.Null(link.GetPaymentLink(unpicked, null));
+        Assert.Null(link.GetPaymentLink(Prompt(null, 10m), null));
     }
 
     #endregion
@@ -364,16 +427,58 @@ public class StablecoinPaymentMethodTests
         Assert.IsType<EmptyResult>(result);
     }
 
+    [Fact]
+    public async Task A_quote_expiring_at_the_end_of_the_calendar_is_answered_not_thrown()
+    {
+        // SparkSdkClient.FromUnixSeconds clamps an absurd provider expiry to the last representable second, and the
+        // hour the checkout keeps an address past its price used to overflow from there — inside the anonymous
+        // endpoint, where an escaped exception restarts the server.
+        var sdk = new FakeSparkSdkClient { ReceiveQuoteExpiresAt = DateTimeOffset.MaxValue };
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients["store-1"] = sdk;
+        var harness = new StablecoinHarness(runtime);
+        harness.Invoices.Add("invoice-1", "store-1", 10m, (StablecoinPayments.Usdc, ["base"]));
+        harness.Invoices.SetContracts("invoice-1", StablecoinPayments.Usdc, sdk.CrossChainReceiveRoutes);
+        var controller = new UIStablecoinCheckoutController(
+            harness.Service, NullLogger<UIStablecoinCheckoutController>.Instance);
+
+        var result = await controller.Quote("invoice-1", "USDC-FLINT", "base", Ct);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var body = JObject.FromObject(ok.Value!);
+        Assert.Equal(DateTimeOffset.MaxValue.ToUnixTimeSeconds(), (long)body["quote"]!["offeredUntil"]!);
+    }
+
+    [Fact]
+    public void The_time_a_quote_is_offered_for_saturates_at_the_end_of_the_calendar()
+    {
+        Assert.Equal(DateTimeOffset.MaxValue, StablecoinPayments.OfferedUntil(DateTimeOffset.MaxValue));
+        Assert.Equal(DateTimeOffset.MaxValue,
+            StablecoinPayments.OfferedUntil(DateTimeOffset.MaxValue - TimeSpan.FromMinutes(1)));
+        // An offset that puts the local clock nearer the end than the instant is must not overflow either.
+        var nearEnd = new DateTimeOffset(DateTime.MaxValue.AddHours(-2), TimeSpan.Zero).ToOffset(TimeSpan.FromHours(1.5));
+        Assert.Equal(nearEnd.UtcDateTime.AddHours(1), StablecoinPayments.OfferedUntil(nearEnd).UtcDateTime);
+
+        var ordinary = new DateTimeOffset(2026, 9, 28, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(ordinary + StablecoinPayments.OfferedPastExpiry, StablecoinPayments.OfferedUntil(ordinary));
+    }
+
     #endregion
 
     #region Rates
 
-    /// <summary>The default rules as the plugin registers them, under a store whose preferred exchange is Kraken.</summary>
-    private static RateRules Rules(string symbol) => RateRules.Combine(
-    [
-        RateRules.Parse("X_X = kraken(X_X);"),
-        RateRules.Parse($"{symbol}_USD = 1; {symbol}_X = {symbol}_BTC * BTC_X; {symbol}_BTC = 1 / BTC_USD;")
-    ]);
+    /// <summary>
+    /// A store's rules as BTCPay builds them for a store on a preferred exchange: its catch-all first, then every
+    /// default rule on the server — here BTCPay's own recommendation and the plugin's, exactly as registered.
+    /// </summary>
+    private static RateRules StoreRules(string exchange, params DefaultRules[] defaults)
+    {
+        var collection = new DefaultRulesCollection(defaults.Length > 0
+            ? defaults
+            : [StablecoinRateRules.For(StablecoinPayments.Usdc), StablecoinRateRules.For(StablecoinPayments.Usdt),
+                new DefaultRules.Recommendation("USD", "kraken") { Order = DefaultRules.HardcodedRecommendedExchangeOrder }]);
+        return new StoreBlob.RateSettings { PreferredExchange = exchange }.GetRateRules(collection, 0m);
+    }
 
     [Theory]
     [InlineData("USDC")]
@@ -381,7 +486,7 @@ public class StablecoinPaymentMethodTests
     public void A_dollar_invoice_asks_for_exactly_its_price(string symbol)
     {
         // The exact pair outranks the store's catch-all, so there is no bid/ask spread's worth of extra to pay.
-        var rule = Rules(symbol).GetRuleFor(new CurrencyPair(symbol, "USD"));
+        var rule = StoreRules("kraken").GetRuleFor(new CurrencyPair(symbol, "USD"));
 
         Assert.True(rule.Reevaluate());
         Assert.Equal(1m, rule.BidAsk!.Bid);
@@ -389,9 +494,9 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
-    public void Any_other_currency_is_crossed_through_bitcoin_at_dollar_parity()
+    public void Any_other_fiat_is_crossed_through_bitcoin_at_dollar_parity()
     {
-        var rule = Rules("USDC").GetRuleFor(new CurrencyPair("USDC", "EUR"));
+        var rule = StoreRules("kraken").GetRuleFor(new CurrencyPair("USDC", "EUR"));
         rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "USD"), new BidAsk(100_000m));
         rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "EUR"), new BidAsk(90_000m));
 
@@ -400,14 +505,68 @@ public class StablecoinPaymentMethodTests
     }
 
     [Fact]
-    public void A_bitcoin_denominated_invoice_is_priced_from_the_bitcoin_rate_alone()
+    public void A_fiat_the_plugin_does_not_list_is_priced_by_the_stores_exchange()
     {
-        var rule = Rules("USDT").GetRuleFor(new CurrencyPair("USDT", "BTC"));
-        rule.ExchangeRates.SetRate("kraken", new CurrencyPair("BTC", "USD"), new BidAsk(100_000m));
+        var rule = StoreRules("coingecko").GetRuleFor(new CurrencyPair("USDT", "ISK"));
+
+        Assert.Equal(["coingecko USDT_ISK"], rule.ExchangeRates.Select(r => $"{r.Exchange} {r.CurrencyPair}").ToArray());
+    }
+
+    [Theory]
+    [InlineData("USDT")]
+    [InlineData("USDC")]
+    public void A_store_priced_in_a_stablecoin_on_an_exchange_without_btc_usd_still_gets_its_rate(string symbol)
+    {
+        // A store that never enabled USDC or USDT, pricing in USDT on Binance, which lists BTC/USDT and no BTC/USD.
+        // The rules this plugin used to register included USDT_BTC = 1 / BTC_USD, which BTCPay takes as the inverse
+        // of BTC_USDT ahead of the store's own catch-all: bitcoin priced at BTC_USD, and on Binance no rate at all.
+        var pair = new CurrencyPair("BTC", symbol);
+
+        var rule = StoreRules("binance").GetRuleFor(pair);
+        Assert.Equal([$"binance {pair}"], rule.ExchangeRates.Select(r => $"{r.Exchange} {r.CurrencyPair}").ToArray());
+        rule.ExchangeRates.SetRate("binance", pair, new BidAsk(100_050m));
+        Assert.True(rule.Reevaluate());
+        Assert.Equal(100_050m, rule.BidAsk!.Bid);
+
+        var before = StoreRules("binance", new DefaultRules(
+            [$"{symbol}_USD = 1", $"{symbol}_X = {symbol}_BTC * BTC_X", $"{symbol}_BTC = 1 / BTC_USD"])).GetRuleFor(pair);
+        before.ExchangeRates.SetRate("binance", pair, new BidAsk(100_050m));
+        Assert.False(before.Reevaluate());
+    }
+
+    [Fact]
+    public void A_bitcoin_denominated_invoice_is_priced_at_the_stores_own_market_for_the_coin()
+    {
+        // No rule names USDT_BTC any more (it is BTC_USDT's inverse), so the store's catch-all prices it, and the
+        // exchange's BTC/USDT market answers for its inverse.
+        var rule = StoreRules("binance").GetRuleFor(new CurrencyPair("USDT", "BTC"));
+        rule.ExchangeRates.SetRate("binance", new CurrencyPair("BTC", "USDT"), new BidAsk(100_000m));
 
         Assert.True(rule.Reevaluate());
         Assert.Equal(0.00001m, rule.BidAsk!.Bid);
     }
 
+    [Fact]
+    public void The_plugins_rules_are_exact_pairs_for_its_own_coins_and_nothing_else()
+    {
+        var lines = StablecoinPayments.Assets
+            .SelectMany(asset => StablecoinRateRules.Lines(asset.Symbol, StablecoinRateRules.FiatCurrencies))
+            .ToList();
+
+        Assert.Contains("USDT_USD = 1;", lines);
+        Assert.Contains("USDC_EUR = BTC_EUR / BTC_USD;", lines);
+        Assert.Equal(2 * StablecoinRateRules.FiatCurrencies.Count, lines.Count);
+        Assert.All(lines, line =>
+        {
+            var pair = line[..line.IndexOf(' ')];
+            Assert.Matches("^(USDC|USDT)_[A-Z0-9]+$", pair);
+            Assert.False(pair.EndsWith("_X", StringComparison.Ordinal), pair);
+            Assert.NotEqual("USDC_BTC", pair);
+            Assert.NotEqual("USDT_BTC", pair);
+        });
+        Assert.Equal(StablecoinRateRules.Order, StablecoinRateRules.For(StablecoinPayments.Usdt).Order);
+    }
+
     #endregion
 }
+

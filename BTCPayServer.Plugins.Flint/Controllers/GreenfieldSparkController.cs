@@ -622,10 +622,20 @@ public class GreenfieldSparkController : ControllerBase
     {
         if (!ResolveStore(storeId, out var store))
             return StoreNotFound();
-        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
-            return NotConfigured();
 
-        return Ok(await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false));
+        try
+        {
+            if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+                return NotConfigured();
+
+            return await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false) is { } data
+                ? Ok(data)
+                : StablecoinsUnavailable();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return StablecoinsUnavailable(ex, store.Id);
+        }
     }
 
     /// <summary>
@@ -651,34 +661,59 @@ public class GreenfieldSparkController : ControllerBase
     {
         if (!ResolveStore(storeId, out var store))
             return StoreNotFound();
-        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
-            return NotConfigured();
 
-        request ??= new SparkStablecoinsInput();
-        if (request.Enabled && !_stablecoins.Available)
+        try
         {
-            ModelState.AddModelError(
-                JsonName(nameof(SparkStablecoinsInput.Enabled)),
-                "USDC and USDT payments are only available on Bitcoin mainnet.");
-            return this.CreateValidationError(ModelState);
-        }
+            if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+                return NotConfigured();
 
-        if (!await _stablecoins.SetEnabledAsync(store.Id, request.Enabled, cancellationToken).ConfigureAwait(false))
+            request ??= new SparkStablecoinsInput();
+            if (request.Enabled && !_stablecoins.Available)
+            {
+                ModelState.AddModelError(
+                    JsonName(nameof(SparkStablecoinsInput.Enabled)),
+                    "USDC and USDT payments are only available on Bitcoin mainnet.");
+                return this.CreateValidationError(ModelState);
+            }
+
+            if (!await _stablecoins.SetEnabledAsync(store.Id, request.Enabled, cancellationToken).ConfigureAwait(false))
+            {
+                return this.CreateAPIError(
+                    500, "stablecoins-not-updated", "The store's payment methods could not be updated.");
+            }
+
+            return await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false) is { } data
+                ? Ok(data)
+                : StablecoinsUnavailable();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return this.CreateAPIError(
-                500, "stablecoins-not-updated", "The store's payment methods could not be updated.");
+            return StablecoinsUnavailable(ex, store.Id);
         }
-
-        return Ok(await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<SparkStablecoinsData> ReadStablecoinsAsync(string storeId, CancellationToken cancellationToken) =>
-        new()
-        {
-            Available = _stablecoins.Available,
-            Enabled = await _stablecoins.IsEnabledAsync(storeId, cancellationToken).ConfigureAwait(false),
-            PaymentMethodIds = StablecoinPayments.Assets.Select(asset => asset.PaymentMethodId.ToString()).ToList()
-        };
+    /// <summary>The switch's state, or null when it cannot be read right now — which is not the same as "off".</summary>
+    private async Task<SparkStablecoinsData?> ReadStablecoinsAsync(string storeId, CancellationToken cancellationToken) =>
+        await _stablecoins.TryReadEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is { } enabled
+            ? new SparkStablecoinsData
+            {
+                Available = _stablecoins.Available,
+                Enabled = enabled,
+                PaymentMethodIds = StablecoinPayments.Assets.Select(asset => asset.PaymentMethodId.ToString()).ToList()
+            }
+            : null;
+
+    /// <summary>
+    /// A 503 for a database that did not answer. Both actions degrade to it rather than letting the exception reach
+    /// BTCPay, which answers an unhandled plugin exception during a request by disabling the plugin and restarting.
+    /// </summary>
+    private IActionResult StablecoinsUnavailable(Exception? ex = null, string? storeId = null)
+    {
+        if (ex is not null)
+            _logger.LogWarning(ex, "Store {StoreId}: the USDC/USDT switch could not be read or written", storeId);
+        return this.CreateAPIError(
+            503, "stablecoins-unavailable", "The store's USDC and USDT settings could not be read right now. Try again shortly.");
+    }
 
     #endregion
 

@@ -58,7 +58,7 @@ public class EfStablecoinQuoteStore : IStablecoinQuoteStore
         await using var context = _contextFactory.CreateContext();
         return await context.StablecoinQuotes
             .AsNoTracking()
-            .Where(q => q.StoreId == storeId && q.SdkPaymentId == null && q.ExpiresAt > expiredAfter)
+            .Where(q => q.StoreId == storeId && q.SdkPaymentId == null && q.ExpiresAt > expiredAfter.ToUniversalTime())
             .OrderBy(q => q.CreatedAt)
             .ToListAsync(cancellationToken);
     }
@@ -70,7 +70,7 @@ public class EfStablecoinQuoteStore : IStablecoinQuoteStore
         await using var context = _contextFactory.CreateContext();
         return await context.StablecoinQuotes
             .AsNoTracking()
-            .Where(q => q.SdkPaymentId == null && q.ExpiresAt > expiredAfter)
+            .Where(q => q.SdkPaymentId == null && q.ExpiresAt > expiredAfter.ToUniversalTime())
             .Select(q => q.StoreId)
             .Distinct()
             .ToListAsync(cancellationToken);
@@ -145,30 +145,45 @@ public class EfStablecoinQuoteStore : IStablecoinQuoteStore
 
     public async Task<IReadOnlyList<StablecoinQuote>> ListUncreditedAsync(
         string storeId,
+        DateTimeOffset settledFrom,
         int limit,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
 
+        // UTC, which is all Npgsql will send as a timestamptz parameter.
+        var from = settledFrom.ToUniversalTime();
         await using var context = _contextFactory.CreateContext();
         return await context.StablecoinQuotes
             .AsNoTracking()
-            .Where(q => q.StoreId == storeId && q.SdkPaymentId != null && q.CreditedAt == null)
+            .Where(q => q.StoreId == storeId && q.SdkPaymentId != null && q.CreditedAt == null && q.SettledAt >= from)
             .OrderBy(q => q.SettledAt)
             .Take(Math.Max(1, limit))
             .ToListAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<string>> ListStoresAwaitingCreditAsync(
+        DateTimeOffset settledFrom,
         CancellationToken cancellationToken = default)
     {
+        var from = settledFrom.ToUniversalTime();
         await using var context = _contextFactory.CreateContext();
         return await context.StablecoinQuotes
             .AsNoTracking()
-            .Where(q => q.SdkPaymentId != null && q.CreditedAt == null)
+            .Where(q => q.SdkPaymentId != null && q.CreditedAt == null && q.SettledAt >= from)
             .Select(q => q.StoreId)
             .Distinct()
             .ToListAsync(cancellationToken);
+    }
+
+    public async Task<int> CountUncreditedAsync(string storeId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(storeId);
+
+        await using var context = _contextFactory.CreateContext();
+        return await context.StablecoinQuotes
+            .AsNoTracking()
+            .CountAsync(q => q.StoreId == storeId && q.SdkPaymentId != null && q.CreditedAt == null, cancellationToken);
     }
 
     public async Task<int> DeleteFinishedAsync(DateTimeOffset before, CancellationToken cancellationToken = default)

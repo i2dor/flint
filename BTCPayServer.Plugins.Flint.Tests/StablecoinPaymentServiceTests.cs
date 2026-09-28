@@ -1,5 +1,6 @@
 using System.Numerics;
 using Breez.Sdk.Spark;
+using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Payments;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
@@ -206,11 +207,42 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(solana.DepositAddress, solana.PaymentRequest);
     }
 
-    [Fact]
-    public async Task Two_equal_invoices_on_one_route_are_asked_for_different_amounts()
+    private static (string Expected, string ServiceFee) Fingerprint(Setup setup, StablecoinActiveQuote shown)
     {
-        // The fake quotes deterministically, so without the nudge both payers would be asked for 10.08 and an exact
-        // payment could not say whose it was.
+        var record = setup.Quotes.Quotes.Single(q => q.Id == shown.QuoteId);
+        return (record.ExpectedReceivedBaseUnits, record.ServiceFeeBaseUnits);
+    }
+
+    [Fact]
+    public async Task Equal_invoices_landing_as_usdb_get_quotes_with_different_fingerprints()
+    {
+        // Landing as USDB the SDK's sizing is deterministic and the estimate is floored to the cent, so equal dues
+        // quote identical fingerprints — which is all their payments will be told apart by. The second request starts
+        // past the open twin: a target a millionth higher, which moves the sub-cent remainder in the provider's fee.
+        var setup = Create();
+        setup.Sdk.ReceiveLandsAsToken = true;
+        Invoice(setup, "invoice-1");
+        Invoice(setup, "invoice-2");
+        Invoice(setup, "invoice-3");
+
+        var first = await QuoteOk(setup, "base", "invoice-1");
+        var second = await QuoteOk(setup, "base", "invoice-2");
+        var third = await QuoteOk(setup, "base", "invoice-3");
+
+        Assert.Equal(
+            [new BigInteger(10_000_000), new BigInteger(10_000_001), new BigInteger(10_000_002)],
+            setup.Sdk.CrossChainReceiveCalls.Select(c => c.Amount).ToArray());
+        Assert.Equal(3, new[] { first, second, third }.Select(q => Fingerprint(setup, q)).Distinct().Count());
+        // Each costs its payer the millionths it was nudged by, and nothing more.
+        Assert.Equal("10.08", first.Amount);
+        Assert.Equal("10.080002", third.Amount);
+    }
+
+    [Fact]
+    public async Task Equal_invoices_landing_as_sats_are_nudged_by_a_sats_worth()
+    {
+        // A millionth of a dollar is a hundredth of a sat at this price, so it would move neither half of the
+        // fingerprint. The open twin says what a sat is worth, so the one provider call steps by that.
         var setup = Create();
         Invoice(setup, "invoice-1");
         Invoice(setup, "invoice-2");
@@ -218,9 +250,118 @@ public class StablecoinPaymentServiceTests
         var first = await QuoteOk(setup, "base", "invoice-1");
         var second = await QuoteOk(setup, "base", "invoice-2");
 
-        Assert.Equal("10.08", first.Amount);
-        Assert.Equal("10.080001", second.Amount);
-        Assert.Equal(0.080001m, second.Fee);
+        Assert.NotEqual(Fingerprint(setup, first), Fingerprint(setup, second));
+        Assert.Equal(new BigInteger(10_001_000), setup.Sdk.CrossChainReceiveCalls[1].Amount);
+        Assert.Equal(2, setup.Quotes.Quotes.Count);
+        // Well under a cent more for the payer.
+        Assert.True(second.Fee - first.Fee < 0.01m, $"{second.Fee} against {first.Fee}");
+    }
+
+    [Fact]
+    public async Task A_provider_that_quotes_one_fingerprint_whatever_is_asked_is_refused_rather_than_shown()
+    {
+        var setup = Create();
+        setup.Sdk.ReceiveFingerprint = (12_345, 67_890);
+        Invoice(setup, "invoice-1");
+        Invoice(setup, "invoice-2");
+        await QuoteOk(setup, "base", "invoice-1");
+
+        var result = await setup.Service.QuoteAsync("invoice-2", StablecoinPayments.Usdc.PaymentMethodId, "base", Ct);
+
+        Assert.Null(result.Quote);
+        Assert.Contains("busy", result.Error);
+        Assert.Equal(1 + StablecoinPaymentService.MaxFingerprintAttempts, setup.Sdk.CrossChainReceiveCalls.Count);
+        Assert.Single(setup.Quotes.Quotes);
+        Assert.Null(setup.Invoices.Invoices["invoice-2"].Prompts[StablecoinPayments.Usdc.PaymentMethodId].Quote);
+    }
+
+    [Theory]
+    [InlineData(true, 10_000_001)]
+    // Landing as sats the retry steps by the sat's worth the colliding quote implies.
+    [InlineData(false, 10_001_000)]
+    public async Task The_store_is_not_held_while_the_provider_quotes_and_racing_twins_still_come_out_unique(
+        bool landsAsToken, long retried)
+    {
+        var setup = Create();
+        setup.Sdk.ReceiveLandsAsToken = landsAsToken;
+        Invoice(setup, "invoice-1");
+        Invoice(setup, "invoice-2");
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        setup.Sdk.HoldCrossChainReceiveUntil = hold;
+
+        var one = setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "base", Ct);
+        var two = setup.Service.QuoteAsync("invoice-2", StablecoinPayments.Usdc.PaymentMethodId, "base", Ct);
+
+        // Both are at the provider at once: neither waits on the other's round trip.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (setup.Sdk.CrossChainReceiveCalls.Count < 2 && DateTime.UtcNow < deadline)
+            await Task.Delay(10, Ct);
+        Assert.Equal(2, setup.Sdk.CrossChainReceiveCalls.Count);
+
+        setup.Sdk.HoldCrossChainReceiveUntil = null;
+        hold.SetResult();
+        var results = await Task.WhenAll(one, two);
+
+        Assert.All(results, r => Assert.NotNull(r.Quote));
+        // Both asked for the same target, so one of them took the fingerprint and the other asked again.
+        Assert.Equal(3, setup.Sdk.CrossChainReceiveCalls.Count);
+        Assert.Equal(new BigInteger(retried), setup.Sdk.CrossChainReceiveCalls[2].Amount);
+        Assert.NotEqual(Fingerprint(setup, results[0].Quote!), Fingerprint(setup, results[1].Quote!));
+    }
+
+    private static StablecoinQuote OpenQuote(string id, DateTimeOffset createdAt, DateTimeOffset expiresAt) => new()
+    {
+        Id = id,
+        StoreId = StoreId,
+        InvoiceId = $"elsewhere-{id}",
+        PaymentMethodId = StablecoinPayments.Usdc.PaymentMethodId.ToString(),
+        Chain = "ethereum",
+        Asset = "USDC",
+        ContractAddress = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        Decimals = 6,
+        DepositAddress = $"0xother{id}",
+        DepositBaseUnits = "5000000",
+        AskedBaseUnits = "5000000",
+        PaymentRequest = $"0xother{id}",
+        DueAmount = 5m,
+        FeeAmount = 0m,
+        ExpectedReceivedBaseUnits = id,
+        DestinationAsset = "BTC",
+        ServiceFeeBaseUnits = "1",
+        CreatedAt = createdAt,
+        ExpiresAt = expiresAt
+    };
+
+    [Fact]
+    public async Task Quotes_no_longer_on_offer_do_not_hold_the_stores_capacity()
+    {
+        // An anonymous caller used to fill a store's cap with quotes that nobody would pay and switch its USDC and
+        // USDT off for the two days of the match window. Past the hour an address is offered for, a quote is no
+        // longer shown and the SDK polls it only every ten minutes, so it no longer counts.
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        Invoice(setup);
+        var now = time.GetUtcNow();
+        for (var i = 0; i < StablecoinPayments.MaxOpenQuotesPerStore; i++)
+            await setup.Quotes.AddAsync(OpenQuote($"{i}", now.AddHours(-3), now.AddHours(-2)), Ct);
+
+        await QuoteOk(setup, "base");
+    }
+
+    [Fact]
+    public async Task Quotes_still_on_offer_do_hold_the_stores_capacity()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        Invoice(setup);
+        var now = time.GetUtcNow();
+        for (var i = 0; i < StablecoinPayments.MaxOpenQuotesPerStore; i++)
+            await setup.Quotes.AddAsync(OpenQuote($"{i}", now.AddMinutes(-5), now.AddMinutes(-3)), Ct);
+
+        var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "base", Ct);
+
+        Assert.Contains("busy", result.Error);
+        Assert.Empty(setup.Sdk.CrossChainReceiveCalls);
     }
 
     [Fact]
@@ -235,6 +376,29 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(first.QuoteId, again.QuoteId);
         Assert.Single(setup.Sdk.CrossChainReceiveCalls);
         Assert.Single(setup.Quotes.Quotes);
+    }
+
+    [Fact]
+    public async Task A_quote_from_the_wallet_a_store_replaced_is_not_handed_out_again()
+    {
+        // After the recovery phrase is replaced, the old quote's address still pays the old wallet. Reused, checkout
+        // kept offering it for the hour it is offered.
+        var sdk = new FakeSparkSdkClient();
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients[StoreId] = sdk;
+        var setup = new Setup(new StablecoinHarness(runtime), sdk);
+        Invoice(setup);
+        var old = await QuoteOk(setup, "base");
+
+        var replacement = new FakeSparkSdkClient();
+        runtime.Clients[StoreId] = replacement;
+        var fresh = await QuoteOk(setup, "base");
+
+        Assert.NotEqual(old.QuoteId, fresh.QuoteId);
+        Assert.Single(replacement.CrossChainReceiveCalls);
+        // …and the replacement's own quote is reused as usual.
+        Assert.Equal(fresh.QuoteId, (await QuoteOk(setup, "base")).QuoteId);
+        Assert.Single(replacement.CrossChainReceiveCalls);
     }
 
     [Fact]
@@ -356,16 +520,31 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
-    public async Task Any_other_refusal_reaches_the_payer_in_the_providers_words()
+    public async Task Any_other_refusal_reaches_the_payer_in_the_plugins_words_and_the_log_in_the_providers()
     {
+        // The checkout is anonymous; the provider's and the SDK's error text is for whoever runs the server.
         var setup = Create();
         Invoice(setup);
-        setup.Sdk.FailCrossChainReceiveWith = new SdkException.NetworkException("@v1=provider timed out");
+        setup.Sdk.FailCrossChainReceiveWith = new SdkException.NetworkException("@v1=provider timed out at 10.0.0.7");
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "ethereum", Ct);
 
         Assert.Null(result.Quote);
-        Assert.Contains("provider timed out", result.Error);
+        Assert.Equal("USDC on Ethereum cannot take this payment right now. Try again shortly, or choose another network.", result.Error);
+        Assert.Contains(setup.Harness.Log.Lines, line => line.Contains("provider timed out"));
+    }
+
+    [Fact]
+    public async Task The_stores_switch_answers_rather_than_throws_when_its_configuration_cannot_be_read()
+    {
+        // The Flint pages call these inside BTCPay's request, where an escaped exception restarts the server.
+        var setup = Create();
+        setup.Harness.StoreConfig.FailWith = new InvalidOperationException("database unavailable");
+
+        Assert.False(await setup.Service.IsEnabledAsync(StoreId, Ct));
+        Assert.Null(await setup.Service.TryReadEnabledAsync(StoreId, Ct));
+        Assert.False(await setup.Service.SetEnabledAsync(StoreId, true, Ct));
+        Assert.False(await setup.Service.SetEnabledAsync(StoreId, false, Ct));
     }
 
     [Fact]
@@ -493,6 +672,74 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
+    public async Task An_eighteen_decimal_payment_the_provider_did_not_measure_settles_exactly_the_due()
+    {
+        // The SDK sizes a BSC deposit to the base unit and the payer is asked for it rounded up to six decimals. When
+        // the provider's order has no amountIn, the SDK reports that quote-time deposit as "what was paid"; crediting
+        // it recorded a millionth less than the ask, and a correctly paid invoice read as partly paid.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        setup.Sdk.ReceiveDepositDust = 123_456_789;
+        var shown = await QuoteOk(setup, "bsc");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+        Assert.Equal("10.080001", shown.Amount);
+
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount);
+        Assert.Equal(StablecoinReceiveOutcome.Credited, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+
+        var payment = Assert.Single(invoice.Payments);
+        Assert.Equal(10.080001m, payment.Value);
+        Assert.Equal(10m, payment.Value - payment.Fee);
+    }
+
+    [Fact]
+    public async Task An_unmeasured_payment_whose_delivery_fell_well_short_is_credited_by_what_was_delivered()
+    {
+        // Nothing says what the payer sent, and a USDB delivery is at par: a fifth short of the estimate is a payer
+        // who sent a fifth less, and crediting the ask would record money that never came.
+        var setup = Create();
+        setup.Sdk.ReceiveLandsAsToken = true;
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
+            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: sdkQuote.ExpectedReceivedAmount * 4 / 5);
+        await setup.Service.TryCreditAsync(StoreId, arrival, Ct);
+
+        Assert.Equal(8.064m, Assert.Single(invoice.Payments).Value);
+    }
+
+    [Theory]
+    // Reported, and not the quote-time deposit: the provider measured it, and it is credited as measured.
+    [InlineData("9000000", "10000", "BTC", 9_000_000)]
+    // The quote-time deposit, or nothing: read as the quote paid, credited as the ask…
+    [InlineData("10080000", "10000", "BTC", 10_080_001)]
+    [InlineData(null, "10000", "BTC", 10_080_001)]
+    [InlineData(null, null, "BTC", 10_080_001)]
+    // …which a sats delivery a price move short does not contradict…
+    [InlineData("10080000", "9100", "BTC", 10_080_001)]
+    // …but one far short of any price move does.
+    [InlineData("10080000", "5000", "BTC", 5_040_000)]
+    // A token at par has no price to move: past the slippage budget, the delivery is the evidence.
+    [InlineData("10080000", "9800000", "USDB", 9_878_400)]
+    [InlineData("10080000", "9950000", "USDB", 10_080_001)]
+    public void What_a_payer_is_credited_with(string? paid, string? delivered, string destination, long credited)
+    {
+        var quote = new StablecoinQuote
+        {
+            DepositBaseUnits = "10080000",
+            AskedBaseUnits = "10080001",
+            ExpectedReceivedBaseUnits = destination == "BTC" ? "10000" : "10000000",
+            DestinationAsset = destination,
+            PaidBaseUnits = paid,
+            DeliveredBaseUnits = delivered
+        };
+
+        Assert.Equal(new BigInteger(credited), StablecoinPaymentService.CreditedBaseUnits(quote));
+    }
+
+    [Fact]
     public async Task A_payment_to_an_earlier_networks_quote_records_that_networks_cost()
     {
         // The payer opened Ethereum, switched to Base, and then paid the Ethereum address after all. The prompt shows
@@ -513,10 +760,14 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(10m, payment.Value - payment.Fee);
     }
 
-    [Fact]
-    public async Task Equal_invoices_landing_as_usdb_are_attributed_by_the_exact_amount_paid()
+    [Theory]
+    [InlineData(10_080_001)]
+    // The review's case: the second payer's wallet shows no amount (a Tron or Solana QR code carries none), and
+    // they type the first quote's ask. Attributed by the amount paid, that credited the first invoice.
+    [InlineData(10_080_000)]
+    [InlineData(9_000_000)]
+    public async Task Equal_invoices_landing_as_usdb_are_each_credited_by_their_own_quote_however_the_payer_rounds(long paid)
     {
-        // Landing as USDB, equal dues freeze an identical estimate and fee: only the nudged ask tells them apart.
         var setup = Create();
         setup.Sdk.ReceiveLandsAsToken = true;
         var first = Invoice(setup, "invoice-1");
@@ -524,8 +775,7 @@ public class StablecoinPaymentServiceTests
         await QuoteOk(setup, "base", "invoice-1");
         var secondQuote = await QuoteOk(setup, "base", "invoice-2");
 
-        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
-            SdkQuoteFor(setup, secondQuote), "spark-pay-2", paid: 10_080_001);
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(SdkQuoteFor(setup, secondQuote), "spark-pay-2", paid: paid);
         Assert.Equal(StablecoinReceiveOutcome.Credited, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
 
         Assert.Empty(first.Payments);
@@ -534,22 +784,68 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
-    public async Task Equal_invoices_and_an_inexact_payment_are_left_for_a_human_and_reported_once()
+    public async Task Twin_quotes_recorded_before_fingerprints_were_unique_are_left_for_a_human_and_reported_once()
     {
+        // Rows from before the fix can still share a fingerprint for the two days they stay open. Nothing an arrival
+        // carries tells them apart — not the amount paid, even when it is one of their asks exactly.
         var setup = Create();
         setup.Sdk.ReceiveLandsAsToken = true;
         var first = Invoice(setup, "invoice-1");
         var second = Invoice(setup, "invoice-2");
         var quote = await QuoteOk(setup, "base", "invoice-1");
-        await QuoteOk(setup, "base", "invoice-2");
+        var twin = await QuoteOk(setup, "base", "invoice-2");
+        var original = setup.Quotes.Quotes.Single(q => q.Id == quote.QuoteId);
+        var legacy = setup.Quotes.Quotes.Single(q => q.Id == twin.QuoteId);
+        legacy.ExpectedReceivedBaseUnits = original.ExpectedReceivedBaseUnits;
+        legacy.ServiceFeeBaseUnits = original.ServiceFeeBaseUnits;
 
-        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(SdkQuoteFor(setup, quote), "spark-pay-1", paid: 9_999_999);
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(SdkQuoteFor(setup, quote), "spark-pay-1", paid: legacy.Asked);
         Assert.Equal(StablecoinReceiveOutcome.Unattributed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
         Assert.Equal(StablecoinReceiveOutcome.Unattributed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
 
         Assert.Empty(first.Payments);
         Assert.Empty(second.Payments);
         Assert.Single(setup.Harness.Log.Lines, line => line.Contains("spark-pay-1") && line.StartsWith("Warning"));
+    }
+
+    [Fact]
+    public async Task Money_on_no_invoice_is_there_for_the_store_to_see_not_only_in_the_server_log()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var foreign = FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown) with { ExpectedReceivedAmount = 12_345 }, "spark-pay-1", paid: 10_080_000);
+        await setup.Service.TryCreditAsync(StoreId, foreign, Ct);
+        await setup.Service.TryCreditAsync(StoreId, foreign, Ct);
+        var stuck = await SettledElsewhere(setup, "stuck", time.GetUtcNow());
+        await SettledElsewhere(setup, "just-now", time.GetUtcNow().AddMinutes(10));
+        time.Advance(StablecoinPaymentService.UncreditedNoticeAfter + TimeSpan.FromMinutes(1));
+
+        var attention = await setup.Service.GetAttentionAsync(StoreId, Ct);
+
+        Assert.True(attention.Any);
+        var arrival = Assert.Single(attention.Unattributed);
+        Assert.Equal("spark-pay-1", arrival.SdkPaymentId);
+        Assert.Equal("10.08", arrival.Amount);
+        Assert.Equal("Base", arrival.ChainName);
+        Assert.Equal("0xpayerspark-pay-1", arrival.ExternalTxHash);
+        // The one that settled a quarter of an hour ago and still has no credit; the retry is still on the other.
+        var uncredited = Assert.Single(attention.Uncredited);
+        Assert.Equal(stuck.InvoiceId, uncredited.InvoiceId);
+        Assert.Equal(1, attention.UncreditedCount);
+        Assert.False((await Create().Service.GetAttentionAsync(StoreId, Ct)).Any);
+    }
+
+    [Fact]
+    public async Task What_the_store_should_know_is_answered_even_when_the_database_is_not()
+    {
+        // Read by the status page's partial, inside the page's own request.
+        var setup = Create();
+        setup.Quotes.FailUncreditedReadsWith = new InvalidOperationException("database unavailable");
+
+        Assert.False((await setup.Service.GetAttentionAsync(StoreId, Ct)).Any);
     }
 
     [Fact]
@@ -604,6 +900,58 @@ public class StablecoinPaymentServiceTests
         Assert.Equal(0, await setup.Service.ReconcileAsync(Ct));
     }
 
+    private static async Task<StablecoinQuote> SettledElsewhere(Setup setup, string id, DateTimeOffset settledAt)
+    {
+        var quote = OpenQuote(id, settledAt.AddHours(-1), settledAt.AddMinutes(-58));
+        quote.InvoiceId = $"gone-{id}";
+        await setup.Quotes.AddAsync(quote, Ct);
+        Assert.True(await setup.Quotes.TrySettleAsync(
+            id, new StablecoinSettlement($"spark-{id}", 5_000_000, null, null, null, null, settledAt), Ct));
+        return quote;
+    }
+
+    [Fact]
+    public async Task Credits_past_the_retry_horizon_do_not_crowd_out_newer_ones()
+    {
+        // The retry read the oldest page of uncredited quotes and dropped the ones past a week afterwards, so a
+        // page's worth of stale ones — each a credit that can never land — kept every newer credit from being tried.
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        var invoice = Invoice(setup);
+        var now = time.GetUtcNow();
+        for (var i = 0; i < 150; i++)
+            await SettledElsewhere(setup, $"stale-{i}", now.AddDays(-8));
+
+        var shown = await QuoteOk(setup, "base");
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000);
+        setup.Invoices.FailPaymentsWith = new InvalidOperationException("database unavailable");
+        Assert.Equal(StablecoinReceiveOutcome.CreditFailed, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+        setup.Invoices.FailPaymentsWith = null;
+
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+        Assert.Single(invoice.Payments);
+    }
+
+    [Fact]
+    public async Task A_credit_that_keeps_failing_is_warned_about_once_not_every_pass()
+    {
+        var time = new StubTimeProvider(DateTimeOffset.UtcNow);
+        var setup = Create(time: time);
+        await SettledElsewhere(setup, "orphan", time.GetUtcNow());
+
+        for (var pass = 0; pass < 5; pass++)
+        {
+            await setup.Service.ReconcileAsync(Ct);
+            time.Advance(TimeSpan.FromMinutes(1));
+        }
+
+        Assert.Single(setup.Harness.Log.Lines, line => line.StartsWith("Warning") && line.Contains("spark-orphan"));
+
+        time.Advance(StablecoinPaymentService.CreditFailureWarningInterval);
+        await setup.Service.ReconcileAsync(Ct);
+        Assert.Equal(2, setup.Harness.Log.Lines.Count(line => line.StartsWith("Warning") && line.Contains("spark-orphan")));
+    }
+
     [Fact]
     public async Task The_reconciliation_pass_credits_an_arrival_the_event_stream_dropped()
     {
@@ -620,6 +968,60 @@ public class StablecoinPaymentServiceTests
 
         Assert.Single(invoice.Payments);
         Assert.False(await setup.Service.HasOpenQuotesAsync(StoreId, Ct));
+    }
+
+    [Fact]
+    public async Task A_busy_stores_lightning_receives_do_not_hide_a_dropped_arrival_from_the_pass()
+    {
+        // The window reaches back to the oldest open quote, and a store's Lightning receives in two days can run to
+        // thousands. Read unfiltered, they pushed the one cross-chain receive past the pass's page limit.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var start = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 1_000; i++)
+        {
+            setup.Sdk.Seed(new SparkPayment(
+                $"lightning-pay-{i}", SparkPaymentDirection.Receive, SparkPaymentStatus.Completed,
+                SparkPaymentMethod.Lightning, 1_000, 0, start.AddSeconds(i), PaymentFixture.PaymentHash, "lnbc1",
+                null, null));
+        }
+        setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000, at: start.AddSeconds(1_000)));
+
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        Assert.Single(invoice.Payments);
+        Assert.All(setup.Sdk.ListQueries, q => Assert.Contains(q.Method, new SparkPaymentMethod?[]
+        {
+            SparkPaymentMethod.Spark, SparkPaymentMethod.Token
+        }));
+    }
+
+    [Fact]
+    public async Task A_window_longer_than_one_pass_is_swept_across_passes_rather_than_restarted()
+    {
+        // More cross-chain receives in the window than one pass reads, none of them this quote's but one in the
+        // middle — past the newest page and past the first pass's sweep. The second pass carries on from where the
+        // first stopped instead of re-reading the same oldest pages.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var foreign = SdkQuoteFor(setup, shown) with { ExpectedReceivedAmount = 1 };
+        var start = DateTimeOffset.UtcNow;
+        var perPass = StablecoinPaymentService.MaxScanPages * StablecoinPaymentService.ScanPageSize;
+        var at = 0;
+        for (; at < perPass + 20; at++)
+            setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(foreign, $"foreign-{at}", at: start.AddSeconds(at)));
+        setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(
+            SdkQuoteFor(setup, shown), "spark-pay-1", paid: 10_080_000, at: start.AddSeconds(at++)));
+        for (var i = 0; i < StablecoinPaymentService.ScanPageSize * 2; i++, at++)
+            setup.Sdk.Seed(FakeSparkSdkClient.CrossChainReceivePayment(foreign, $"foreign-{at}", at: start.AddSeconds(at)));
+
+        Assert.Equal(0, await setup.Service.ReconcileAsync(Ct));
+        Assert.Equal(1, await setup.Service.ReconcileAsync(Ct));
+
+        Assert.Single(invoice.Payments);
     }
 
     [Fact]

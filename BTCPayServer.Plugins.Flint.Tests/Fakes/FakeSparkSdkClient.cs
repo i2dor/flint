@@ -163,6 +163,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             results = results.Where(p => p.Status is SparkPaymentStatus.Completed);
         if (query.From is { } from)
             results = results.Where(p => p.Timestamp >= from);
+        // The storage filters the real client maps a kind to: Spark transfers, or payments carrying token metadata.
+        if (query.Method is { } method)
+            results = results.Where(p => p.Method == method);
 
         // Honoured, because a caller that pages in the wrong direction walks away from what it is looking for
         // and a fake that ignored the flag would let that pass.
@@ -1049,11 +1052,29 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>The provider's proportional fee on a receive, in basis points of the amount.</summary>
     public long ReceiveFeeBps { get; set; } = 30;
 
+    /// <summary>
+    /// Base units added to every deposit: the unrounded tail the SDK's proportional sizing leaves on an 18-decimal
+    /// route, below the six decimals a payer is asked at.
+    /// </summary>
+    public BigInteger ReceiveDepositDust { get; set; }
+
     /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
     public bool ReceiveLandsAsToken { get; set; }
 
     /// <summary>How long the provider holds a receive quote's price: about two minutes, measured on mainnet.</summary>
     public TimeSpan ReceiveQuoteLifetime { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// When set, the expiry every receive quote carries instead of <see cref="ReceiveQuoteLifetime"/> from now — for
+    /// the values the real client produces at its edges, such as the clamp to the last representable second.
+    /// </summary>
+    public DateTimeOffset? ReceiveQuoteExpiresAt { get; set; }
+
+    /// <summary>
+    /// When set, the fingerprint every receive quote carries whatever it is asked for — a provider whose price and
+    /// fee did not move at all between quotes, for the service's give-up path.
+    /// </summary>
+    public (BigInteger Expected, BigInteger ServiceFee)? ReceiveFingerprint { get; set; }
 
     public List<CrossChainReceiveCall> CrossChainReceiveCalls { get; } = [];
 
@@ -1081,7 +1102,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
+        // Locked: the service asks for quotes concurrently, and a List loses an Add it is raced on.
+        lock (CrossChainReceiveCalls)
+            CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
         _writeLog?.Record("sdk:cc-receive");
 
         if (HoldCrossChainReceiveUntil is { } hold)
@@ -1095,12 +1118,24 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         var scale = BigInteger.Pow(10, (int)route.Decimals);
         var fixedFee = ReceiveFixedFeeMicroUsd * scale / 1_000_000;
         var proportional = amount * ReceiveFeeBps / 10_000;
-        var deposit = amount + fixedFee + proportional;
+        var deposit = amount + fixedFee + proportional + ReceiveDepositDust;
 
-        // Sats for the amount at the configured price, or USDB base units (6 dp) at par.
-        var expected = ReceiveLandsAsToken
-            ? amount * 1_000_000 / scale
-            : amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        // Sats for the amount at the configured price, floored to the sat; or USDB base units (6 dp) at par, floored
+        // to the cent as the provider floors a USDB estimate, with the sub-cent remainder counted in the quote's
+        // total fee as the provider's roundingFeeAmount is. Deterministic, as the real sizing is at a fixed rate: equal
+        // targets quote identical fingerprints, and a target a millionth apart differs only in that remainder.
+        BigInteger expected;
+        var rounding = BigInteger.Zero;
+        if (ReceiveLandsAsToken)
+        {
+            var usdb = amount * 1_000_000 / scale;
+            expected = usdb - usdb % 10_000;
+            rounding = (usdb - expected) * scale / 1_000_000;
+        }
+        else
+        {
+            expected = amount * 100_000_000 / (scale * ReceiveBitcoinPriceUsd);
+        }
 
         var address = route.Chain switch
         {
@@ -1109,6 +1144,10 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             _ => "0x" + index.ToString("x40", System.Globalization.CultureInfo.InvariantCulture)
         };
 
+        var serviceFee = fixedFee + proportional + rounding;
+        if (ReceiveFingerprint is { } fixedFingerprint)
+            (expected, serviceFee) = fixedFingerprint;
+
         return new SparkCrossChainReceiveQuote(
             route,
             address,
@@ -1116,9 +1155,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
             expected,
             ReceiveLandsAsToken ? "USDB" : "BTC",
             ReceiveLandsAsToken ? Usdb.Value : null,
-            fixedFee + proportional,
+            serviceFee,
             route.Asset,
-            DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
+            ReceiveQuoteExpiresAt ?? DateTimeOffset.UtcNow + ReceiveQuoteLifetime,
             address);
     }
 
@@ -1126,7 +1165,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// The inbound payment the SDK reports once the provider delivers a quote: a Spark transfer (or a token one)
     /// carrying the provider's conversion details, frozen from the quote exactly as the real provider row does.
     /// </summary>
-    /// <param name="paid">What the payer actually deposited, in route base units. Defaults to the SDK's deposit.</param>
+    /// <param name="paid">
+    /// What the payer actually deposited, in route base units, as the provider's order reports it. Defaults to the
+    /// SDK's quote-time deposit — which is also what the real SDK reports when the order carries no <c>amountIn</c>.
+    /// </param>
+    /// <param name="delivered">What reached the wallet, in the landing asset's units. Defaults to the quote's estimate.</param>
     /// <param name="withConversion">
     /// False reproduces the first report of a receive, before the provider's details arrive — a plain transfer
     /// with nothing to attribute it by.
@@ -1137,6 +1180,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         BigInteger? paid = null,
         bool withConversion = true,
         SparkPaymentStatus status = SparkPaymentStatus.Completed,
+        BigInteger? delivered = null,
         DateTimeOffset? at = null) =>
         new(
             sdkPaymentId,
@@ -1156,7 +1200,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                     SparkConversionStatus.Completed,
                     ProviderQuoteId: $"orchestra-quote-{sdkPaymentId}",
                     ProviderOrderId: $"orchestra-order-{sdkPaymentId}",
-                    DeliveredAmount: quote.ExpectedReceivedAmount,
+                    DeliveredAmount: delivered ?? quote.ExpectedReceivedAmount,
                     RecipientAddress: "spark1pgssfakewalletaddress",
                     Chain: quote.Route.Chain,
                     Asset: quote.Route.Asset,

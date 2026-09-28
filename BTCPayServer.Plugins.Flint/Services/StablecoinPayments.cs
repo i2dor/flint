@@ -106,7 +106,19 @@ public static class StablecoinPayments
     public static readonly TimeSpan OfferedPastExpiry = TimeSpan.FromHours(1);
 
     /// <summary>Until when a quote the provider says expires at <paramref name="expiresAt"/> is offered to payers.</summary>
-    public static DateTimeOffset OfferedUntil(DateTimeOffset expiresAt) => expiresAt + OfferedPastExpiry;
+    /// <remarks>
+    /// <b>Saturates rather than overflows.</b> The expiry is the provider's, read through the SDK, which clamps an
+    /// absurd one to the last representable second (<c>SparkSdkClient.FromUnixSeconds</c>); adding an hour to that
+    /// throws, and this runs on the anonymous checkout's request path, where an exception from plugin code disables
+    /// the plugin and restarts the server. A quote that far out is offered "forever", which is what it claims.
+    /// </remarks>
+    public static DateTimeOffset OfferedUntil(DateTimeOffset expiresAt)
+    {
+        // In UTC, where the headroom is the instant's own: a positive offset puts the local clock closer to the end
+        // of the calendar than the instant is, and it is the local clock the addition checks.
+        var utc = expiresAt.ToUniversalTime();
+        return utc > DateTimeOffset.MaxValue - OfferedPastExpiry ? DateTimeOffset.MaxValue : utc + OfferedPastExpiry;
+    }
 
     /// <summary>Quotes one invoice may request across every network, so a checkout page cannot mint without bound.</summary>
     /// <remarks>
@@ -116,10 +128,15 @@ public static class StablecoinPayments
     /// </remarks>
     public const int MaxQuotesPerInvoice = 10;
 
-    /// <summary>Unsettled quotes one store may hold inside <see cref="MatchWindow"/> before new ones are refused.</summary>
+    /// <summary>
+    /// Unsettled quotes one store may have on offer to payers (before <see cref="OfferedUntil"/>) before new ones are
+    /// refused.
+    /// </summary>
     /// <remarks>
     /// The server-wide bound on the polling above, and on the checkout endpoint being used to load somebody
-    /// else's provider through this server. Far above what a real store's customers produce in two days.
+    /// else's provider through this server. Far above what a real store's customers produce in an hour. Quotes past
+    /// their offer do not count: nobody is shown them, the SDK polls them only every ten minutes, and counting them
+    /// let an anonymous caller hold the cap for the whole two-day match window with one burst of quotes.
     /// </remarks>
     public const int MaxOpenQuotesPerStore = 500;
 

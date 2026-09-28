@@ -14,8 +14,8 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// returns no quote id, and the payment that eventually arrives carries no deposit address, so nothing the SDK
 /// offers at either end can be looked up at the other. This row is the join: it records, at quote time, the
 /// values the provider freezes onto the completed payment — the route, <see cref="ExpectedReceivedBaseUnits"/>
-/// and <see cref="ServiceFeeBaseUnits"/> — plus the exact amount the payer was asked for, which the plugin keeps
-/// unique per route among the quotes that can still complete. <c>StablecoinQuoteMatcher</c> holds the rules.
+/// and <see cref="ServiceFeeBaseUnits"/>, a pair the plugin keeps unique per route among the quotes that can still
+/// complete — plus the amount the payer was asked for. <c>StablecoinQuoteMatcher</c> holds the rules.
 /// </para>
 /// <para>
 /// Amounts in base units are strings, like <see cref="SweepRecord"/>'s: an 18-decimal route (USDC and USDT on
@@ -58,8 +58,8 @@ public class StablecoinQuote
 
     /// <summary>
     /// What the payer was asked to send, in route base units: the deposit rounded up to the payment method's six
-    /// decimals, plus the few millionths that keep it unique on this route. Never below
-    /// <see cref="DepositBaseUnits"/>.
+    /// decimals, so never below <see cref="DepositBaseUnits"/>. Not unique, and not what attributes a payment: see
+    /// <c>StablecoinQuoteMatcher</c>.
     /// </summary>
     public string AskedBaseUnits { get; set; } = null!;
 
@@ -101,7 +101,11 @@ public class StablecoinQuote
     /// <summary>The inbound Spark payment this quote was matched to. Unique: one payment settles one quote.</summary>
     public string? SdkPaymentId { get; set; }
 
-    /// <summary>What the payer actually deposited, in route base units, as the provider reported it.</summary>
+    /// <summary>
+    /// What the SDK reported the payer deposited, in route base units: the provider order's <c>amountIn</c>, or the
+    /// quote-time deposit when the order has none. Kept as reported; <c>StablecoinPaymentService.CreditedBaseUnits</c>
+    /// decides what it is evidence of.
+    /// </summary>
     public string? PaidBaseUnits { get; set; }
 
     /// <summary>What reached the wallet, in the landing asset's base units.</summary>
