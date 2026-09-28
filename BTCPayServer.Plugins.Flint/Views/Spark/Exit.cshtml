@@ -106,7 +106,9 @@
                         funding and when it is built. Left empty it is
                         <code>@SparkExitFundingExplorer.MainnetDefaultApiUrl</code>, which means telling
                         mempool.space which address funds your exit; point it at your own instance if you would
-                        rather not. It never affects what gets built or signed.
+                        rather not. Its answer decides which funding outputs a build spends, but it cannot
+                        redirect money: the destination is yours and every signature commits to the amount it
+                        spends, so a wrong answer can only make a build refuse or fail.
                     </text>
                 }
                 else
