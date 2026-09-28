@@ -634,6 +634,74 @@ public class StablecoinPaymentServiceTests
     }
 
     [Fact]
+    public async Task An_eighteen_decimal_payment_the_provider_did_not_measure_settles_exactly_the_due()
+    {
+        // The SDK sizes a BSC deposit to the base unit and the payer is asked for it rounded up to six decimals. When
+        // the provider's order has no amountIn, the SDK reports that quote-time deposit as "what was paid"; crediting
+        // it recorded a millionth less than the ask, and a correctly paid invoice read as partly paid.
+        var setup = Create();
+        var invoice = Invoice(setup);
+        setup.Sdk.ReceiveDepositDust = 123_456_789;
+        var shown = await QuoteOk(setup, "bsc");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+        Assert.Equal("10.080001", shown.Amount);
+
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount);
+        Assert.Equal(StablecoinReceiveOutcome.Credited, await setup.Service.TryCreditAsync(StoreId, arrival, Ct));
+
+        var payment = Assert.Single(invoice.Payments);
+        Assert.Equal(10.080001m, payment.Value);
+        Assert.Equal(10m, payment.Value - payment.Fee);
+    }
+
+    [Fact]
+    public async Task An_unmeasured_payment_whose_delivery_fell_well_short_is_credited_by_what_was_delivered()
+    {
+        // Nothing says what the payer sent, and a USDB delivery is at par: a fifth short of the estimate is a payer
+        // who sent a fifth less, and crediting the ask would record money that never came.
+        var setup = Create();
+        setup.Sdk.ReceiveLandsAsToken = true;
+        var invoice = Invoice(setup);
+        var shown = await QuoteOk(setup, "base");
+        var sdkQuote = SdkQuoteFor(setup, shown);
+
+        var arrival = FakeSparkSdkClient.CrossChainReceivePayment(
+            sdkQuote, "spark-pay-1", paid: sdkQuote.DepositAmount, delivered: sdkQuote.ExpectedReceivedAmount * 4 / 5);
+        await setup.Service.TryCreditAsync(StoreId, arrival, Ct);
+
+        Assert.Equal(8.064m, Assert.Single(invoice.Payments).Value);
+    }
+
+    [Theory]
+    // Reported, and not the quote-time deposit: the provider measured it, and it is credited as measured.
+    [InlineData("9000000", "10000", "BTC", 9_000_000)]
+    // The quote-time deposit, or nothing: read as the quote paid, credited as the ask…
+    [InlineData("10080000", "10000", "BTC", 10_080_001)]
+    [InlineData(null, "10000", "BTC", 10_080_001)]
+    [InlineData(null, null, "BTC", 10_080_001)]
+    // …which a sats delivery a price move short does not contradict…
+    [InlineData("10080000", "9100", "BTC", 10_080_001)]
+    // …but one far short of any price move does.
+    [InlineData("10080000", "5000", "BTC", 5_040_000)]
+    // A token at par has no price to move: past the slippage budget, the delivery is the evidence.
+    [InlineData("10080000", "9800000", "USDB", 9_878_400)]
+    [InlineData("10080000", "9950000", "USDB", 10_080_001)]
+    public void What_a_payer_is_credited_with(string? paid, string? delivered, string destination, long credited)
+    {
+        var quote = new StablecoinQuote
+        {
+            DepositBaseUnits = "10080000",
+            AskedBaseUnits = "10080001",
+            ExpectedReceivedBaseUnits = destination == "BTC" ? "10000" : "10000000",
+            DestinationAsset = destination,
+            PaidBaseUnits = paid,
+            DeliveredBaseUnits = delivered
+        };
+
+        Assert.Equal(new BigInteger(credited), StablecoinPaymentService.CreditedBaseUnits(quote));
+    }
+
+    [Fact]
     public async Task A_payment_to_an_earlier_networks_quote_records_that_networks_cost()
     {
         // The payer opened Ethereum, switched to Base, and then paid the Ethereum address after all. The prompt shows

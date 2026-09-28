@@ -46,7 +46,7 @@ public enum StablecoinCreditOutcome
     WrongStore
 }
 
-/// <param name="Value">What the payer sent, in the prompt's currency, rounded down.</param>
+/// <param name="Value">What the payer is taken to have sent, in the prompt's currency, rounded down (see <c>StablecoinPaymentService.CreditedBaseUnits</c>).</param>
 /// <param name="Fee">The quote's network cost, capped at <paramref name="Value"/>.</param>
 public sealed record StablecoinCreditRequest(
     StablecoinQuote Quote,

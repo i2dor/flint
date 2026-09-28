@@ -101,7 +101,11 @@ public class StablecoinQuote
     /// <summary>The inbound Spark payment this quote was matched to. Unique: one payment settles one quote.</summary>
     public string? SdkPaymentId { get; set; }
 
-    /// <summary>What the payer actually deposited, in route base units, as the provider reported it.</summary>
+    /// <summary>
+    /// What the SDK reported the payer deposited, in route base units: the provider order's <c>amountIn</c>, or the
+    /// quote-time deposit when the order has none. Kept as reported; <c>StablecoinPaymentService.CreditedBaseUnits</c>
+    /// decides what it is evidence of.
+    /// </summary>
     public string? PaidBaseUnits { get; set; }
 
     /// <summary>What reached the wallet, in the landing asset's base units.</summary>

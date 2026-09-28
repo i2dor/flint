@@ -814,13 +814,73 @@ public sealed class StablecoinPaymentService
         return await CreditAsync(fresh ?? quote, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// How far short of its quote's estimate a delivery landing as sats may fall and still read as the quote paid in
+    /// full, in basis points — when the provider has not said what was deposited (see <see cref="CreditedBaseUnits"/>).
+    /// </summary>
+    /// <remarks>
+    /// Wide, because a sats delivery moves with the bitcoin price: the provider reprices a deposit made after the
+    /// quote's two-minute price, and the SDK watches for one for a day. A token delivery is at dollar parity and gets
+    /// the quote's own slippage budget (<see cref="StablecoinPayments.MaxSlippageBps"/>) instead.
+    /// </remarks>
+    internal const int SatsDeliveryToleranceBps = 1_000;
+
+    /// <summary>
+    /// What a settled quote's payer is taken to have deposited, in route base units — the amount its invoice is
+    /// credited with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The deposit the SDK reports is not always the deposit.</b> <c>assetAmountIn</c> is the provider order's
+    /// <c>amountIn</c> when the order carries one, and the <em>quote-time</em> deposit when it does not
+    /// (<c>build_orchestra_receive_conversion_info</c> falls back to the row's own <c>amount_in</c>; the SDK's
+    /// completed-receive fixture has no <c>amountIn</c> at all). So a reported amount equal to
+    /// <see cref="StablecoinQuote.DepositBaseUnits"/> is indistinguishable from no report, and is read as one.
+    /// Crediting it as sent recorded a hair less than the payer was asked for on an 18-decimal route, where the ask is
+    /// the deposit rounded <em>up</em> to six decimals, and a correctly paid BSC invoice read as partly paid.
+    /// </para>
+    /// <para>
+    /// <b>The rules.</b> A reported amount that is not the quote-time deposit is the provider's word on what arrived,
+    /// and is credited as it is. Anything else means "the payer paid this quote", and is credited as the amount
+    /// they were asked for — unless what reached the wallet says otherwise: a delivery short of the quote's estimate
+    /// by more than a price move explains (<see cref="SatsDeliveryToleranceBps"/> for sats, the slippage budget for a
+    /// token at par) is credited in proportion to what was delivered, rounded down, because then the ask is the one
+    /// thing the payer certainly did not send.
+    /// </para>
+    /// </remarks>
+    internal static BigInteger CreditedBaseUnits(StablecoinQuote quote)
+    {
+        ArgumentNullException.ThrowIfNull(quote);
+
+        var asked = quote.Asked;
+        if (quote.PaidBaseUnits is { } reported
+            && StablecoinQuote.ParseBaseUnits(reported) is var paid
+            && paid != StablecoinQuote.ParseBaseUnits(quote.DepositBaseUnits))
+        {
+            return paid;
+        }
+
+        var expected = quote.ExpectedReceived;
+        if (quote.DeliveredBaseUnits is null || expected <= BigInteger.Zero)
+            return asked;
+
+        var delivered = StablecoinQuote.ParseBaseUnits(quote.DeliveredBaseUnits);
+        var toleranceBps = string.Equals(quote.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase)
+            ? SatsDeliveryToleranceBps
+            : (int)StablecoinPayments.MaxSlippageBps;
+        if (delivered * 10_000 >= expected * (10_000 - toleranceBps))
+            return asked;
+
+        return BigInteger.Min(asked, asked * delivered / expected);
+    }
+
     /// <summary>Records a settled quote's payment on its BTCPay invoice, and marks it recorded.</summary>
     private async Task<StablecoinReceiveOutcome> CreditAsync(StablecoinQuote quote, CancellationToken cancellationToken)
     {
         if (quote.SdkPaymentId is not { } paymentId)
             return StablecoinReceiveOutcome.CreditFailed;
 
-        var paid = quote.PaidBaseUnits is null ? quote.Asked : StablecoinQuote.ParseBaseUnits(quote.PaidBaseUnits);
+        var paid = CreditedBaseUnits(quote);
         var value = StablecoinAmounts.FromBaseUnits(paid, quote.Decimals, StablecoinPayments.Divisibility);
         // The quote's own network cost, so a payer who sent exactly what was asked settles exactly the due. Capped
         // at what arrived: a deposit below the cost is still a payment, of nothing net.

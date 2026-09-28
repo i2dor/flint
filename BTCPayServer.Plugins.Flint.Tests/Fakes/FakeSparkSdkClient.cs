@@ -1049,6 +1049,12 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// <summary>The provider's proportional fee on a receive, in basis points of the amount.</summary>
     public long ReceiveFeeBps { get; set; } = 30;
 
+    /// <summary>
+    /// Base units added to every deposit: the unrounded tail the SDK's proportional sizing leaves on an 18-decimal
+    /// route, below the six decimals a payer is asked at.
+    /// </summary>
+    public BigInteger ReceiveDepositDust { get; set; }
+
     /// <summary>Where a receive lands: sats, or the Stable Balance token when a test sets this.</summary>
     public bool ReceiveLandsAsToken { get; set; }
 
@@ -1107,7 +1113,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         var scale = BigInteger.Pow(10, (int)route.Decimals);
         var fixedFee = ReceiveFixedFeeMicroUsd * scale / 1_000_000;
         var proportional = amount * ReceiveFeeBps / 10_000;
-        var deposit = amount + fixedFee + proportional;
+        var deposit = amount + fixedFee + proportional + ReceiveDepositDust;
 
         // Sats for the amount at the configured price, floored to the sat; or USDB base units (6 dp) at par, floored
         // to the cent as the provider floors a USDB estimate, with the sub-cent remainder counted in the quote's
@@ -1154,7 +1160,11 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     /// The inbound payment the SDK reports once the provider delivers a quote: a Spark transfer (or a token one)
     /// carrying the provider's conversion details, frozen from the quote exactly as the real provider row does.
     /// </summary>
-    /// <param name="paid">What the payer actually deposited, in route base units. Defaults to the SDK's deposit.</param>
+    /// <param name="paid">
+    /// What the payer actually deposited, in route base units, as the provider's order reports it. Defaults to the
+    /// SDK's quote-time deposit — which is also what the real SDK reports when the order carries no <c>amountIn</c>.
+    /// </param>
+    /// <param name="delivered">What reached the wallet, in the landing asset's units. Defaults to the quote's estimate.</param>
     /// <param name="withConversion">
     /// False reproduces the first report of a receive, before the provider's details arrive — a plain transfer
     /// with nothing to attribute it by.
@@ -1165,6 +1175,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         BigInteger? paid = null,
         bool withConversion = true,
         SparkPaymentStatus status = SparkPaymentStatus.Completed,
+        BigInteger? delivered = null,
         DateTimeOffset? at = null) =>
         new(
             sdkPaymentId,
@@ -1184,7 +1195,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
                     SparkConversionStatus.Completed,
                     ProviderQuoteId: $"orchestra-quote-{sdkPaymentId}",
                     ProviderOrderId: $"orchestra-order-{sdkPaymentId}",
-                    DeliveredAmount: quote.ExpectedReceivedAmount,
+                    DeliveredAmount: delivered ?? quote.ExpectedReceivedAmount,
                     RecipientAddress: "spark1pgssfakewalletaddress",
                     Chain: quote.Route.Chain,
                     Asset: quote.Route.Asset,
