@@ -401,7 +401,8 @@ public class RenderExitScreensTests
             CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> BuildAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default) => NotAWrite();
 
         public Task<UnilateralExitOpResult> AbandonAsync(
             string storeId, string recordId, CancellationToken cancellationToken = default) => NotAWrite();

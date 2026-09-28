@@ -71,7 +71,20 @@ public interface ISparkUnilateralExitService
     /// state, not the guard). Safe to call again after a failure: the SDK resumes from chain state and a
     /// shortfall lands on the record as <see cref="UnilateralExitRecord.LastError"/>.
     /// </remarks>
-    Task<UnilateralExitOpResult> BuildAsync(string storeId, string recordId, CancellationToken cancellationToken = default);
+    /// <param name="feeRateSatPerVbyte">
+    /// Null builds at the record's own rate. A value re-prices this build at that rate and, if it succeeds, makes
+    /// it the record's rate — the SDK's way to raise the fee on an exit that stopped confirming. A built exit's
+    /// rate may stay or rise but not fall, because a replacement has to pay more than what it replaces.
+    /// </param>
+    Task<UnilateralExitOpResult> BuildAsync(
+        string storeId,
+        string recordId,
+        long? feeRateSatPerVbyte,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Builds at the record's own rate; see the overload.</summary>
+    Task<UnilateralExitOpResult> BuildAsync(string storeId, string recordId, CancellationToken cancellationToken = default) =>
+        BuildAsync(storeId, recordId, null, cancellationToken);
 
     /// <summary>
     /// Marks the record abandoned so the store can start over. Abandoning moves no money and cancels

@@ -823,15 +823,42 @@
                             </tbody>
                         </table>
 
-                        <form method="post" asp-action="BuildExit" asp-route-storeId="@Model.StoreId">
+                        @*
+                            The fee bump. The SDK's only way to raise the fee on an exit that stopped confirming is
+                            to quote again at a higher rate and build again, so the rate is an input here and not
+                            only a figure in the summary. The browser's min is the built rate because a replacement
+                            has to pay more than what it replaces; the service enforces the same rule.
+                        *@
+                        <form method="post" asp-action="BuildExit" asp-route-storeId="@Model.StoreId"
+                              id="SparkExitRebuildForm" class="mt-3">
                             <input type="hidden" name="recordId" value="@record.Id" />
+                            <div class="row">
+                                <div class="col-md-6 form-group">
+                                    <label for="SparkExitRebuildFeeRate" class="form-label">Fee rate for the rebuild</label>
+                                    <div class="input-group">
+                                        <input type="number" name="feeRateSatPerVbyte" id="SparkExitRebuildFeeRate"
+                                               class="form-control" step="1"
+                                               value="@record.FeeRateSatPerVbyte"
+                                               min="@record.FeeRateSatPerVbyte"
+                                               max="@SparkUnilateralExitService.MaxFeeRateSatPerVbyte" />
+                                        <span class="input-group-text">sat/vB</span>
+                                    </div>
+                                </div>
+                            </div>
                             <button type="submit" class="btn btn-secondary" id="SparkExitRebuild">
                                 Build again
                             </button>
                             <div class="form-text">
-                                If a fee turned out too low, send more funding and build again: steps that have
-                                already confirmed are skipped and the rest are rebuilt. It broadcasts nothing either
-                                way.
+                                At the same rate, this is the rebuild a Redo or an unverified status asks for. At a
+                                higher rate it is how you raise the fee on an exit that has stopped confirming —
+                                sending more funding alone changes nothing, because every transaction pays the rate
+                                it was signed at. Steps already confirmed stay as they are; everything not yet
+                                confirmed is signed again at the new rate, and the new fan-out, fee-bumping children
+                                and sweep replace their earlier versions in the mempool once you broadcast them
+                                (the tree transactions are pre-signed and do not change). The rebuild pays from the
+                                funding this exit already committed; if a higher rate needs more, it says how much
+                                to send to the funding address. It can only go up from the rate this set was built
+                                at, and it broadcasts nothing.
                             </div>
                         </form>
                     </div>

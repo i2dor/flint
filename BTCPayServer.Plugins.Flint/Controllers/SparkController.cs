@@ -1049,9 +1049,14 @@ public class SparkController : Controller
     /// </remarks>
     [HttpPost("exit/build")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    /// <param name="feeRateSatPerVbyte">
+    /// Empty rebuilds at the record's rate; a value re-prices the build — the page's fee bump. Whether it is
+    /// allowed is the service's judgement.
+    /// </param>
     public async Task<IActionResult> BuildExit(
         [FromRoute] string storeId,
         string recordId,
+        long? feeRateSatPerVbyte,
         CancellationToken cancellationToken)
     {
         if (!Constants.UnilateralExitEnabled)
@@ -1063,7 +1068,7 @@ public class SparkController : Controller
         storeId = store.Id;
 
         var result = await _unilateralExit
-            .BuildAsync(storeId, recordId, cancellationToken)
+            .BuildAsync(storeId, recordId, feeRateSatPerVbyte, cancellationToken)
             .ConfigureAwait(false);
 
         RelayExitResult(

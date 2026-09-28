@@ -80,7 +80,7 @@ public class SparkExitPageTests
                 Store,
                 new SparkExitViewModel { FeeRateSatPerVbyte = 10, DestinationAddress = Destination },
                 CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(Store, "some-record", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(Store, "some-record", CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(Store, "some-record", CancellationToken.None));
         Assert.IsType<NotFoundResult>(
@@ -110,7 +110,7 @@ public class SparkExitPageTests
                 victim,
                 new SparkExitViewModel { FeeRateSatPerVbyte = 10, DestinationAddress = Destination },
                 CancellationToken.None));
-        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(victim, "record-7", CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await h.Mvc.BuildExit(victim, "record-7", null, CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.AbandonExit(victim, "record-7", CancellationToken.None));
         Assert.IsType<NotFoundResult>(await h.Mvc.CompleteExit(victim, "record-7", CancellationToken.None));
         Assert.IsType<NotFoundResult>(
@@ -552,6 +552,33 @@ public class SparkExitPageTests
     }
 
     [Fact]
+    public void The_rebuild_form_offers_a_fee_bump_that_can_only_go_up()
+    {
+        // The SDK raises an exit's fee by re-quoting at a higher rate and building again, so the rebuild has to
+        // carry a rate — and the page's old advice, "send more funding and build again", described a fee bump
+        // that every build at the record's own rate made impossible.
+        var view = ExitTemplate();
+
+        Assert.Contains("id=\"SparkExitRebuildFeeRate\"", view);
+        Assert.Contains("name=\"feeRateSatPerVbyte\"", view);
+        Assert.Contains("min=\"@record.FeeRateSatPerVbyte\"", view);
+        Assert.DoesNotContain("send more funding and build again", view);
+    }
+
+    [Fact]
+    public async Task A_fee_bump_reaches_the_service_with_its_rate()
+    {
+        using var gate = FeatureGate(enabled: true);
+
+        var exit = new StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
+
+        await h.Mvc.BuildExit(Store, "record-7", 25, CancellationToken.None);
+
+        Assert.Contains("Build:record-7:25", exit.Calls);
+    }
+
+    [Fact]
     public void The_fee_input_takes_its_bounds_from_the_service()
     {
         // Two numbers typed into a template are two numbers to keep in step, and the one that mattered would
@@ -618,7 +645,7 @@ public class SparkExitPageTests
         var exit = new StubExitService { Result = new UnilateralExitOpResult(false, refusal, null) };
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
 
-        var result = await h.Mvc.BuildExit(Store, "record-7", CancellationToken.None);
+        var result = await h.Mvc.BuildExit(Store, "record-7", null, CancellationToken.None);
 
         Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(refusal, h.Mvc.TempData[WellKnownTempData.ErrorMessage]);
@@ -1019,9 +1046,10 @@ public class SparkExitPageTests
         }
 
         public Task<UnilateralExitOpResult> BuildAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default)
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default)
         {
-            Calls.Add($"Build:{recordId}");
+            Calls.Add(feeRateSatPerVbyte is { } rate ? $"Build:{recordId}:{rate}" : $"Build:{recordId}");
             return Task.FromResult(Result);
         }
 

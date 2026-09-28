@@ -398,7 +398,8 @@ public sealed class SparkSurfaceHarness
             CancellationToken cancellationToken = default) => Task.FromResult(Refused);
 
         public Task<UnilateralExitOpResult> BuildAsync(
-            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default) =>
             Task.FromResult(Refused);
 
         public Task<UnilateralExitOpResult> AbandonAsync(

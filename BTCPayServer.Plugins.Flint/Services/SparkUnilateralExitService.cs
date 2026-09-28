@@ -94,6 +94,13 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         + "broadcast by hand, the funds are locked behind timelocks measured in days, and the on-chain fees are "
         + "paid up front from a separate funding address.";
 
+    internal static readonly string FeeRateOutOfRange = string.Format(
+        CultureInfo.InvariantCulture,
+        "The fee rate has to be between {0:N0} and {1:N0} sat/vB. Every transaction in the exit is built at this one "
+        + "rate, so it also decides which leaves are worth exiting at all.",
+        MinFeeRateSatPerVbyte,
+        MaxFeeRateSatPerVbyte);
+
     internal const string OperationInFlight =
         "Another unilateral-exit operation for this store is already running. Try again in a moment.";
 
@@ -751,14 +758,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             return Refuse(DisclosureRequired);
 
         if (feeRateSatPerVbyte is < MinFeeRateSatPerVbyte or > MaxFeeRateSatPerVbyte)
-        {
-            return Refuse(string.Format(
-                CultureInfo.InvariantCulture,
-                "The fee rate has to be between {0:N0} and {1:N0} sat/vB. Every transaction in the exit is built "
-                + "at this one rate, so it also decides which leaves are worth exiting at all.",
-                MinFeeRateSatPerVbyte,
-                MaxFeeRateSatPerVbyte));
-        }
+            return Refuse(FeeRateOutOfRange);
 
         if (!TryParseDestination(destinationAddress, out var destination, out var destinationError))
             return Refuse(destinationError);
@@ -909,16 +909,36 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     /// turned it into, so a Redo, a rebuild after an unverified status, or a fee bump spends the money already
     /// committed instead of demanding a second full funding and stranding the first on per-branch outputs.
     /// </para>
+    /// <para>
+    /// <b>A new fee rate is how a stalled exit is sped up, and it is the SDK's only way to do it.</b> Its guidance
+    /// for an exit that stopped confirming is to quote again at the higher rate, naming the same leaves, and build
+    /// again: what has confirmed stays, and what has not is rebuilt at the new rate and replaces the earlier
+    /// version on the network. So <paramref name="feeRateSatPerVbyte"/> re-prices this build and, when it
+    /// succeeds, becomes the record's rate. For a built exit it may not go <em>down</em>: a replacement has to pay
+    /// a higher rate than what it replaces to relay, so a lower one would sign children that can never displace
+    /// the ones already in mempools. The same rate is allowed, because that is the plain rebuild a Redo or an
+    /// unverified status asks for.
+    /// </para>
     /// </remarks>
     public Task<UnilateralExitOpResult> BuildAsync(
         string storeId,
         string recordId,
+        long? feeRateSatPerVbyte,
         CancellationToken cancellationToken = default) =>
-        GuardAsync(storeId, "building", () => BuildCoreAsync(storeId, recordId, cancellationToken));
+        GuardAsync(storeId, "building",
+            () => BuildCoreAsync(storeId, recordId, feeRateSatPerVbyte, cancellationToken));
+
+    /// <inheritdoc />
+    public Task<UnilateralExitOpResult> BuildAsync(
+        string storeId,
+        string recordId,
+        CancellationToken cancellationToken = default) =>
+        BuildAsync(storeId, recordId, null, cancellationToken);
 
     private async Task<UnilateralExitOpResult> BuildCoreAsync(
         string storeId,
         string recordId,
+        long? requestedFeeRate,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
@@ -940,6 +960,9 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         if (!exitSettings.DisclosureAcknowledged)
             return Refuse(DisclosureRequired);
 
+        if (requestedFeeRate is < MinFeeRateSatPerVbyte or > MaxFeeRateSatPerVbyte)
+            return Refuse(FeeRateOutOfRange);
+
         if (!_running.TryAdd(storeId, 0))
             return Refuse(OperationInFlight);
 
@@ -954,6 +977,21 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 return new UnilateralExitOpResult(
                     false,
                     "This exit is finished. Quote a new one rather than building this one again.",
+                    record);
+            }
+
+            if (record.Status is UnilateralExitStatus.Built && requestedFeeRate < record.FeeRateSatPerVbyte)
+            {
+                // Not written to the row: nothing about the exit is wrong, the request was. See the remarks on
+                // this method for why a built exit's rate may only stay or rise.
+                return new UnilateralExitOpResult(
+                    false,
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "This exit was built at {0:N0} sat/vB, and a rebuild cannot go lower: a replacement has to "
+                        + "pay a higher rate than the transactions it replaces, so a cheaper set could never displace "
+                        + "anything already broadcast. Build again at {0:N0} sat/vB or higher.",
+                        record.FeeRateSatPerVbyte),
                     record);
             }
 
@@ -973,6 +1011,10 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                         + "one.")
                     .ConfigureAwait(false);
             }
+
+            // The rate this attempt prices and signs at. It only becomes the record's rate when it is written with
+            // the figures that belong to it: in step two for a first build, and with the signed set otherwise.
+            var feeRate = requestedFeeRate ?? record.FeeRateSatPerVbyte;
 
             var leafIds = DeserializeLeafIds(record);
             if (leafIds.Count == 0)
@@ -1039,7 +1081,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             {
                 fresh = await sdk
                     .PrepareUnilateralExitAsync(
-                        (ulong)record.FeeRateSatPerVbyte,
+                        (ulong)feeRate,
                         record.DestinationAddress,
                         leafIds,
                         cancellationToken)
@@ -1076,6 +1118,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 // number. Written even though the build may still fail — especially then, because a failed
                 // attempt's whole value to the operator is telling them what to fund.
                 ApplyQuote(record, fresh);
+                record.FeeRateSatPerVbyte = feeRate;
                 record.LastError = null;
                 record.UpdatedUtc = _timeProvider.GetUtcNow();
 
@@ -1175,7 +1218,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             {
                 result = await sdk
                     .UnilateralExitAsync(
-                        (ulong)record.FeeRateSatPerVbyte,
+                        (ulong)feeRate,
                         record.DestinationAddress,
                         leafIds,
                         inputs,
@@ -1262,6 +1305,8 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
             // able to skip the write that saves them.
             record.Status = UnilateralExitStatus.Built;
             record.UpdatedUtc = _timeProvider.GetUtcNow();
+            // The rate the stored set was signed at, which after a fee bump is the new one.
+            record.FeeRateSatPerVbyte = feeRate;
             record.RecoverableValueSat = result.RecoverableValueSat;
             record.TotalFeeSat = result.TotalFeeSat;
             record.SingleUtxoFundingSat = committed?.SingleUtxoFundingSat ?? record.SingleUtxoFundingSat;

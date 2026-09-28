@@ -1293,6 +1293,130 @@ public class SparkUnilateralExitServiceTests
 
     #endregion
 
+    #region Raising the fee
+
+    /// <summary>
+    /// A rebuild at a higher rate re-prices the exit at that rate, signs at it, and records it with the new set.
+    /// </summary>
+    /// <remarks>
+    /// The SDK's only fee bump is to quote again at the higher rate and build again: what has confirmed stays,
+    /// and what has not is rebuilt at the new rate and replaces the earlier version on the network. A page that
+    /// told the operator to "send more funding and build again" while every build reused the record's own rate
+    /// was describing a fee bump that could not happen.
+    /// </remarks>
+    [Fact]
+    public async Task A_rebuild_at_a_higher_rate_signs_at_it_and_records_it()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        Assert.Equal(10, harness.Records.Records[record.Id].FeeRateSatPerVbyte);
+        var quotesBefore = harness.Sdk.ExitQuoteCalls.Count;
+
+        var bumped = await harness.Service.BuildAsync(StoreId, record.Id, 25, Ct);
+
+        Assert.True(bumped.Success, bumped.Error);
+        // Both the re-quote and the build's own quote are at the new rate: the SDK signs what its quote priced.
+        Assert.All(harness.Sdk.ExitQuoteCalls.Skip(quotesBefore), call => Assert.Equal(25UL, call.FeeRateSatPerVbyte));
+        Assert.Equal(25UL, harness.Sdk.ExitBuildCalls[^1].FeeRateSatPerVbyte);
+        Assert.Equal(25, harness.Records.Records[record.Id].FeeRateSatPerVbyte);
+
+        // And it is the record's rate from now on, so a plain "build again" does not quietly fall back.
+        Assert.True((await harness.Service.BuildAsync(StoreId, record.Id, Ct)).Success);
+        Assert.Equal(25UL, harness.Sdk.ExitBuildCalls[^1].FeeRateSatPerVbyte);
+    }
+
+    /// <summary>
+    /// A built exit refuses a rebuild at a lower rate, before anything is asked of the SDK.
+    /// </summary>
+    /// <remarks>
+    /// A replacement has to pay a higher rate than what it replaces to relay, so a cheaper set could never
+    /// displace a child already in mempools — the operator would hold two signed sets and only the old one could
+    /// ever confirm. The refusal is not written to the row: nothing about the exit is wrong, the request was.
+    /// </remarks>
+    [Fact]
+    public async Task A_built_exit_refuses_a_lower_rate()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var quotesBefore = harness.Sdk.ExitQuoteCalls.Count;
+
+        var lower = await harness.Service.BuildAsync(StoreId, record.Id, 5, Ct);
+
+        Assert.False(lower.Success);
+        Assert.Contains("cannot go lower", lower.Error);
+        Assert.Equal(quotesBefore, harness.Sdk.ExitQuoteCalls.Count);
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(10, stored.FeeRateSatPerVbyte);
+        Assert.Null(stored.LastError);
+
+        // Out of the quote band entirely is the quote's own refusal, word for word.
+        var absurd = await harness.Service.BuildAsync(StoreId, record.Id, 5_000, Ct);
+        Assert.Equal(SparkUnilateralExitService.FeeRateOutOfRange, absurd.Error);
+    }
+
+    /// <summary>
+    /// A fee bump that fails leaves the stored set's rate and figures exactly as they were.
+    /// </summary>
+    /// <remarks>
+    /// The page prints the rate beside the transactions, and those transactions were signed at the old one. A
+    /// bump that could not be funded must not leave the row claiming a rate nothing on it was built at.
+    /// </remarks>
+    [Fact]
+    public async Task A_fee_bump_that_fails_leaves_the_built_rate_and_figures_alone()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        var record = await BuiltExit(harness);
+        var before = harness.Records.Records[record.Id];
+        var (fee, funding, transactions) = (before.TotalFeeSat, before.SingleUtxoFundingSat, before.TransactionsJson);
+
+        harness.Sdk.ExitSingleUtxoFundingSat = 90_000;
+        harness.Sdk.ExitTotalFeeSat = 60_000;
+
+        var bumped = await harness.Service.BuildAsync(StoreId, record.Id, 40, Ct);
+
+        Assert.False(bumped.Success);
+        var after = harness.Records.Records[record.Id];
+        Assert.Equal(UnilateralExitStatus.Built, after.Status);
+        Assert.Equal(10, after.FeeRateSatPerVbyte);
+        Assert.Equal(fee, after.TotalFeeSat);
+        Assert.Equal(funding, after.SingleUtxoFundingSat);
+        Assert.Equal(transactions, after.TransactionsJson);
+        Assert.Equal(bumped.Error, after.LastError);
+    }
+
+    /// <summary>
+    /// An exit still awaiting funding can be built at a different rate, and the new rate lands with the new
+    /// requirement even when the funding turns out short.
+    /// </summary>
+    /// <remarks>
+    /// Before a first build nothing has been broadcast, so there is nothing to replace and no floor: the rate is
+    /// simply the one this exit will be built at. It is persisted with the fresh quote for the reason that quote
+    /// is persisted at all — the requirement the page shows has to be the one the next attempt is judged by.
+    /// </remarks>
+    [Fact]
+    public async Task An_exit_awaiting_funding_takes_a_new_rate_with_its_requirement()
+    {
+        using var harness = Harness.Create();
+        harness.Configure(acknowledged: true);
+        harness.WithLeaves(("leaf-a", 500_000));
+        var record = harness.Seed(leafIds: ["leaf-a"], singleUtxoFundingSat: 4_200);
+        harness.Sdk.ExitSingleUtxoFundingSat = 6_000;
+        harness.Explorer(Utxo(5_000));
+
+        var lower = await harness.Service.BuildAsync(StoreId, record.Id, 3, Ct);
+
+        Assert.False(lower.Success);
+        var stored = harness.Records.Records[record.Id];
+        Assert.Equal(3, stored.FeeRateSatPerVbyte);
+        Assert.Equal(6_000, stored.SingleUtxoFundingSat);
+        Assert.Equal(UnilateralExitStatus.AwaitingFunding, stored.Status);
+    }
+
+    #endregion
+
     #region Checking a built exit against the chain
 
     /// <summary>

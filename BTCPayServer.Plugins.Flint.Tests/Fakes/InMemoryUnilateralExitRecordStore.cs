@@ -104,10 +104,11 @@ public sealed class InMemoryUnilateralExitRecordStore : IUnilateralExitRecordSto
         }
 
         // The mutable half only, matching the EF store's setter list. Everything absent from it — store, creation
-        // time, destination, fee rate, leaf ids, funding address, funding key index — is what the operator funded
-        // against.
+        // time, destination, leaf ids, funding address, funding key index — is what the operator funded against.
+        // The fee rate is in the list: a fee bump re-prices the exit, and is written with what it produced.
         stored.Status = record.Status;
         stored.UpdatedUtc = record.UpdatedUtc;
+        stored.FeeRateSatPerVbyte = record.FeeRateSatPerVbyte;
         stored.RecoverableValueSat = record.RecoverableValueSat;
         stored.TotalFeeSat = record.TotalFeeSat;
         stored.SingleUtxoFundingSat = record.SingleUtxoFundingSat;

@@ -75,10 +75,20 @@ public class UnilateralExitRecord
     /// </remarks>
     public string DestinationAddress { get; set; } = null!;
 
-    /// <summary>Fee rate the tree was quoted at, in sat/vB.</summary>
+    /// <summary>Fee rate the stored figures, and any stored transactions, were priced at, in sat/vB.</summary>
     /// <remarks>
+    /// <para>
+    /// Set at quote time and changed only by a build that asks for a new rate — the SDK's way to raise the fee
+    /// on an exit that stopped confirming is to quote again at a higher rate and build again, which replaces
+    /// what has not confirmed. It is written together with the figures it produced and never on its own: with the
+    /// fresh quote before a first build selects its funding, and with the signed set after a rebuild succeeds,
+    /// so the page never shows a rate beside numbers that belong to another one. A built exit's rate never goes
+    /// down, because a replacement has to pay more than what it replaces.
+    /// </para>
+    /// <para>
     /// A <c>long</c> rather than the seam's <c>ulong</c>, because Npgsql has no unsigned integer types and a
     /// negative rate is refused by the service's guard long before it reaches here.
+    /// </para>
     /// </remarks>
     public long FeeRateSatPerVbyte { get; set; }
 
