@@ -161,7 +161,7 @@
   do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
   operator pushes every transaction out by hand, package by package, through a node that supports package
   relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
-  from data the SDK holds **locally**, so on the pinned SDK (0.25.0) it does not need the Spark operators to
+  from data the SDK holds **locally**, so on the pinned SDK (0.26.0) it does not need the Spark operators to
   be reachable — but only for leaves whose data was collected while they still were. That is why the
   exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage, and
   a leaf is only exitable this second way once its chain has been synced at least once so its data exists to

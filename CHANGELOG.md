@@ -7,6 +7,22 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+### Upgrading — read before installing
+
+- **This release cannot be rolled back to 1.1.0 or earlier.** Breez Spark SDK 0.26 migrates every wallet's
+  local storage forward (four new storage migrations), and the SDK inside 1.1.0 refuses storage that is ahead
+  of it: after such a downgrade every store's wallet fails to start with `DatabaseTooFarAhead` and Lightning
+  is unavailable server-wide until this version or newer is installed again. Funds are not affected — they
+  are on Spark, and reinstalling this version brings every wallet back. This was seen on a test host, not
+  predicted: an automatic job reinstalled 1.1.0 over a 0.26 build and every store stayed down for three days.
+  If you want a real rollback path, snapshot `<DataDir>/Plugins/Flint` (the per-store SDK storage) before
+  upgrading; putting back an older plugin without that snapshot does not work.
+- **Disabling the plugin now affects more than Lightning on open invoices.** An invoice created while USDC and
+  USDT were switched on carries those two payment methods, and BTCPay cannot render the checkout of an invoice
+  whose payment method has no handler — so while Flint is disabled, removed or rolled back, those invoices'
+  checkout pages fail entirely, Lightning included, until it is back. BTCPay disables a plugin on its own after
+  an unhandled error, so this is worth knowing even if you never disable it by hand.
+
 ### Security
 
 - **A header credential on any line but the last is now redacted.** The scrubber's
@@ -38,34 +54,19 @@ All notable changes to this plugin are recorded here. The format follows
   [Accepting USDC and USDT](docs/stablecoin-payments.md), and the new provider in the
   [trust model](docs/trust-model.md).
 - **`GET`/`PUT /api/v1/stores/{storeId}/spark/stablecoins`**, the same switch through the Greenfield API.
-
-### Changed
-
-- **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
-  0.25.0 bump). The API changes the plugin meets are absorbed at the SDK seam: a manual deposit
-  claim now reports one of three outcomes — settled, submitted (settles asynchronously) or deferred,
-  which is reported as a failure with its reason — the network-status probe takes a request, and a
-  cross-chain route describes its Spark side as accepted assets carrying amount limits. The new
-  `PaymentMetadataUpdated` event is consumed rather than dropped.
-- **An on-chain deposit can be credited before its third confirmation.** SDK 0.26 unifies early and
-  mature claiming under the one claim ceiling the plugin already configures: when the service
-  provider's spread for crediting a deposit early fits that ceiling, the SDK takes it. It never costs
-  more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
-  unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
-  so it cannot read as stuck and invite a second claim.
-- **A unilateral exit no longer needs Spark's operators to be reachable.** The experimental
-  unilateral exit is rebuilt on the SDK's exit API, which inverted the flow — an exit is now quoted
-  into a prepared request that is passed back into the build, `CheckUnilateralExit` reports progress
-  against the chain, and the SDK can export and import the wallet's exit data — and the plugin's
-  exit surface follows it. On the old API, pricing and building an exit talked to the operators, so
-  the flow only helped against operators who *refused*; against operators that were gone it could do
-  nothing. An exit is now quoted and built from data the SDK holds locally. The caveat is the point
-  of the next entry: this works for leaves whose data was collected while the operators *were*
-  reachable, and only for those.
-
-### Added
-
-- **An exit-state backup, on the Advanced page.** The SDK can now export the wallet's unilateral-exit data
+- **Experimental: a unilateral exit, behind `FLINT_EXPERIMENTAL_UNILATERAL_EXIT`.** With the environment
+  variable set to `1`, the Advanced page gains a way to take a store's balance on chain *without* Spark's
+  operators — the recovery path for operators that refuse or are gone. It is built on the SDK's exit API: an
+  exit is quoted and built from data the SDK holds locally, so it works without the operators, but only for
+  leaves whose data was collected while they were still reachable (which is what the exit-state backup below
+  is for). The plugin quotes, funds and signs; it **never broadcasts** — the operator pushes every
+  transaction by hand through a node with package relay. Fees are paid from a separate on-chain output the
+  operator funds, on an address derived from the store's seed at `m/84'/{coin}'/4607060'/0/{index}` (a
+  hardened account no wallet uses, so it cannot collide with BTCPay's own hot wallet). Funding discovery and
+  the default fee rate come from a block explorer (mempool.space on mainnet unless overridden), which learns
+  the funding address. With the variable unset nothing of this runs, and every exit route answers 404. See
+  [Known limitations](docs/limitations.md).
+- **An exit-state backup, on the Advanced page** (with the exit enabled). The SDK can now export the wallet's unilateral-exit data
   and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
   wallet's own storage while the operators are gone. The page exports a fresh blob for copying and stores a
   pasted one, which a restart imports automatically. The blob is sensitive — it carries every leaf and its
@@ -87,6 +88,21 @@ All notable changes to this plugin are recorded here. The format follows
   page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
   tells the operator that following the Status column is what matters, since broadcasting an already-sent
   transaction is harmless.
+
+### Changed
+
+- **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
+  0.25.0 bump). The API changes the plugin meets are absorbed at the SDK seam: a manual deposit
+  claim now reports one of three outcomes — settled, submitted (settles asynchronously) or deferred,
+  which is reported as a failure with its reason — the network-status probe takes a request, and a
+  cross-chain route describes its Spark side as accepted assets carrying amount limits. The new
+  `PaymentMetadataUpdated` event is consumed rather than dropped.
+- **An on-chain deposit can be credited before its third confirmation.** SDK 0.26 unifies early and
+  mature claiming under the one claim ceiling the plugin already configures: when the service
+  provider's spread for crediting a deposit early fits that ceiling, the SDK takes it. It never costs
+  more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
+  unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
+  so it cannot read as stuck and invite a second claim.
 
 ### Fixed
 
