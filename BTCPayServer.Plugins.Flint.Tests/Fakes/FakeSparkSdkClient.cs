@@ -1099,7 +1099,9 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
         CancellationToken cancellationToken = default)
     {
         ThrowIfConfigured();
-        CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
+        // Locked: the service asks for quotes concurrently, and a List loses an Add it is raced on.
+        lock (CrossChainReceiveCalls)
+            CrossChainReceiveCalls.Add(new CrossChainReceiveCall(route, amount, maxSlippageBps));
         _writeLog?.Record("sdk:cc-receive");
 
         if (HoldCrossChainReceiveUntil is { } hold)
