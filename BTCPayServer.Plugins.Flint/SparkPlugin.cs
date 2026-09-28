@@ -142,6 +142,21 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ISparkStoreSettingsStore>(provider => provider.GetRequiredService<SparkService>());
         services.AddSingleton<ISparkStoreRuntime>(provider => provider.GetRequiredService<SparkService>());
 
+        // Automatic unilateral-exit backups: the owner-only file each store's backup lives in, the
+        // debounce/safety-net decisions, and the pass that applies them. Registered unconditionally like
+        // the rest of the exit surface — the gate is enforced inside the pass, not by whether the
+        // types exist.
+        //
+        // The file store is registered as itself only, and the seam published to callers is the
+        // tracking decorator: every write and every delete through the store has to move the
+        // scheduler's belief about what is stored with it, and a caller cannot forget the bookkeeping
+        // when the only published route to the file passes through it.
+        services.AddSingleton<FileExitStateBackupStore>();
+        services.AddSingleton<ExitStateBackupScheduler>();
+        services.AddSingleton<IExitStateBackupStore>(provider => new TrackedExitStateBackupStore(
+            provider.GetRequiredService<FileExitStateBackupStore>(),
+            provider.GetRequiredService<ExitStateBackupScheduler>()));
+
         // The setup flow's decisions, kept out of the controller so they can be tested.
         services.AddSingleton<SparkStoreProvisioner>();
 
@@ -260,6 +275,39 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // settings form and the Greenfield sweep endpoints so a configuration one accepts is one the other accepts.
         services.AddSingleton<SparkSweepSettingsService>();
 
+        // Experimental unilateral exit, behind Constants.UnilateralExitEnabled. Registered unconditionally: the
+        // gate is enforced inside the service and the controller, not by whether the type exists, so a host that
+        // sets the variable after startup does not get a half-wired graph.
+        //
+        // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
+        // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora
+        // instance. Short timeout: a request thread is waiting on it while the exit page renders.
+        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, client =>
+        {
+            client.Timeout = SparkExitFundingExplorer.RequestTimeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        });
+        services.AddSingleton<SparkExitFundingExplorer>();
+        services.AddSingleton(provider =>
+        {
+            // The chain is resolved once, as for the sweep destination resolver: it decides the funding key's
+            // derivation path, the address format, and which network a destination is parsed against.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new SparkUnilateralExitService(
+                provider.GetRequiredService<ISparkStoreSettingsStore>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<IUnilateralExitRecordStore>(),
+                provider.GetRequiredService<SparkMnemonicProtector>(),
+                provider.GetRequiredService<SparkExitFundingExplorer>(),
+                provider.GetRequiredService<IExitStateBackupStore>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<SparkUnilateralExitService>>());
+        });
+        services.AddSingleton<ISparkUnilateralExitService>(provider =>
+            provider.GetRequiredService<SparkUnilateralExitService>());
+
         // The Greenfield endpoints' OpenAPI fragment, merged into BTCPay's /swagger/v1/swagger.json. Depends on
         // nothing on purpose — see the class remarks, and the Func<T> note above.
         services.AddSingleton<ISwaggerProvider, SparkSwaggerProvider>();
@@ -270,6 +318,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IOutgoingPaymentStore, EfOutgoingPaymentStore>();
         services.AddSingleton<ISweepRecordStore, EfSweepRecordStore>();
         services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
+        services.AddSingleton<IUnilateralExitRecordStore, EfUnilateralExitRecordStore>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {
             var factory = provider.GetRequiredService<SparkPluginDbContextFactory>();
@@ -307,6 +356,12 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // token, when it holds one). See StablecoinPaymentService for the flow and StablecoinQuoteMatcher for how an
         // arrival is attributed to the invoice it paid.
         AddStablecoinPayments(services);
+
+        // Automatic exit-state backups. The task is the passive half: the interesting timing lives in
+        // ExitStateBackupScheduler, and a pass whose only new work is asking ShouldTake costs one
+        // dictionary read per store. One minute matches the resolution every other pass here works at,
+        // and it is what bounds the latency of a debounced post-deposit backup.
+        services.AddScheduledTask<ExitStateBackupTask>(Constants.ExitStateBackupInterval);
 
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");

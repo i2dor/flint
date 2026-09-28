@@ -375,6 +375,74 @@ namespace BTCPayServer.Plugins.Flint.Migrations
 
                     b.ToTable("SweepRecords", "BTCPayServer.Plugins.Flint");
                 });
+
+            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.UnilateralExitRecord", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DestinationAddress")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("FeeRateSatPerVbyte")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FundingAddress")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("FundingKeyIndex")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("FundingUtxosJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LeafIdsJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("RecoverableValueSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SingleUtxoFundingSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StoreId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("TotalFeeSat")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TransactionsJson")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoreId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_UnilateralExitRecords_ActiveStore")
+                        .HasFilter("\"Status\" IN (0, 1)");
+
+                    b.HasIndex("StoreId", "CreatedUtc");
+
+                    b.HasIndex("StoreId", "Status");
+
+                    b.ToTable("UnilateralExitRecords", "BTCPayServer.Plugins.Flint");
+                });
 #pragma warning restore 612, 618
         }
     }

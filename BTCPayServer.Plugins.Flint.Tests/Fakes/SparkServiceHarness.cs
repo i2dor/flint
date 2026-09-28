@@ -33,6 +33,7 @@ public sealed class SparkServiceHarness : IDisposable
     private readonly string _dataDir;
     private readonly Durable _durable;
     private readonly Deadlines _deadlines;
+    private readonly TimeProvider _timeProvider;
     private bool _ownsDataDir = true;
 
     /// <summary>
@@ -76,7 +77,10 @@ public sealed class SparkServiceHarness : IDisposable
         string dataDir,
         Durable durable,
         Deadlines deadlines,
-        ChainName chain)
+        ChainName chain,
+        TimeProvider timeProvider,
+        IExitStateBackupStore exitStateBackups,
+        ExitStateBackupScheduler backupScheduler)
     {
         Service = service;
         Sdk = sdk;
@@ -86,6 +90,9 @@ public sealed class SparkServiceHarness : IDisposable
         _durable = durable;
         _deadlines = deadlines;
         _chain = chain;
+        _timeProvider = timeProvider;
+        ExitStateBackups = exitStateBackups;
+        BackupScheduler = backupScheduler;
     }
 
     public SparkService Service { get; }
@@ -115,6 +122,16 @@ public sealed class SparkServiceHarness : IDisposable
 
     /// <summary>The USDC/USDT path this service routes cross-chain receives to.</summary>
     public StablecoinHarness Stablecoins { get; private init; } = null!;
+
+    /// <summary>
+    /// The real file-backed exit-state backup store, over the harness's temp data directory. Tests read
+    /// what was stored through it rather than by re-spelling the path, so a change to the layout moves
+    /// the test with the production code instead of pinning either.
+    /// </summary>
+    public IExitStateBackupStore ExitStateBackups { get; }
+
+    /// <summary>The real scheduler the service decides with; the tests read its marks directly.</summary>
+    public ExitStateBackupScheduler BackupScheduler { get; }
 
     /// <summary>The BTCPay data directory this service was given, which is where its per-store storage lives.</summary>
     public string DataDir => _dataDir;
@@ -153,7 +170,8 @@ public sealed class SparkServiceHarness : IDisposable
         TimeSpan? confirmStatusDeadline = null,
         TimeSpan? abandonedConnectGrace = null,
         bool failWalletAdoption = false,
-        ChainName? chain = null)
+        ChainName? chain = null,
+        TimeProvider? timeProvider = null)
     {
         var dataDir = Path.Combine(
             Path.GetTempPath(), "spark-service-tests", Guid.NewGuid().ToString("N"));
@@ -175,7 +193,8 @@ public sealed class SparkServiceHarness : IDisposable
                 // shut down; the release-the-lock test shortens it deliberately.
                 abandonedConnectGrace ?? TimeSpan.FromMinutes(5)),
             chain ?? ChainName.Regtest,
-            failWalletAdoption);
+            failWalletAdoption,
+            timeProvider);
     }
 
     /// <summary>
@@ -196,12 +215,12 @@ public sealed class SparkServiceHarness : IDisposable
     {
         StopService();
         _ownsDataDir = false;
-        return Create(_dataDir, _durable, _deadlines, _chain);
+        return Create(_dataDir, _durable, _deadlines, _chain, timeProvider: _timeProvider);
     }
 
     private static SparkServiceHarness Create(
         string dataDir, Durable durable, Deadlines deadlines, ChainName chain,
-        bool failWalletAdoption = false)
+        bool failWalletAdoption = false, TimeProvider? timeProvider = null)
     {
         var log = new CapturingLogger<SparkService>();
         var logs = new Logs();
@@ -239,13 +258,29 @@ public sealed class SparkServiceHarness : IDisposable
         // event path's routing of a cross-chain receive can be exercised; with no quotes open it changes nothing.
         StablecoinHarness? stablecoins = null;
 
+        // The real file store over the harness's temp data directory — the layout, the owner-only
+        // creation, and the atomic replace are what the backup tests assert, and a fake would assert
+        // the fake. One fresh scheduler per construction, as a process restart gets: its whole point is
+        // that the first pass after a restart re-seeds itself from the file. And composed exactly as
+        // the container composes it — the tracked decorator over the file store, both service and test
+        // handed the decorator — because a test that writes through the store manually (a paste, an
+        // export) has to see the scheduler's belief move the way it moves in production, or the test
+        // is wiring a composition production does not have.
+        var dataDirectories = Options.Create(new DataDirectories { DataDir = dataDir });
+        var backupScheduler = new ExitStateBackupScheduler();
+        var exitStateBackups = new TrackedExitStateBackupStore(
+            new FileExitStateBackupStore(
+                dataDirectories, NullLogger<FileExitStateBackupStore>.Instance),
+            backupScheduler);
+        var clock = timeProvider ?? TimeProvider.System;
+
         var service = new TestableSparkService(
             deadlines.Connect,
             deadlines.ConfirmStatus,
             deadlines.AbandonedConnectGrace,
             new BTCPayServer.EventAggregator(logs),
             stores,
-            Options.Create(new DataDirectories { DataDir = dataDir }),
+            dataDirectories,
             new BTCPayNetworkProvider([], new NBXplorerNetworkProvider(chain), logs),
             sdk,
             invoices,
@@ -255,10 +290,12 @@ public sealed class SparkServiceHarness : IDisposable
             protector,
             wiring,
             bolt11Parser,
-            TimeProvider.System,
+            clock,
             () => sweeper ?? throw new InvalidOperationException("harness sweep not wired"),
             () => stablecoins?.Service ?? throw new InvalidOperationException("harness stablecoins not wired"),
             NullLoggerFactory.Instance,
+            exitStateBackups,
+            backupScheduler,
             log);
 
         stablecoins = new StablecoinHarness(service);
@@ -269,7 +306,9 @@ public sealed class SparkServiceHarness : IDisposable
             service,
             NullLogger<SparkLightningConfigSweeper>.Instance);
 
-        return new SparkServiceHarness(service, sdk, broadcaster, log, dataDir, durable, deadlines, chain)
+        return new SparkServiceHarness(
+            service, sdk, broadcaster, log, dataDir, durable, deadlines, chain, clock, exitStateBackups,
+            backupScheduler)
         {
             Stablecoins = stablecoins
         };
@@ -359,10 +398,13 @@ public sealed class SparkServiceHarness : IDisposable
             Func<SparkLightningConfigSweeper> configSweeperFactory,
             Func<StablecoinPaymentService> stablecoinsFactory,
             ILoggerFactory loggerFactory,
+            IExitStateBackupStore exitStateBackupStore,
+            ExitStateBackupScheduler exitStateBackupScheduler,
             ILogger<SparkService> logger)
             : base(eventAggregator, storeRepository, dataDirectories, networkProvider, sdkClientFactory,
                 invoiceStore, outgoingStore, reconciler, broadcaster, mnemonicProtector, lightningWiring,
-                bolt11Parser, timeProvider, configSweeperFactory, stablecoinsFactory, loggerFactory, logger)
+                bolt11Parser, timeProvider, configSweeperFactory, stablecoinsFactory, loggerFactory,
+                exitStateBackupStore, exitStateBackupScheduler, logger)
         {
             _connectDeadline = connectDeadline;
             _confirmStatusDeadline = confirmStatusDeadline;
