@@ -354,7 +354,7 @@ public class SparkSupersededInvoiceCreditTests
             // — the exact state a crash between the two leaves behind.
             first.Credits.CreditedByBTCPay(x.Id);
             first.Invoices.Records[HashX].CreditedAt = null;
-            first.Credits.Credits.Clear();
+            var insertsBeforeRestart = first.Credits.Attempts.Count;
 
             h = first.Restart();
             await h.Service.StartAsync(CancellationToken.None);
@@ -363,7 +363,7 @@ public class SparkSupersededInvoiceCreditTests
                 () => h.Invoices.Records[HashX].CreditedAt is not null,
                 "the pass never recognised that BTCPay already held the payment");
             // Nothing inserted: the payment was already on the invoice, and finding that out is the whole job.
-            Assert.Empty(h.Credits.Credits);
+            Assert.Equal(insertsBeforeRestart, h.Credits.Attempts.Count);
         }
         finally
         {
