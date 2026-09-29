@@ -294,8 +294,11 @@ public class GreenfieldSparkProvisioningTests
     }
 
     [Fact]
-    public async Task A_seed_the_SDK_rejects_outright_rolls_back_and_never_logs_the_phrase()
+    public async Task A_seed_the_SDK_rejects_outright_is_reported_against_the_mnemonic_and_rolled_back()
     {
+        // That the operator log never carries the phrase or the SDK's text on this path is
+        // SparkStoreProvisionerTests.Provision_never_logs_a_word_of_the_seed's to prove: the log line is the
+        // provisioner's, and the exception it throws there does carry text that must not be logged.
         var h = SparkSurfaceHarness.Create();
         h.Settings.FailNextSetWith = new InvalidOperationException("unknown word (word 0)");
 
@@ -307,12 +310,6 @@ public class GreenfieldSparkProvisioningTests
         Assert.Equal("mnemonic", Assert.Single(errors).Path);
         Assert.Null(h.Settings.Settings.GetValueOrDefault(Store));
         Assert.DoesNotContain($"lightning:{Store}:set", h.WriteLog.Entries);
-
-        // The operator log gets the store and the exception type, never the phrase — the failing call's argument
-        // was the merchant's recovery phrase, and the SDK's wording for a rejected seed is not this plugin's to
-        // vouch for.
-        Assert.DoesNotContain("abandon", h.ProvisionerLog.AllText, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("about", h.ProvisionerLog.AllText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
