@@ -1,4 +1,3 @@
-using System.Reflection;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
@@ -73,89 +72,28 @@ public abstract class SweepRecordStoreContractTests
     /// came back as a cooperative exit and every engine test exercised the wrong crash-recovery branch.
     /// </para>
     /// <para>
-    /// Reflection rather than a hand-picked list, because a field nobody remembered to persist is also a field
-    /// nobody remembered to assert on. Each property gets a value that differs from its default and from every
-    /// other property's, so a dropped column and two swapped ones both fail.
+    /// Every property is set through <see cref="EveryProperty"/>, so a dropped column fails, and so do two
+    /// swapped ones wherever <see cref="DistinctValues"/> can tell them apart.
     /// </para>
     /// </remarks>
     [Fact]
     public async Task A_record_round_trips_with_every_field()
     {
-        // Computed properties have nothing to store; each is named rather than filtered out by shape, so that a
-        // future property with a private setter cannot be skipped by accident.
-        string[] computed =
-        [
+        // Computed properties have nothing to store.
+        var properties = EveryProperty.Of<SweepRecord>(
             nameof(SweepRecord.RecipientAmountSats),
             nameof(SweepRecord.FeePercent),
             nameof(SweepRecord.IsInFlight),
             nameof(SweepRecord.LastActivityAt),
-            nameof(SweepRecord.IsCrossChain)
-        ];
-
-        var properties = typeof(SweepRecord)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanRead && !computed.Contains(p.Name))
-            .ToList();
-
-        Assert.NotEmpty(properties);
-        Assert.All(properties, p => Assert.True(
-            p.CanWrite,
-            $"SweepRecord.{p.Name} has no setter this test can vary. Either give it one, or add it to the "
-            + "`computed` list above with a reason — silently skipping it would let a store drop it unnoticed."));
-
-        var defaults = new SweepRecord();
-        var record = new SweepRecord();
-        for (var i = 0; i < properties.Count; i++)
-        {
-            var value = DistinctValueFor(properties[i], i, defaults);
-            Assert.NotEqual(properties[i].GetValue(defaults), value);
-            properties[i].SetValue(record, value);
-        }
+            nameof(SweepRecord.IsCrossChain));
+        var record = EveryProperty.Filled<SweepRecord>(properties);
 
         var store = await CreateStoreAsync();
         await store.AddAsync(record, Ct);
         var read = await store.GetAsync(record.StoreId, record.IdempotencyKey, Ct);
 
         Assert.NotNull(read);
-        Assert.All(properties, property => Assert.True(
-            Equals(property.GetValue(record), property.GetValue(read)),
-            $"SweepRecord.{property.Name} did not survive the round trip: wrote {property.GetValue(record)}, "
-            + $"read {property.GetValue(read)}."));
-    }
-
-    /// <summary>
-    /// A value for the <paramref name="index"/>th property that is not its default and that no other property of
-    /// the same type shares.
-    /// </summary>
-    /// <remarks>
-    /// Timestamps are whole microseconds in UTC, which is what <c>timestamptz</c> keeps; anything finer would make
-    /// Postgres look as if it had corrupted a value it stored faithfully.
-    /// </remarks>
-    private static object DistinctValueFor(PropertyInfo property, int index, SweepRecord defaults)
-    {
-        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-
-        if (type == typeof(bool))
-            // Inverted rather than set true: IdempotencyKeyAccepted already defaults to true.
-            return !(bool)(property.GetValue(defaults) ?? false);
-        if (type == typeof(long))
-            return 1_000_000L + index;
-        if (type == typeof(int))
-            return 100 + index;
-        if (type == typeof(string))
-            return $"distinct-{index}-{property.Name}";
-        if (type == typeof(DateTimeOffset))
-            return Origin.AddDays(index).AddTicks(TimeSpan.TicksPerMicrosecond * (index + 1));
-        if (type.IsEnum)
-        {
-            // The last member, which for every enum here is not the value a new record starts with.
-            var values = Enum.GetValues(type);
-            return values.GetValue(values.Length - 1)!;
-        }
-
-        throw new NotSupportedException(
-            $"SweepRecord.{property.Name} is a {type.Name}, which this test does not know how to vary. Add a "
-            + "case above so every store is held to persisting it.");
+        EveryProperty.AssertCarried(record, read, properties, "the round trip");
     }
 
     [Fact]

@@ -3168,18 +3168,3 @@ public class SparkUnilateralExitServiceTests
         }
     }
 }
-
-/// <summary>
-/// The record-store contract, asserted against the in-memory fake the service tests run on.
-/// </summary>
-/// <remarks>
-/// Lives beside those tests because the fake arrived with them. The point is stated in
-/// <c>UnilateralExitRecordStoreContractTests</c>: the service tests are worthless if this store and the
-/// production one disagree, and the disagreement that would matter most — an update that quietly rewrites the
-/// destination or the leaf set an operator funded against — is one no service test could see.
-/// </remarks>
-public class InMemoryUnilateralExitRecordStoreTests : UnilateralExitRecordStoreContractTests
-{
-    protected override Task<IUnilateralExitRecordStore> CreateStoreAsync() =>
-        Task.FromResult<IUnilateralExitRecordStore>(new InMemoryUnilateralExitRecordStore());
-}

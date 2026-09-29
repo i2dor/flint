@@ -191,7 +191,8 @@ public sealed class InMemoryUnilateralExitRecordStore : IUnilateralExitRecordSto
     /// </summary>
     /// <remarks>
     /// Hand-written, so it can silently drop a column — and on this table a dropped column is a merchant's only
-    /// copy of signed transactions. The contract's round-trip test is what catches that.
+    /// copy of signed transactions. The contract's every-field round trip, which sets each property by reflection,
+    /// is what catches that, for a column added later as well.
     /// </remarks>
     internal static UnilateralExitRecord Copy(UnilateralExitRecord source) => new()
     {
