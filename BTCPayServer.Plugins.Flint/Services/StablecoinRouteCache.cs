@@ -101,13 +101,6 @@ public sealed class StablecoinRouteCache
         return entry.Routes;
     }
 
-    /// <summary>Drops a store's list, so the next read goes to the provider. For a reconnect or a removal.</summary>
-    public void Invalidate(string storeId)
-    {
-        lock (_entries)
-            _entries.TryRemove(storeId, out _);
-    }
-
     private async Task RefreshAsync(string storeId, Entry entry)
     {
         // Yield first, so the caller holding the lock has released it before any SDK work begins.

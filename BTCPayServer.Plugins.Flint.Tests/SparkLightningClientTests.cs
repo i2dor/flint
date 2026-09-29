@@ -356,8 +356,8 @@ public class SparkLightningClientTests
     public async Task GetInvoice_does_not_query_the_SDK_for_an_already_paid_invoice()
     {
         var (client, sdk, store, _, _) = Create();
-        var record = Seed(store);
-        record.TrySettle("sdk-1", 100_000, PaymentFixture.Preimage, DateTimeOffset.UtcNow);
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, PaymentFixture.Preimage, DateTimeOffset.UtcNow, Ct);
 
         var invoice = await client.GetInvoice(Hash, Ct);
 
@@ -450,8 +450,8 @@ public class SparkLightningClientTests
     public async Task CancelInvoice_does_not_throw_for_an_unknown_or_settled_invoice()
     {
         var (client, _, store, _, _) = Create();
-        var record = Seed(store);
-        record.TrySettle("sdk-1", 100_000, null, DateTimeOffset.UtcNow);
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
 
         // BTCPay calls this speculatively on expiry; throwing would log an error for every paid invoice.
         await client.CancelInvoice(Hash, Ct);

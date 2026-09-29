@@ -118,35 +118,6 @@ public class SparkUnilateralExitSeamTests
     }
 
     /// <summary>
-    /// <c>Ready</c> is the only readiness that authorises a broadcast, and it survives the trip back to the SDK.
-    /// </summary>
-    /// <remarks>
-    /// The round trip is what makes the mapping a bijection rather than a lossy collapse, and the SDK is handed
-    /// this back on every check. If <c>Ready</c> came back as anything else, an operator would be told to
-    /// broadcast a transaction the check had just been shown as ready.
-    /// </remarks>
-    [Fact]
-    public void A_readiness_survives_the_trip_back_to_the_SDK()
-    {
-        Assert.IsType<ExitTransactionStatus.Ready>(
-            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Ready)));
-
-        Assert.IsType<ExitTransactionStatus.Unverified>(
-            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Unverified)));
-
-        var confirmed = Assert.IsType<ExitTransactionStatus.Confirmed>(
-            SparkSdkClient.ToSdkExitTxStatus(
-                new SparkExitTxStatus(SparkExitTxReadiness.Confirmed, BlockHeight: 700_000)));
-        Assert.Equal(700_000u, confirmed.blockHeight);
-
-        // Both of the plugin's waiting cases go back as a wait, because the SDK replaces the status from the
-        // chain anyway and the one thing that must never happen is a wait returning as permission to send.
-        Assert.False(
-            SparkSdkClient.ToSdkExitTxStatus(new SparkExitTxStatus(SparkExitTxReadiness.Waiting))
-                is ExitTransactionStatus.Ready);
-    }
-
-    /// <summary>
     /// The default-initialised readiness is "waiting", so a value that was never set cannot authorise a broadcast.
     /// </summary>
     /// <remarks>

@@ -254,14 +254,10 @@ public sealed class SparkServiceHarness : IDisposable
         // that throw is production code's own argument check, and nothing in production gained a seam for it.
         IBolt11Parser bolt11Parser = failWalletAdoption ? null! : durable.Bolt11;
 
-        // The startup sweep is real here — it runs against the stores this harness knows about — so the
-        // deferred factory is wired to a sweeper built over the same fakes. The sweeper is constructed after
-        // the service because its settings store is the service itself; the closure makes that ordering safe.
-        SparkLightningConfigSweeper? sweeper = null;
-
-        // The USDC/USDT path over in-memory fakes, with the service itself as its store runtime — built after the
-        // service for the same reason as the sweeper. Available regardless of the harness's chain, so the
-        // event path's routing of a cross-chain receive can be exercised; with no quotes open it changes nothing.
+        // The USDC/USDT path over in-memory fakes, with the service itself as its store runtime — so it is
+        // built after the service, and the deferred factory's closure makes that ordering safe. Available
+        // regardless of the harness's chain, so the event path's routing of a cross-chain receive can be
+        // exercised; with no quotes open it changes nothing.
         StablecoinHarness? stablecoins = null;
 
         // The real file store over the harness's temp data directory — the layout, the owner-only
@@ -298,7 +294,6 @@ public sealed class SparkServiceHarness : IDisposable
             wiring,
             bolt11Parser,
             clock,
-            () => sweeper ?? throw new InvalidOperationException("harness sweep not wired"),
             () => stablecoins?.Service ?? throw new InvalidOperationException("harness stablecoins not wired"),
             NullLoggerFactory.Instance,
             exitStateBackups,
@@ -306,12 +301,6 @@ public sealed class SparkServiceHarness : IDisposable
             log);
 
         stablecoins = new StablecoinHarness(service);
-
-        sweeper = new SparkLightningConfigSweeper(
-            new FakeStoreSource(lightning.Stores.Keys.ToArray()),
-            wiring,
-            service,
-            NullLogger<SparkLightningConfigSweeper>.Instance);
 
         return new SparkServiceHarness(
             service, sdk, broadcaster, log, dataDir, durable, deadlines, chain, clock, exitStateBackups,
@@ -404,7 +393,6 @@ public sealed class SparkServiceHarness : IDisposable
             SparkLightningWiring lightningWiring,
             IBolt11Parser bolt11Parser,
             TimeProvider timeProvider,
-            Func<SparkLightningConfigSweeper> configSweeperFactory,
             Func<StablecoinPaymentService> stablecoinsFactory,
             ILoggerFactory loggerFactory,
             IExitStateBackupStore exitStateBackupStore,
@@ -412,7 +400,7 @@ public sealed class SparkServiceHarness : IDisposable
             ILogger<SparkService> logger)
             : base(eventAggregator, storeRepository, dataDirectories, networkProvider, sdkClientFactory,
                 invoiceStore, outgoingStore, reconciler, broadcaster, mnemonicProtector, lightningWiring,
-                bolt11Parser, timeProvider, configSweeperFactory, stablecoinsFactory, loggerFactory,
+                bolt11Parser, timeProvider, stablecoinsFactory, loggerFactory,
                 exitStateBackupStore, exitStateBackupScheduler, logger)
         {
             _connectDeadline = connectDeadline;
