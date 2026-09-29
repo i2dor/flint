@@ -118,6 +118,100 @@ public class SparkLogBridgeTests
     }
 
     /// <summary>
+    /// A header credential is redacted on whichever line of the text it is on, and the lines around it survive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>HeaderCredential</c> ends in <c>$</c> without <c>Multiline</c>, which means the end of the text, so on its
+    /// own it only ever matched on the last line: an <c>authorization: Bearer …</c> line with anything after it came
+    /// through whole, token included, and a second trailing newline was enough on its own. Both of the scrubber's
+    /// exits were open — this log, and every merchant-facing error <c>SparkErrors.Describe</c> relays — until
+    /// <c>HeaderCredentialOnEveryLine</c> was added as the scrubber's last pass.
+    /// </para>
+    /// <para>
+    /// Exact outputs rather than only "the token is gone", because the other half of the rule is that a redaction
+    /// ends with its line. On <c>\r\n</c> text the carriage return goes with the redacted value — to <c>.</c> it is
+    /// ordinary text, and one character too many is the direction the scrubber errs in — while the line break
+    /// itself survives.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("authorization: Bearer TOKEN\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("authorization: Bearer TOKEN\r\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("authorization: Bearer TOKEN\n", $"authorization: {SparkLogScrubber.Redacted}\n")]
+    [InlineData("authorization: Bearer TOKEN\n\n", $"authorization: {SparkLogScrubber.Redacted}\n\n")]
+    [InlineData(
+        "request headers:\ncookie: sid=TOKEN\nauthorization: Bearer TOKEN\ncontent-type: application/json",
+        $"request headers:\ncookie: {SparkLogScrubber.Redacted}\nauthorization: {SparkLogScrubber.Redacted}\n"
+        + "content-type: application/json")]
+    [InlineData(
+        "set-cookie: session=TOKEN; Path=/\r\ncontent-length: 0\r\n",
+        $"set-cookie: {SparkLogScrubber.Redacted}\ncontent-length: 0\r\n")]
+    public void A_header_credential_is_redacted_on_whichever_line_it_is_on(string template, string expected)
+    {
+        const string token = "eyJ1aWQiOiIwMTlmZDQ5Ny03Yjc3LTZlZDgifQ.anPdDQ.9noMLLWPhHNXSkl3YtayTfpEtMbvonj";
+
+        var forwarded = Forward(template.Replace("TOKEN", token), "debug");
+
+        Assert.DoesNotContain(token, forwarded);
+        Assert.Equal(expected, forwarded);
+    }
+
+    /// <summary>
+    /// A line that ends in a credential name runs on into the next line, which is its value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberate. A folded header or a YAML-style dump puts the value on the line below the name — below the header
+    /// name, or below the <c>Bearer</c> that starts the value — and stopping at the line break would forward it. So
+    /// when nothing but spaces and a colon follow the last credential name on a line, the redaction carries on to the
+    /// next line with anything on it, as many times as that holds; a line with anything else after its last name
+    /// ends the redaction there. The fold after <c>Bearer</c> is the one a simpler fix gets wrong: the anchored
+    /// pattern caught it on the last lines of the text, and "the rest of the line" alone would let the token through.
+    /// </para>
+    /// <para>
+    /// The last case is the price, pinned so that it is paid knowingly: a sentence ending in one of these words loses
+    /// the line after it. It is the trade <c>SparkErrors.Describe</c> already names for this pattern — a truncated
+    /// sentence beats a leaked token.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("authorization:\n    Bearer TOKEN\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("authorization: Bearer\n    TOKEN\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("authorization: Bearer\r\n    TOKEN\r\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("authorization:\n  Bearer\n  TOKEN\nnext line", $"authorization: {SparkLogScrubber.Redacted}\nnext line")]
+    [InlineData("the service rejected the bearer\nretrying in 5s", $"the service rejected the bearer: {SparkLogScrubber.Redacted}")]
+    public void A_line_that_ends_in_a_credential_name_runs_on_into_the_next_line(string template, string expected)
+    {
+        const string token = "eyJ1aWQiOiIwMTlmZDQ5Ny03Yjc3LTZlZDgifQ.anPdDQ.9noMLLWPhHNXSkl3YtayTfpEtMbvonj";
+
+        var forwarded = Forward(template.Replace("TOKEN", token), "debug");
+
+        Assert.DoesNotContain(token, forwarded);
+        Assert.Equal(expected, forwarded);
+    }
+
+    /// <summary>
+    /// A recovery phrase broken across a header line is redacted whole.
+    /// </summary>
+    /// <remarks>
+    /// Pins why <c>HeaderCredentialOnEveryLine</c> runs last instead of taking <c>HeaderCredential</c>'s place at the
+    /// front. Every pass works on what the ones before it left: redact the header line first and the phrase's first
+    /// half goes with it, leaving six words the phrase scan no longer recognises as a phrase — half a wallet's recovery
+    /// phrase in the log, where before the fix the scan had caught all twelve across the line break. Run last, the
+    /// scan sees the phrase whole, and the header's value goes after. Twelve fixed wordlist words rather than a
+    /// generated phrase, so a failure reproduces; the scan checks membership, not the checksum.
+    /// </remarks>
+    [Fact]
+    public void A_recovery_phrase_broken_across_a_header_line_is_redacted_whole()
+    {
+        const string line = "cookie: session=1; abandon ability able about above absent\n"
+                            + "absorb abstract absurd abuse access accident";
+
+        Assert.Equal($"cookie: {SparkLogScrubber.Redacted}", Forward(line, "debug"));
+    }
+
+    /// <summary>
     /// The other exit an SDK payload has: error text a merchant is shown.
     /// </summary>
     /// <remarks>
@@ -141,6 +235,28 @@ public class SparkLogBridgeTests
         // Not merely redacted: still the error the merchant needs to see, prefix stripped.
         Assert.Contains("Tree service error: verify_challenge rejected session_token:", described);
         Assert.DoesNotContain("@v1=", described);
+    }
+
+    /// <summary>
+    /// The same exit, with a header credential on a line that is not the last.
+    /// </summary>
+    /// <remarks>
+    /// SDK error text is free text from the SDK and its service providers: nothing keeps it to one line, and nothing
+    /// between it and a merchant's banner splits it into lines. So the rule the bridge above pins for the log holds
+    /// here too — the credential's value goes, and the lines on either side of it are the diagnosis and stay.
+    /// </remarks>
+    [Fact]
+    public void A_multi_line_SDK_error_relayed_to_a_merchant_has_its_header_credential_redacted()
+    {
+        const string token = "eyJ1aWQiOiIwMTlmZDQ5Ny03Yjc3LTZlZDgifQ.anPdDQ.9noMLLWPhHNXSkl3YtayTfpEtMbvonj";
+
+        var described = SparkErrors.Describe(new SdkException.NetworkException(
+            $"@v1=request failed\nauthorization: Bearer {token}\nstatus: 401 Unauthorized"));
+
+        Assert.DoesNotContain(token, described);
+        Assert.Equal(
+            $"Spark network error: request failed\nauthorization: {SparkLogScrubber.Redacted}\nstatus: 401 Unauthorized",
+            described);
     }
 
     /// <summary>
@@ -367,7 +483,7 @@ public class SparkLogBridgeTests
 
     /// <summary>
     /// The cost check, and its redaction corollary: a line the logger would discard must not be paid for
-    /// (five scrub regexes on an SDK callback thread), and the lines that ARE emitted must still scrub —
+    /// (six scrub regexes on an SDK callback thread), and the lines that ARE emitted must still scrub —
     /// the gate must not become a way to skip redaction for anything that actually reaches the log.
     /// </summary>
     [Fact]
