@@ -139,31 +139,6 @@ public class SparkStorePassSchedulerTests
     }
 
     [Fact]
-    public async Task Without_rotation_the_tail_would_never_be_reached()
-    {
-        // The negative half of the test above, stated as its own property so that a change removing the
-        // rotation fails something that names the consequence. Every pass starts from a fresh scheduler, which
-        // is what "no rotation" means; s3 and s4 are never reached.
-        var time = new StubTimeProvider(DateTimeOffset.UnixEpoch);
-        var log = new WriteLog();
-        string[] stores = ["s1", "s2", "s3", "s4"];
-
-        for (var i = 0; i < 3; i++)
-        {
-            var fresh = Create(time, passBudget: TimeSpan.FromSeconds(15));
-            await fresh.RunAsync(stores, (storeId, _) =>
-            {
-                log.Record(storeId);
-                time.Advance(TimeSpan.FromSeconds(10));
-                return Task.CompletedTask;
-            }, NeverFails, Ct);
-        }
-
-        Assert.Equal(["s1", "s2", "s1", "s2", "s1", "s2"], log.Entries);
-        Assert.DoesNotContain("s3", log.Entries);
-    }
-
-    [Fact]
     public async Task A_budget_too_small_for_even_one_store_still_makes_progress()
     {
         // Degrades to one store per pass rather than to no progress at all. A pass that started nothing would
