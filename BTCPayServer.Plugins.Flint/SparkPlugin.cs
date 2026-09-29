@@ -122,12 +122,9 @@ public class SparkPlugin : BaseBTCPayServerPlugin
 
         // Cross-store enforcement. The save-time refusal lives in SparkLightningClient.Validate (which reads
         // the configured store off the request via IHttpContextAccessor below); this sweep is the backstop
-        // for configurations that predate it. Registered as itself and through a deferred Func, because it
-        // depends on SparkService (its settings store) and SparkService reaches it back through that Func.
+        // for configurations that predate it.
         services.AddSingleton<ISparkStoreSource, BTCPayStoreSource>();
         services.AddSingleton<SparkLightningConfigSweeper>();
-        services.TryAddSingleton<Func<SparkLightningConfigSweeper>>(provider =>
-            provider.GetRequiredService<SparkLightningConfigSweeper>);
 
         // The request context Validate reads to learn which store a connection string is being saved on.
         // ASP.NET does not register this by default (BTCPay does not either), so the plugin does, idempotently.
