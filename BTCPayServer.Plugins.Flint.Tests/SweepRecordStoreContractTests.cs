@@ -1,3 +1,4 @@
+using System.Reflection;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
@@ -63,43 +64,98 @@ public abstract class SweepRecordStoreContractTests
         return record;
     }
 
+    /// <remarks>
+    /// <para>
+    /// The round trip goes through the store, so on the Postgres implementation this is what proves the entity is
+    /// mapped (a column missing from the model silently reads back as its default), and on the in-memory one it
+    /// proves the hand-written <c>InMemorySweepRecordStore.Copy</c> carries every column. That second omission
+    /// already happened: when Wave 7 added the cross-chain columns none of them were copied, so a cross-chain row
+    /// came back as a cooperative exit and every engine test exercised the wrong crash-recovery branch.
+    /// </para>
+    /// <para>
+    /// Reflection rather than a hand-picked list, because a field nobody remembered to persist is also a field
+    /// nobody remembered to assert on. Each property gets a value that differs from its default and from every
+    /// other property's, so a dropped column and two swapped ones both fail.
+    /// </para>
+    /// </remarks>
     [Fact]
     public async Task A_record_round_trips_with_every_field()
     {
-        // Not an assertion that a constructor stored its arguments: the round trip goes through the store, so on
-        // the Postgres implementation this is what proves the entity is mapped — a column missing from the model
-        // silently reads back as its default.
-        var store = await CreateStoreAsync();
-        var record = NewRecord("key-1");
-        record.FeeSats = 2_190;
-        record.TxId = "8808985e78ad465c25727d5ad749f60a5787855d4f1ddffebfc4afb4dbde1b37";
-        record.Error = "nothing in particular";
-        record.Trigger = SweepTrigger.Manual;
-        record.ConfirmationSpeed = SweepConfirmationSpeed.Slow;
-        record.DestinationMode = SweepDestinationMode.StaticAddress;
-        record.RefusalCode = SweepRefusalCode.FeeAboveLimit;
-        record.LastSeenAt = Origin.AddMinutes(3);
-        record.AttemptCount = 7;
+        // Computed properties have nothing to store; each is named rather than filtered out by shape, so that a
+        // future property with a private setter cannot be skipped by accident.
+        string[] computed =
+        [
+            nameof(SweepRecord.RecipientAmountSats),
+            nameof(SweepRecord.FeePercent),
+            nameof(SweepRecord.IsInFlight),
+            nameof(SweepRecord.LastActivityAt),
+            nameof(SweepRecord.IsCrossChain)
+        ];
 
+        var properties = typeof(SweepRecord)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanRead && !computed.Contains(p.Name))
+            .ToList();
+
+        Assert.NotEmpty(properties);
+        Assert.All(properties, p => Assert.True(
+            p.CanWrite,
+            $"SweepRecord.{p.Name} has no setter this test can vary. Either give it one, or add it to the "
+            + "`computed` list above with a reason — silently skipping it would let a store drop it unnoticed."));
+
+        var defaults = new SweepRecord();
+        var record = new SweepRecord();
+        for (var i = 0; i < properties.Count; i++)
+        {
+            var value = DistinctValueFor(properties[i], i, defaults);
+            Assert.NotEqual(properties[i].GetValue(defaults), value);
+            properties[i].SetValue(record, value);
+        }
+
+        var store = await CreateStoreAsync();
         await store.AddAsync(record, Ct);
-        var read = await store.GetAsync(StoreId, "key-1", Ct);
+        var read = await store.GetAsync(record.StoreId, record.IdempotencyKey, Ct);
 
         Assert.NotNull(read);
-        Assert.Equal(Destination, read.DestinationAddress);
-        Assert.Equal(SweepDestinationMode.StaticAddress, read.DestinationMode);
-        Assert.Equal(200_000, read.AmountSats);
-        Assert.True(read.FeesIncluded);
-        Assert.Equal(SweepConfirmationSpeed.Slow, read.ConfirmationSpeed);
-        Assert.Equal(2_190, read.QuotedFeeSats);
-        Assert.Equal(2_190, read.FeeSats);
-        Assert.Equal(200_000, read.BalanceAtDecisionSats);
-        Assert.Equal("8808985e78ad465c25727d5ad749f60a5787855d4f1ddffebfc4afb4dbde1b37", read.TxId);
-        Assert.Equal(SweepTrigger.Manual, read.Trigger);
-        Assert.Equal(SweepRecordStatus.Pending, read.Status);
-        Assert.Equal("nothing in particular", read.Error);
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, read.RefusalCode);
-        Assert.Equal(Origin.AddMinutes(3), read.LastSeenAt);
-        Assert.Equal(7, read.AttemptCount);
+        Assert.All(properties, property => Assert.True(
+            Equals(property.GetValue(record), property.GetValue(read)),
+            $"SweepRecord.{property.Name} did not survive the round trip: wrote {property.GetValue(record)}, "
+            + $"read {property.GetValue(read)}."));
+    }
+
+    /// <summary>
+    /// A value for the <paramref name="index"/>th property that is not its default and that no other property of
+    /// the same type shares.
+    /// </summary>
+    /// <remarks>
+    /// Timestamps are whole microseconds in UTC, which is what <c>timestamptz</c> keeps; anything finer would make
+    /// Postgres look as if it had corrupted a value it stored faithfully.
+    /// </remarks>
+    private static object DistinctValueFor(PropertyInfo property, int index, SweepRecord defaults)
+    {
+        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+
+        if (type == typeof(bool))
+            // Inverted rather than set true: IdempotencyKeyAccepted already defaults to true.
+            return !(bool)(property.GetValue(defaults) ?? false);
+        if (type == typeof(long))
+            return 1_000_000L + index;
+        if (type == typeof(int))
+            return 100 + index;
+        if (type == typeof(string))
+            return $"distinct-{index}-{property.Name}";
+        if (type == typeof(DateTimeOffset))
+            return Origin.AddDays(index).AddTicks(TimeSpan.TicksPerMicrosecond * (index + 1));
+        if (type.IsEnum)
+        {
+            // The last member, which for every enum here is not the value a new record starts with.
+            var values = Enum.GetValues(type);
+            return values.GetValue(values.Length - 1)!;
+        }
+
+        throw new NotSupportedException(
+            $"SweepRecord.{property.Name} is a {type.Name}, which this test does not know how to vary. Add a "
+            + "case above so every store is held to persisting it.");
     }
 
     [Fact]
