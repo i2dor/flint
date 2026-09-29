@@ -92,8 +92,11 @@ public sealed class DistinctValues
     {
         var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
         var n = ++_handedOut;
-        var ofType = _handedOutPerType.GetValueOrDefault(type);
-        _handedOutPerType[type] = ofType + 1;
+        // Counted per underlying type, so E and E? share one rotation through the enum; except that bool? counts
+        // apart from bool, so a bool? alternates among bool? properties whatever plain bools sit between.
+        var counter = type == typeof(bool) ? property.PropertyType : type;
+        var ofType = _handedOutPerType.GetValueOrDefault(counter);
+        _handedOutPerType[counter] = ofType + 1;
 
         var value = Choose(property, type, defaultValue, n, ofType);
         Assert.False(
@@ -125,6 +128,13 @@ public sealed class DistinctValues
         if (type.IsEnum)
         {
             var members = Enum.GetValues(type).Cast<object>().Where(v => !Equals(v, defaultValue)).ToArray();
+            if (members.Length == 0)
+            {
+                throw new NotSupportedException(
+                    $"{property.ReflectedType?.Name}.{property.Name} is a {type.Name} with no member other than its "
+                    + "default, so no value can show that a copier carried it.");
+            }
+
             return members[ofType % members.Length];
         }
 
