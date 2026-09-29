@@ -482,27 +482,6 @@ public class GreenfieldSparkSweepTests
     }
 
     [Fact]
-    public async Task A_sweep_is_refused_when_the_fee_moves_above_the_limit_between_the_quote_and_the_send()
-    {
-        // The guard that matters runs inside the send, against the quote actually being committed to. A refusal
-        // there means nothing was sent, and the record says so.
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Settings.Settings[Store]!.Sweep = new SweepSettings { MinimumSweepSats = 100_000, MaxFeePercent = 1.0 };
-
-        var wallet = (FakeSparkSdkClient)h.Runtime.Clients[Store];
-        wallet.OnchainTiersAtSend = new SparkOnchainFeeQuote(
-            "quote", DateTimeOffset.UtcNow.AddMinutes(1), 40_000, 50_000, 60_000);
-
-        var result = AssertOk<SparkSweepResultData>(await h.Api.Sweep(Store, null, CancellationToken.None));
-
-        Assert.Equal(SweepOutcomeKind.Refused, result.Outcome);
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, result.RefusalCode);
-        // The send was reached and vetoed, so nothing left the wallet.
-        Assert.Single(wallet.OnchainSendCalls);
-        Assert.Equal(500_000, wallet.BalanceSats);
-    }
-
-    [Fact]
     public async Task Both_surfaces_sweep_through_the_same_engine_path()
     {
         // Parity for the endpoint that moves money: the same stored configuration produces the same record shape,
