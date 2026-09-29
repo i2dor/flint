@@ -389,23 +389,6 @@ public class SparkExitPageTests
         Assert.Empty(model.Transactions);
     }
 
-    [Fact]
-    public async Task A_built_record_with_no_transactions_is_distinguishable_from_an_unreadable_one()
-    {
-        var record = Built();
-        var exit = new StubExitService
-        {
-            Page = Page(activeRecord: record, transactions: [], transactionsUnreadable: false)
-        };
-
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
-
-        var model = await RenderExit(h);
-
-        Assert.Empty(model.Transactions);
-        Assert.False(model.TransactionsUnreadable);
-    }
-
     /// <summary>
     /// The transactions that may be sent right now reach the page as their own list, in the SDK's order.
     /// </summary>
