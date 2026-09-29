@@ -11,7 +11,8 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// HTTP survives at most that interval rather than until the next restart. The sweep's remediation itself
 /// is covered by <see cref="SparkLightningConfigSweeperTests"/>; what is under test here is that
 /// <see cref="SparkLightningConfigSweepTask.Do"/> actually reaches the sweep, so a future edit that drops
-/// the call fails here rather than silently widening the window the task exists to close.
+/// the call fails here rather than silently widening the window the task exists to close. That BTCPay schedules
+/// the task at all is <see cref="SparkPluginStartupTests.The_cross_store_Lightning_configuration_sweep_is_scheduled"/>'s.
 /// </summary>
 public class SparkLightningConfigSweepTaskTests
 {
