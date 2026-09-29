@@ -293,9 +293,8 @@ public class StablecoinPaymentServiceTests
         var two = setup.Service.QuoteAsync("invoice-2", StablecoinPayments.Usdc.PaymentMethodId, "base", Ct);
 
         // Both are at the provider at once: neither waits on the other's round trip.
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (setup.Sdk.CrossChainReceiveCalls.Count < 2 && DateTime.UtcNow < deadline)
-            await Task.Delay(10, Ct);
+        await Eventually.True(() => setup.Sdk.CrossChainReceiveCalls.Count >= 2,
+            "the second quote waited on the first one's round trip");
         Assert.Equal(2, setup.Sdk.CrossChainReceiveCalls.Count);
 
         setup.Sdk.HoldCrossChainReceiveUntil = null;

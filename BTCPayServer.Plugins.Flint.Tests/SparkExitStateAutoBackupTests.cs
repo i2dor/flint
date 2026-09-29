@@ -153,8 +153,8 @@ public class SparkExitStateAutoBackupTests
         Emit(h, StoreId, SparkEventKind.ClaimedDeposits, payment: null);
         // On the request as well as the log line: the consumer logs first and requests the refresh after, so a
         // wait on the line alone can run the passes below before the request lands.
-        await WaitFor(() => h.Log.AllText.Contains("Spark claimed an on-chain deposit")
-                            && h.BackupScheduler.PendingSince(StoreId) is not null,
+        await Eventually.True(() => h.Log.AllText.Contains("Spark claimed an on-chain deposit")
+                                    && h.BackupScheduler.PendingSince(StoreId) is not null,
             "the claimed-deposit event was never consumed");
 
         // Requested, not yet due: the export the event earned lands after the debounce, not on the
@@ -181,7 +181,7 @@ public class SparkExitStateAutoBackupTests
         // leaf even if the claim event itself never arrives. The wait is on the scheduler's pending
         // mark rather than a log line, because a precursor event is deliberately not operator-level.
         Emit(h, StoreId, SparkEventKind.NewDeposits, payment: null);
-        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+        await Eventually.True(() => h.BackupScheduler.PendingSince(StoreId) is not null,
             "the new-deposit event never requested a refresh");
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -205,7 +205,7 @@ public class SparkExitStateAutoBackupTests
         // completed or rebuilt, which is how a send, a swap or a renewal reaches the backup at all: none of
         // them is a receive, and none of them emits a deposit event.
         Emit(h, StoreId, SparkEventKind.UnilateralExitStateChanged, payment: null);
-        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+        await Eventually.True(() => h.BackupScheduler.PendingSince(StoreId) is not null,
             "the exit-state change never requested a refresh");
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -229,8 +229,8 @@ public class SparkExitStateAutoBackupTests
         // returns early, before any invoice wiring. The refresh is requested once, past the direction
         // filter, so this early-returning branch is covered by the same call site.
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-auto-1"));
-        await WaitFor(() => h.Log.AllText.Contains("on-chain deposit")
-                            && h.BackupScheduler.PendingSince(StoreId) is not null,
+        await Eventually.True(() => h.Log.AllText.Contains("on-chain deposit")
+                                    && h.BackupScheduler.PendingSince(StoreId) is not null,
             "the deposit payment was never consumed");
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
@@ -337,7 +337,7 @@ public class SparkExitStateAutoBackupTests
 
         // A claim earns a refresh from a wallet that has been answering empty so far.
         Emit(h, StoreId, SparkEventKind.ClaimedDeposits, payment: null);
-        await WaitFor(() => h.BackupScheduler.PendingSince(StoreId) is not null,
+        await Eventually.True(() => h.BackupScheduler.PendingSince(StoreId) is not null,
             "the claimed-deposit event never requested a refresh");
 
         clock.Advance(TimeSpan.FromMinutes(2) + TimeSpan.FromSeconds(30));
@@ -483,16 +483,5 @@ public class SparkExitStateAutoBackupTests
             method: PaymentMethod.Deposit,
             details: new PaymentDetails.Deposit("e2e11469", 1),
             conversionDetails: null!);
-
-    private static async Task WaitFor(Func<bool> condition, string because)
-    {
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
-        while (!condition())
-        {
-            if (DateTimeOffset.UtcNow > deadline)
-                Assert.Fail($"Timed out waiting for {because}");
-            await Task.Delay(20, CancellationToken.None);
-        }
-    }
 
 }

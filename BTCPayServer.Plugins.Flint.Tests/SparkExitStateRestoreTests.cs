@@ -152,7 +152,7 @@ public class SparkExitStateRestoreTests
         var importing = new TaskCompletionSource<SparkExitStateImport>(TaskCreationOptions.RunContinuationsAsynchronously);
         h.Sdk.OnConnect = (_, client) => client.ImportOverride = _ => importing.Task;
         await h.Service.StartAsync(Ct);
-        await WaitFor(() => h.Sdk.Clients[StoreId].ExitImportCalls.Count > 0, "the startup import to begin");
+        await Eventually.True(() => h.Sdk.Clients[StoreId].ExitImportCalls.Count > 0, "the startup import to begin");
 
         await h.Service.TakeDueExitStateBackupsAsync(Ct);
         Assert.Empty(h.Sdk.Clients[StoreId].ExitExportCalls);
@@ -403,17 +403,6 @@ public class SparkExitStateRestoreTests
         var raw = RawStore(h);
         await raw.WriteAsync(StoreId, content, null);
         File.Delete(raw.StampPathFor(StoreId));
-    }
-
-    private static async Task WaitFor(Func<bool> condition, string because)
-    {
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
-        while (!condition())
-        {
-            if (DateTimeOffset.UtcNow > deadline)
-                Assert.Fail($"Timed out waiting for {because}");
-            await Task.Delay(20, CancellationToken.None);
-        }
     }
 
 }

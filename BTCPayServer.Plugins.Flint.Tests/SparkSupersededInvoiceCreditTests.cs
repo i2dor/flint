@@ -94,19 +94,6 @@ public class SparkSupersededInvoiceCreditTests
                 new SparkEventEnvelope(StoreId, SparkEventKind.PaymentSucceeded, Receive(sdkPaymentId, hash))),
             "the event channel refused the envelope");
 
-    private static async Task WaitFor(Func<bool> condition, string because)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-                return;
-            await Task.Delay(10, Ct);
-        }
-
-        Assert.Fail(because);
-    }
-
     /// <summary>A started service with one configured store, ready to mint.</summary>
     private static async Task<(SparkServiceHarness Harness, string PaymentKey)> StartedAsync()
     {
@@ -186,7 +173,7 @@ public class SparkSupersededInvoiceCreditTests
             // And X is paid.
             Pay(h, HashX, "recv-x");
 
-            await WaitFor(
+            await Eventually.True(
                 () => h.Invoices.Records[HashX] is { Status: InvoiceRecordStatus.Paid, CreditedAt: not null },
                 "the payment to the superseded invoice never reached its BTCPay invoice");
 
@@ -208,7 +195,7 @@ public class SparkSupersededInvoiceCreditTests
             Pay(h, HashX, "recv-x");
             // Waited on an observable effect of the duplicate having been consumed, so this asserts that the
             // duplicate was processed and credited nothing — not merely that it had not arrived yet.
-            await WaitFor(
+            await Eventually.True(
                 () => h.Sdk.Clients[StoreId].GetPaymentCalls.Count > seen,
                 "the duplicate settlement event was never consumed");
             await h.Service.ReconcileAllStoresAsync(Ct);
@@ -219,7 +206,7 @@ public class SparkSupersededInvoiceCreditTests
             // The replacement still works, under its own hash, on the same BTCPay invoice: nothing about the
             // routing above interferes with the ordinary path.
             Pay(h, HashY, "recv-y");
-            await WaitFor(
+            await Eventually.True(
                 () => h.Invoices.Records[HashY] is { Status: InvoiceRecordStatus.Paid, CreditedAt: not null },
                 "the replacement invoice never settled");
 
@@ -264,7 +251,7 @@ public class SparkSupersededInvoiceCreditTests
             // And X is paid, after the restart, with nobody watching it.
             Pay(h, HashX, "recv-x");
 
-            await WaitFor(
+            await Eventually.True(
                 () => h.Invoices.Records[HashX] is { Status: InvoiceRecordStatus.Paid, CreditedAt: not null },
                 "the payment to the LUD-21-off superseded invoice never reached its BTCPay invoice");
 
@@ -314,7 +301,7 @@ public class SparkSupersededInvoiceCreditTests
             h = first.Restart();
             await h.Service.StartAsync(CancellationToken.None);
 
-            await WaitFor(
+            await Eventually.True(
                 () => h.Invoices.Records[HashX].CreditedAt is not null,
                 "the settlement recorded before the restart was never credited");
 
@@ -345,7 +332,7 @@ public class SparkSupersededInvoiceCreditTests
             var x = await MintAsync(first, client, Bolt11X);
 
             Pay(first, HashX, "recv-x");
-            await WaitFor(
+            await Eventually.True(
                 () => first.Invoices.Records[HashX] is
                     { Status: InvoiceRecordStatus.Paid, CreditedAt: not null },
                 "the invoice never settled and credited");
@@ -359,7 +346,7 @@ public class SparkSupersededInvoiceCreditTests
             h = first.Restart();
             await h.Service.StartAsync(CancellationToken.None);
 
-            await WaitFor(
+            await Eventually.True(
                 () => h.Invoices.Records[HashX].CreditedAt is not null,
                 "the pass never recognised that BTCPay already held the payment");
             // Nothing inserted: the payment was already on the invoice, and finding that out is the whole job.

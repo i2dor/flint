@@ -198,7 +198,7 @@ public class SparkServiceStartupTests
 
         var late = h.Sdk.Release(HangingStore);
 
-        await WaitUntil(() => late.Disposed, "the late wallet to be shut down");
+        await Eventually.True(() => late.Disposed, "the late wallet to be shut down");
         Assert.True(late.Disconnected, "Disconnect must precede Dispose: Dispose alone leaves it minting invoices");
 
         // And it is emphatically not adopted as the store's instance.
@@ -226,7 +226,7 @@ public class SparkServiceStartupTests
         StartWithinTimeout(h);
 
         // The connect is never released, modelling a stall that outlives any useful wait.
-        await WaitUntil(
+        await Eventually.True(
             () => h.Log.AllText.Contains("Releasing the storage lock"),
             "the abandoned connect's grace period to expire");
 
@@ -375,7 +375,7 @@ public class SparkServiceStartupTests
 
         // The import happens on the warm-up path, which is deliberately not awaited by the connect, so the
         // assertion has to wait for it rather than assume it has already run.
-        await WaitUntil(
+        await Eventually.True(
             () => h.Sdk.Clients.TryGetValue(BackupStore, out var backupClient) && backupClient.ExitImportCalls.Count > 0,
             "the exit-state backup to be imported");
 
@@ -426,7 +426,7 @@ public class SparkServiceStartupTests
         await WithExitStateBackup(h, BackupStore, secret);
 
         StartWithinTimeout(h);
-        await WaitUntil(
+        await Eventually.True(
             () => h.Sdk.Clients.TryGetValue(BackupStore, out var backupClient) && backupClient.ExitImportCalls.Count > 0,
             "the import to run");
 
@@ -464,7 +464,7 @@ public class SparkServiceStartupTests
 
         // The one wait point after which all three commits are visible: the plugin logs the adoption
         // only once the file has taken the value and the setting has been cleared.
-        await WaitUntil(
+        await Eventually.True(
             () => h.Log.AllText.Contains("adopted an exit-state backup"),
             "the legacy backup to be adopted");
 
@@ -510,7 +510,7 @@ public class SparkServiceStartupTests
         h.Stores.Seed(BackupStore, Constants.StoreSettingsKey, seeded);
 
         StartWithinTimeout(h);
-        await WaitUntil(
+        await Eventually.True(
             () => h.Log.AllText.Contains("adopted an exit-state backup"),
             "the legacy backup to be adopted");
 
@@ -535,18 +535,4 @@ public class SparkServiceStartupTests
     /// </remarks>
     private static Task WithExitStateBackup(SparkServiceHarness h, string storeId, string backup) =>
         h.ExitStateBackups.WriteAsync(storeId, backup, null);
-
-
-    private static async Task WaitUntil(Func<bool> condition, string what)
-    {
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            if (condition())
-                return;
-            await Task.Delay(10);
-        }
-
-        Assert.Fail($"Timed out waiting for {what}.");
-    }
 }
