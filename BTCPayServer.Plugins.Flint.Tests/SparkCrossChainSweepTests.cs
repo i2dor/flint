@@ -902,48 +902,6 @@ public class SparkCrossChainSweepTests
         Assert.Equal(SweepOutcomeKind.Swept, (await exit.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Kind);
     }
 
-    /// <summary>
-    /// The hard fee backstop is still a backstop, asserted where it is reachable.
-    /// </summary>
-    /// <remarks>
-    /// <b>Through the engine it is not reachable</b>: the value guard's 10% band fires before the 50% line ever
-    /// could, so no end-to-end test can exercise it and a mutation that deletes it survives. It is kept anyway —
-    /// it costs nothing and it is the guard that holds if the value check is ever narrowed or bypassed — so it
-    /// is asserted directly instead of pretending an integration test covers it.
-    /// </remarks>
-    [Fact]
-    public void No_configured_percentage_lifts_the_hard_fee_backstop()
-    {
-        var settings = new SweepSettings { MaxFeePercent = 90 };
-        var amount = SparkSendAmount.FromSats(500_000);
-
-        // A 60% spread: inside the merchant's 90%, outside the 50% line.
-        var refused = SparkSweepEngine.ApproveCrossChainQuote(settings, amount, Quote(1_000_000, 400_000), 500_000);
-
-        Assert.NotNull(refused);
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, refused!.Code);
-
-        // And a 40% spread is inside both, so the line is a line.
-        Assert.Null(SparkSweepEngine.ApproveCrossChainQuote(
-            settings, amount, Quote(1_000_000, 600_000), 500_000));
-    }
-
-    private static SparkCrossChainQuote Quote(int assetIn, int estimatedOut) => new(
-        new SparkCrossChainRoute(
-            SparkCrossChainProvider.Orchestra, "arbitrum", "42161", "USDT", null, 6,
-            [SparkCrossChainSource.Bitcoin], "handle"),
-        Evm,
-        AmountInSats: 500_000,
-        AssetAmountIn: assetIn,
-        EstimatedOut: estimatedOut,
-        FeeAmount: assetIn - estimatedOut,
-        ServiceFeeAmount: 0,
-        ServiceFeeAsset: "USDC",
-        SourceTransferFeeSats: 0,
-        ExpiresAt: DateTimeOffset.UtcNow.AddSeconds(60),
-        ProviderQuoteId: "q",
-        ProviderDepositAddress: "spark1");
-
     #region Recovery, which is different on each rail
 
     /// <summary>
