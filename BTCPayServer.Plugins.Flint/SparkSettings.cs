@@ -368,17 +368,6 @@ public class StableBalanceSettings
     public const uint MaxSlippageBpsLimit = 10_000;
 
     /// <summary>
-    /// The floor under a BTC→token conversion, in satoshi, as measured live.
-    /// </summary>
-    /// <remarks>
-    /// Informational only. The service's own minimum is authoritative and is fetched at runtime; this exists so
-    /// the settings page can warn about a threshold that can never convert before the merchant finds out by it
-    /// never converting. The SDK clamps a configured threshold <em>upward</em> to this floor, so setting less
-    /// does not do what it looks like it does.
-    /// </remarks>
-    public const long IndicativeMinimumConversionSats = 800;
-
-    /// <summary>
     /// Whether the merchant wants stable balance active.
     /// </summary>
     /// <remarks>
@@ -444,9 +433,6 @@ public class StableBalanceSettings
     /// </remarks>
     public string EffectiveLabel =>
         string.IsNullOrWhiteSpace(Label) ? DefaultLabel : Label.Trim();
-
-    /// <summary>The decimals actually in force. Zero is treated as unset.</summary>
-    public uint EffectiveDecimals => Decimals > 0 ? Decimals : DefaultDecimals;
 
     /// <summary>An independent copy. Every property added to this class must be added here too.</summary>
     public StableBalanceSettings Clone() => new()

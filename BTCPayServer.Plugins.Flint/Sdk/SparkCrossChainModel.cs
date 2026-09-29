@@ -122,18 +122,6 @@ public sealed record SparkCrossChainQuote(
     /// <summary>What arrives at the EVM address, as a decimal quantity in the destination asset.</summary>
     public string DescribeEstimatedOut() =>
         $"{SparkSendAmount.FormatBaseUnits(EstimatedOut, Route.Decimals)} {Route.Asset}";
-
-    /// <summary>
-    /// The all-in cost as a percentage of what is debited, computed on the <em>sats</em> side.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not computed from <see cref="FeeAmount"/>: that figure is in destination-asset units and
-    /// <see cref="ServiceFeeAmount"/> may be in a third asset again, so adding them is meaningless. The honest
-    /// comparable number for a merchant is how much more left the wallet than the sweep asked for, which is the
-    /// overpay pad — and the provider fee is inside it.
-    /// </remarks>
-    public double OverpayPercent(long requestedSats) =>
-        requestedSats <= 0 ? 0d : (AmountInSats - requestedSats) * 100d / requestedSats;
 }
 
 /// <summary>How far a conversion or a cross-chain delivery has got.</summary>

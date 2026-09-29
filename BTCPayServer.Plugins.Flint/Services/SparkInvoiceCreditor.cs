@@ -167,12 +167,9 @@ public class SparkInvoiceCreditor
         _logger = logger;
     }
 
-    /// <summary>The oldest settlement a credit is still <em>attempted</em> for, given the horizon.</summary>
-    public static DateTimeOffset CreditableFrom(DateTimeOffset now) => now - CreditRetryHorizon;
-
     /// <summary>
-    /// The oldest settlement the credit walk still <em>lists</em>, which is deliberately older than
-    /// <see cref="CreditableFrom"/>.
+    /// The oldest settlement the credit walk still <em>lists</em>, which is deliberately older than the oldest
+    /// one a credit is still <em>attempted</em> for (<see cref="CreditRetryHorizon"/> ago).
     /// </summary>
     /// <remarks>
     /// The two must not be the same value. A record that is only listed while it is still creditable can never
