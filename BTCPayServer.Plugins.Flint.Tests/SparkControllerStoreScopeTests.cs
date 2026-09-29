@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Claims;
 using BTCPayServer.Data;
 using BTCPayServer.Plugins.Flint.Controllers;
@@ -42,7 +43,9 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// directly: the authorised store in <c>HttpContext</c> is the attacker's, and the value handed to the action is
 /// the victim's. That is exactly the state the framework produced, and it is the state the guard has to reject.
 /// Authorisation is faked as <em>succeeding</em> throughout, because a fake that refused would make these tests
-/// pass for the wrong reason. Verified by mutation: reverting the guard fails six of them.
+/// pass for the wrong reason. Every action has a row in
+/// <see cref="Every_action_refuses_a_store_id_that_is_not_the_authorised_store"/>, and the facts below add what
+/// each of the dangerous ones would have done to the victim had the guard failed.
 /// </para>
 /// </remarks>
 public class SparkControllerStoreScopeTests
@@ -121,29 +124,174 @@ public class SparkControllerStoreScopeTests
         Assert.Empty(h.Lightning.Writes);
     }
 
-    [Fact]
-    public async Task Status_refuses_a_store_id_that_is_not_the_authorised_store()
+    /// <summary>
+    /// Every action on the controller refuses a store id other than the one BTCPay authorised, before touching
+    /// anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The row list is checked against the controller by
+    /// <see cref="The_cross_store_theory_covers_every_action_on_the_controller"/>, so an action added without a row
+    /// fails there, and a row whose action forgets <c>ResolveStore</c> fails here. Several of these had no
+    /// cross-store test at all until this theory existed, among them the API-key save (which restarts the
+    /// victim's wallet on a key the caller chose) and the exit-state export and downloads (which hand over the
+    /// victim's exit data).
+    /// </para>
+    /// <para>
+    /// The attacker's own store is fully set up, on mainnet, with an exit service that answers everything. An
+    /// action that dropped the store comparison would therefore <em>succeed</em> against the authorised store rather
+    /// than fall into some unrelated not-found, and one that acted on the route id would find a configured victim.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData("Index GET")]
+    [InlineData("Setup GET")]
+    [InlineData("Setup POST")]
+    [InlineData("Status GET")]
+    [InlineData("EnableLightning POST")]
+    [InlineData("Stablecoins POST")]
+    [InlineData("Sweep GET")]
+    [InlineData("Sweep POST")]
+    [InlineData("SweepPreview POST")]
+    [InlineData("SweepNow POST")]
+    [InlineData("Advanced GET")]
+    [InlineData("AdvancedSweep POST")]
+    [InlineData("AdvancedApiKey POST")]
+    [InlineData("Deposit GET")]
+    [InlineData("ClaimDeposit POST")]
+    [InlineData("Exit GET")]
+    [InlineData("AcknowledgeExit POST")]
+    [InlineData("QuoteExit POST")]
+    [InlineData("BuildExit POST")]
+    [InlineData("CheckExit POST")]
+    [InlineData("ExportExitState POST")]
+    [InlineData("DownloadExitStateBackup POST")]
+    [InlineData("DownloadPendingExitStateBackup POST")]
+    [InlineData("SetExitStateBackup POST")]
+    [InlineData("AbandonExit POST")]
+    [InlineData("CompleteExit POST")]
+    [InlineData("SetExitExplorer POST")]
+    [InlineData("StableBalance GET")]
+    [InlineData("StableBalance POST")]
+    [InlineData("ReapplyStableBalance POST")]
+    [InlineData("Remove GET")]
+    [InlineData("RemoveConfirmed POST")]
+    public async Task Every_action_refuses_a_store_id_that_is_not_the_authorised_store(string action)
     {
-        var h = CreateHarness();
+        var exit = new SparkExitPageTests.StubExitService();
+        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, mainnet: true, unilateralExit: exit);
+        var ct = CancellationToken.None;
+        const string recordId = "record-7";
 
-        // A read, but a read of another store's wallet balance and Spark identity all the same.
-        Assert.IsType<NotFoundResult>(await h.Mvc.Status(VictimStore, CancellationToken.None));
+        var result = action switch
+        {
+            "Index GET" => await h.Mvc.Index(VictimStore),
+            "Setup GET" => await h.Mvc.Setup(VictimStore),
+            "Setup POST" => await h.Mvc.Setup(
+                VictimStore,
+                new SparkSetupViewModel { SeedSource = SeedSource.Imported, ImportedMnemonic = AttackerMnemonic },
+                ct),
+            "Status GET" => await h.Mvc.Status(VictimStore, ct),
+            "EnableLightning POST" => await h.Mvc.EnableLightning(VictimStore, confirmed: true, ct),
+            "Stablecoins POST" => await h.Mvc.Stablecoins(VictimStore, enabled: true, ct),
+            "Sweep GET" => await h.Mvc.Sweep(VictimStore, 0, 25, ct),
+            "Sweep POST" => await h.Mvc.Sweep(
+                VictimStore, new SparkSweepViewModel { Settings = new SweepSettingsInput { Enabled = true } }, ct),
+            "SweepPreview POST" => await h.Mvc.SweepPreview(VictimStore, ct),
+            "SweepNow POST" => await h.Mvc.SweepNow(VictimStore, ct),
+            "Advanced GET" => await h.Mvc.Advanced(VictimStore, ct),
+            "AdvancedSweep POST" => await h.Mvc.AdvancedSweep(
+                VictimStore, new SparkAdvancedViewModel { Settings = new SweepSettingsInput { ReserveSats = 0 } }, ct),
+            "AdvancedApiKey POST" => await h.Mvc.AdvancedApiKey(
+                VictimStore, new SparkAdvancedViewModel { ApiKeyOverride = "attacker-chosen-key" }, ct),
+            "Deposit GET" => await h.Mvc.Deposit(VictimStore, ct),
+            "ClaimDeposit POST" => await h.Mvc.ClaimDeposit(
+                VictimStore, "8808985e78ad465c25727d5ad749f60a5787855d4f1ddffebfc4afb4dbde1b37", 0, null, ct),
+            "Exit GET" => await h.Mvc.Exit(VictimStore, ct),
+            "AcknowledgeExit POST" => await h.Mvc.AcknowledgeExit(VictimStore, ct),
+            "QuoteExit POST" => await h.Mvc.QuoteExit(
+                VictimStore,
+                new SparkExitViewModel
+                {
+                    FeeRateSatPerVbyte = 10,
+                    DestinationAddress = FakeSweepAddressSource.RegtestAddresses[2]
+                },
+                ct),
+            "BuildExit POST" => await h.Mvc.BuildExit(VictimStore, recordId, null, ct),
+            "CheckExit POST" => await h.Mvc.CheckExit(VictimStore, recordId, ct),
+            "ExportExitState POST" => await h.Mvc.ExportExitState(VictimStore, ct),
+            "DownloadExitStateBackup POST" => await h.Mvc.DownloadExitStateBackup(VictimStore, ct),
+            "DownloadPendingExitStateBackup POST" => await h.Mvc.DownloadPendingExitStateBackup(
+                VictimStore, "pending-1", ct),
+            "SetExitStateBackup POST" => await h.Mvc.SetExitStateBackup(
+                VictimStore, new SparkAdvancedViewModel { ExitStateBackup = "attacker-exit-state" }, ct),
+            "AbandonExit POST" => await h.Mvc.AbandonExit(VictimStore, recordId, ct),
+            "CompleteExit POST" => await h.Mvc.CompleteExit(VictimStore, recordId, false, ct),
+            "SetExitExplorer POST" => await h.Mvc.SetExitExplorer(VictimStore, "https://esplora.example/api", ct),
+            "StableBalance GET" => await h.Mvc.StableBalance(VictimStore, ct),
+            "StableBalance POST" => await h.Mvc.StableBalance(
+                VictimStore,
+                new SparkStableBalanceViewModel
+                {
+                    Settings = new StableBalanceInput { Enabled = true, DisclosureAcknowledged = true }
+                },
+                ct),
+            "ReapplyStableBalance POST" => await h.Mvc.ReapplyStableBalance(VictimStore, ct),
+            "Remove GET" => await h.Mvc.Remove(VictimStore, ct),
+            "RemoveConfirmed POST" => await h.Mvc.RemoveConfirmed(VictimStore),
+            _ => throw new ArgumentOutOfRangeException(nameof(action), action, "No invocation for this row.")
+        };
+
+        Assert.IsType<NotFoundResult>(result);
+
+        // Refused before anything was read or written on either store's behalf.
+        Assert.Empty(h.Settings.Writes);
+        Assert.Empty(h.Lightning.Writes);
+        Assert.Empty(h.WriteLog.Entries);
+        Assert.Empty(h.Runtime.ImportRequests);
+        Assert.Empty(exit.Calls);
     }
 
+    /// <summary>
+    /// Every action on the controller has a row in the cross-store theory above.
+    /// </summary>
+    /// <remarks>
+    /// The theory is a hand-written list, and a hand-written list is a list somebody forgets to extend — which is
+    /// how an action ships without the guard the original cross-store hole was fixed by. The controller's actions
+    /// are derived by reflection the way MVC discovers them (every public instance method not marked
+    /// <c>[NonAction]</c>, keyed by name and verb so the GET and POST overloads are separate rows) and compared
+    /// against the rows by name, so the failure says which action is missing.
+    /// </remarks>
     [Fact]
-    public async Task Remove_confirmation_page_refuses_a_store_id_that_is_not_the_authorised_store()
+    public void The_cross_store_theory_covers_every_action_on_the_controller()
     {
-        var h = CreateHarness();
+        var actions = typeof(SparkController)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName && m.GetCustomAttribute<NonActionAttribute>() is null)
+            .Select(m =>
+            {
+                var verbs = m.GetCustomAttributes<HttpMethodAttribute>().SelectMany(a => a.HttpMethods).ToList();
+                return $"{m.Name} {(verbs.Count == 0 ? "ANY" : string.Join("|", verbs.Order()))}";
+            })
+            .Order()
+            .ToList();
 
-        Assert.IsType<NotFoundResult>(await h.Mvc.Remove(VictimStore, CancellationToken.None));
-    }
+        var rows = typeof(SparkControllerStoreScopeTests)
+            .GetMethod(nameof(Every_action_refuses_a_store_id_that_is_not_the_authorised_store))!
+            .GetCustomAttributes<InlineDataAttribute>()
+            .Select(a => (string)a.Data[0]!)
+            .ToList();
 
-    [Fact]
-    public async Task Index_refuses_a_store_id_that_is_not_the_authorised_store()
-    {
-        var h = CreateHarness();
+        // A reflection that found nothing would agree with an empty theory forever.
+        Assert.Contains("SweepNow POST", actions);
 
-        Assert.IsType<NotFoundResult>(await h.Mvc.Index(VictimStore));
+        var missing = actions.Except(rows).ToList();
+        var stale = rows.Except(actions).ToList();
+        Assert.True(
+            missing.Count == 0 && stale.Count == 0,
+            $"Actions with no cross-store row: [{string.Join(", ", missing)}]. "
+            + $"Rows naming no action: [{string.Join(", ", stale)}].");
+        Assert.Equal(actions.Count, rows.Count);
     }
 
     [Fact]
@@ -281,16 +429,6 @@ public class SparkControllerStoreScopeTests
     }
 
     [Fact]
-    public async Task Sweep_settings_page_refuses_a_store_id_that_is_not_the_authorised_store()
-    {
-        var h = CreateHarness();
-
-        // A read, but a read of another store's balance, sweep history and destination configuration.
-        Assert.IsType<NotFoundResult>(
-            await h.Mvc.Sweep(VictimStore, 0, 25, CancellationToken.None));
-    }
-
-    [Fact]
     public async Task Saving_sweep_settings_refuses_a_store_id_that_is_not_the_authorised_store()
     {
         var h = CreateHarness();
@@ -346,14 +484,6 @@ public class SparkControllerStoreScopeTests
     #region Wave 7 pages
 
     [Fact]
-    public async Task The_deposit_page_refuses_a_store_id_that_is_not_the_authorised_store()
-    {
-        var h = CreateHarness();
-
-        Assert.IsType<NotFoundResult>(await h.Mvc.Deposit(VictimStore, CancellationToken.None));
-    }
-
-    [Fact]
     public async Task Claiming_a_deposit_refuses_a_store_id_that_is_not_the_authorised_store()
     {
         // A money-moving action: a claim spends the victim's deposit on a fee.
@@ -370,14 +500,6 @@ public class SparkControllerStoreScopeTests
         Assert.IsType<NotFoundResult>(result);
         Assert.Empty(victim.ClaimCalls);
         Assert.Single(victim.UnclaimedDeposits);
-    }
-
-    [Fact]
-    public async Task The_stable_balance_page_refuses_a_store_id_that_is_not_the_authorised_store()
-    {
-        var h = CreateHarness();
-
-        Assert.IsType<NotFoundResult>(await h.Mvc.StableBalance(VictimStore, CancellationToken.None));
     }
 
     [Fact]
@@ -420,7 +542,7 @@ public class SparkControllerStoreScopeTests
     }
 
     /// <summary>
-    /// The counterparts the four refusals above need.
+    /// The counterparts the refusals above need.
     /// </summary>
     /// <remarks>
     /// Without them every assertion in this region would pass against a controller that rejected everything —
