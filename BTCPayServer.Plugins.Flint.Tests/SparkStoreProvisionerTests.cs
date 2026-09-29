@@ -490,18 +490,23 @@ public class SparkStoreProvisionerTests
     /// configuration itself — <c>SparkService.Set(null)</c> does, because that is the single choke point for
     /// "this store no longer has a Spark wallet". A fake that did the clearing on the service's behalf kept this
     /// green with the service's call deleted, which would leave a removed wallet's checkout pointing at nothing.
+    /// Another store's Spark configuration is there too, and must survive: the clear is for this store only.
     /// </remarks>
     [Fact]
     public async Task Remove_clears_the_lightning_payment_method_it_wrote()
     {
         var (spark, provisioner) = await OverTheRealServiceAsync();
         using var _ = spark;
+        const string otherStore = "store-2";
+        var otherStoresWallet = BTCPayServer.Plugins.Flint.SparkConnectionString.Format(otherStore, "its-own-key");
+        spark.Lightning.Add(otherStore, otherStoresWallet);
         Assert.True((await provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
         Assert.NotNull(spark.Lightning.Stores[StoreId].ConnectionString);
 
         await provisioner.RemoveAsync(StoreId);
 
         Assert.Null(spark.Lightning.Stores[StoreId].ConnectionString);
+        Assert.Equal(otherStoresWallet, spark.Lightning.Stores[otherStore].ConnectionString);
     }
 
     /// <remarks>
