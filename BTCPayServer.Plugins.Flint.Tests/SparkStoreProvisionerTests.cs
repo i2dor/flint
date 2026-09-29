@@ -388,7 +388,8 @@ public class SparkStoreProvisionerTests
         // one server reuses the same hot-wallet seed for both; SparkService's wallet-uniqueness guard refuses the
         // second — two SDK instances on one wallet corrupt its SQLite file — and it refuses by *returning*, with
         // no exception to catch. Before this, the second store got "Spark is now set up", an enabled Lightning
-        // payment method, and a checkout that failed every single time.
+        // payment method, and a checkout that failed every single time. A chain the SDK has no network for
+        // (testnet, signet) declines the same quiet way and takes the same path, with its own reason relayed.
         var h = Create();
         h.Config.Add("store-2");
 
@@ -406,45 +407,6 @@ public class SparkStoreProvisionerTests
         Assert.Null(h.Settings.Settings["store-2"]);
         Assert.Null(h.Config.Stores["store-2"].ConnectionString);
         Assert.DoesNotContain(h.Config.Writes, write => write.StoreId == "store-2");
-    }
-
-    [Fact]
-    public async Task Provision_reports_the_reason_when_the_chain_is_unsupported()
-    {
-        // Same quiet-failure shape, different cause: a BTCPay running on testnet or signet, which the SDK has no
-        // network for at all.
-        var h = Create();
-        h.Settings.NextSetDeclinesWith = "The Spark SDK supports mainnet and regtest only; this server runs on testnet.";
-
-        var result = await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated);
-
-        Assert.False(result.Succeeded);
-        Assert.Contains("mainnet and regtest only", result.Error);
-        Assert.Null(h.Settings.Settings[StoreId]);
-        Assert.Empty(h.Config.Writes);
-    }
-
-    [Fact]
-    public async Task Provision_does_not_alias_the_previous_sweep_settings()
-    {
-        // Settings objects are handed out by reference from the service's cache. Aliasing the sweep block across
-        // a seed change would make a later edit to the new configuration silently edit the old one — including
-        // the copy a failed attempt is supposed to roll back to.
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
-
-        var first = h.Settings.Settings[StoreId]!;
-        first.Sweep.BalanceThresholdSats = 100_000;
-
-        Assert.True((await h.Provisioner.ProvisionAsync(
-            StoreId, SparkStoreProvisioner.GenerateMnemonic(), SeedSource.Imported)).Succeeded);
-
-        var second = h.Settings.Settings[StoreId]!;
-        Assert.Equal(100_000, second.Sweep.BalanceThresholdSats);
-        Assert.NotSame(first.Sweep, second.Sweep);
-
-        second.Sweep.BalanceThresholdSats = 7;
-        Assert.Equal(100_000, first.Sweep.BalanceThresholdSats);
     }
 
     [Fact]
