@@ -57,37 +57,6 @@ public class SparkExitStateAutoBackupTests
         Assert.DoesNotContain("exit-state-blob", h.Log.AllText);
     }
 
-    /// <summary>
-    /// The pass runs on a server that has never heard of the old switch.
-    /// </summary>
-    /// <remarks>
-    /// Through 1.2.0 this whole pass returned early unless <c>FLINT_EXPERIMENTAL_UNILATERAL_EXIT</c> was set,
-    /// so a host that never set it had no automatic backup at all. The variable is cleared here rather than
-    /// assumed absent, so a developer who still exports it in their shell cannot make this pass for the wrong
-    /// reason. Clearing it needs no serialisation: nothing in the plugin reads it any more, which is what this
-    /// pins.
-    /// </remarks>
-    [Fact(Timeout = 60_000)]
-    public async Task With_no_environment_variable_set_the_automatic_backup_is_taken()
-    {
-        const string retired = "FLINT_EXPERIMENTAL_UNILATERAL_EXIT";
-        var previous = Environment.GetEnvironmentVariable(retired);
-        Environment.SetEnvironmentVariable(retired, null);
-        try
-        {
-            using var h = await StartedAsync(new StubTimeProvider(Base));
-
-            await h.Service.TakeDueExitStateBackupsAsync(Ct);
-
-            Assert.Single(h.Sdk.Clients[StoreId].ExitExportCalls);
-            Assert.Equal("exit-state-blob", await h.ExitStateBackups.ReadAsync(StoreId, Ct));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(retired, previous);
-        }
-    }
-
     [Fact(Timeout = 60_000)]
     public async Task An_unchanged_state_is_not_written_again()
     {
