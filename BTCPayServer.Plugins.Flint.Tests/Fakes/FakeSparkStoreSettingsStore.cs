@@ -16,9 +16,6 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 /// <item><description><see cref="NextSetDeclinesWith"/> — the quiet failure. The real implementation stores
 /// the settings and reports that the wallet declined to start, without any exception: a seed another store
 /// already owns, an unsupported chain, a seed this server cannot decrypt.</description></item>
-/// <item><description>A removal clears the store's Lightning configuration, when constructed with a
-/// <see cref="SparkLightningWiring"/>. <c>SparkService.Set(null)</c> does that, and it is the coupling
-/// <c>SparkStoreProvisioner.RemoveAsync</c> relies on rather than doing itself.</description></item>
 /// <item><description><b>A write replaces the store's SDK handle, and disposes the old one</b>, when
 /// constructed with a <see cref="FakeSparkStoreRuntime"/>. <c>SparkService.Set</c> reconciles the running
 /// instance with the new settings by tearing the old one down and connecting a fresh one, so <em>any handle a
@@ -29,7 +26,6 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 /// </remarks>
 public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
 {
-    private readonly SparkLightningWiring? _lightningWiring;
     private readonly WriteLog? _writeLog;
     private readonly FakeSparkStoreRuntime? _runtime;
     private readonly Func<FakeSparkSdkClient>? _reconnect;
@@ -44,12 +40,10 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
     /// test asserting on balances or recorded calls does not lose them to a reconnect it did not ask about.
     /// </param>
     public FakeSparkStoreSettingsStore(
-        SparkLightningWiring? lightningWiring = null,
         WriteLog? writeLog = null,
         FakeSparkStoreRuntime? runtime = null,
         Func<FakeSparkSdkClient>? reconnect = null)
     {
-        _lightningWiring = lightningWiring;
         _writeLog = writeLog;
         _runtime = runtime;
         _reconnect = reconnect;
@@ -98,7 +92,20 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
             ? Task.FromException<SparkSettings?>(failure)
             : Task.FromResult(Settings.TryGetValue(storeId, out var settings) ? settings : null);
 
-    public async Task<SparkSettingsApplied> SetAsync(string storeId, SparkSettings? settings)
+    public Task<SparkSettingsApplied> SetAsync(string storeId, SparkSettings? settings)
+    {
+        // A faulted task rather than a synchronous throw, as the real (async) implementation fails.
+        try
+        {
+            return Task.FromResult(Set(storeId, settings));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromException<SparkSettingsApplied>(ex);
+        }
+    }
+
+    private SparkSettingsApplied Set(string storeId, SparkSettings? settings)
     {
         if (FailNextSetBeforeStoringWith is { } beforeStoring)
         {
@@ -112,10 +119,9 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
 
         if (settings is null)
         {
-            // What SparkService.Set does on removal, and the reason RemoveAsync does not clear the config
-            // itself. Without this here, that coupling is untested.
-            if (_lightningWiring is not null)
-                await _lightningWiring.ClearIfOursAsync(storeId).ConfigureAwait(false);
+            // Deliberately not clearing the store's Lightning configuration, although SparkService.Set(null)
+            // does: a fake that did it on the service's behalf kept the removal tests green with the service's
+            // call deleted. That coupling is tested over the real service instead.
             TeardownWallet(storeId);
             return SparkSettingsApplied.Removed;
         }

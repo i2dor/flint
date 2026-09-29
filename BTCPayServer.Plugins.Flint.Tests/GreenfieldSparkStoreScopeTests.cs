@@ -441,21 +441,18 @@ public class GreenfieldSparkStoreScopeTests
     public async Task Removal_proceeds_for_the_authorised_store()
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Lightning.Add(
-            SparkSurfaceHarness.AttackerStore,
-            SparkConnectionString.Format(
-                SparkSurfaceHarness.AttackerStore, SparkSurfaceHarness.VictimPaymentKey));
 
         var result = await h.Api.Remove(SparkSurfaceHarness.AttackerStore, CancellationToken.None);
 
         Assert.IsType<OkResult>(result);
-        Assert.Null(h.Settings.Settings[SparkSurfaceHarness.AttackerStore]);
 
-        // Its own Lightning configuration was cleared, and the victim's was not.
-        Assert.Null(h.Lightning.Stores[SparkSurfaceHarness.AttackerStore].ConnectionString);
+        // Its own settings were removed, and nothing else was written. Clearing the Lightning configuration is
+        // SparkService's job on that removal, and SparkStoreProvisionerTests proves it over the real service.
+        var write = Assert.Single(h.Settings.Writes);
+        Assert.Equal(SparkSurfaceHarness.AttackerStore, write.StoreId);
+        Assert.Null(write.Settings);
         Assert.Equal(
-            SparkSurfaceHarness.VictimNode,
-            h.Lightning.Stores[SparkSurfaceHarness.VictimStore].ConnectionString);
+            "victim-protected", h.Settings.Settings[SparkSurfaceHarness.VictimStore]!.ProtectedMnemonic);
     }
 
     [Fact]

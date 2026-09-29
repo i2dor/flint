@@ -42,8 +42,7 @@ public class SparkStoreProvisionerTests
 
         var wiring = new SparkLightningWiring(config, NullLogger<SparkLightningWiring>.Instance);
 
-        // Wired to the wiring so a removal clears the Lightning configuration, as SparkService.Set(null) does.
-        var settings = new FakeSparkStoreSettingsStore(wiring, writes);
+        var settings = new FakeSparkStoreSettingsStore(writes);
         var protector = Protector();
         var log = new CapturingLogger<SparkStoreProvisioner>();
 
@@ -486,40 +485,59 @@ public class SparkStoreProvisionerTests
         Assert.Null(h.Settings.Writes[^1].Settings);
     }
 
+    /// <remarks>
+    /// Over the real <c>SparkService</c>, not the settings-store fake. RemoveAsync does not clear the Lightning
+    /// configuration itself — <c>SparkService.Set(null)</c> does, because that is the single choke point for
+    /// "this store no longer has a Spark wallet". A fake that did the clearing on the service's behalf kept this
+    /// green with the service's call deleted, which would leave a removed wallet's checkout pointing at nothing.
+    /// </remarks>
     [Fact]
     public async Task Remove_clears_the_lightning_payment_method_it_wrote()
     {
-        // RemoveAsync does not clear the Lightning configuration itself — SparkService.Set(null) does, because
-        // that is the single choke point for "this store no longer has a Spark wallet". This pins that coupling
-        // end to end, so removing the clearing from either side fails a test.
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
-        Assert.NotNull(h.Config.Stores[StoreId].ConnectionString);
+        var (spark, provisioner) = await OverTheRealServiceAsync();
+        using var _ = spark;
+        Assert.True((await provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        Assert.NotNull(spark.Lightning.Stores[StoreId].ConnectionString);
 
-        await h.Provisioner.RemoveAsync(StoreId);
+        await provisioner.RemoveAsync(StoreId);
 
-        Assert.Null(h.Config.Stores[StoreId].ConnectionString);
-        Assert.Equal(
-            [
-                $"settings:{StoreId}:stored", $"lightning:{StoreId}:set",
-                $"settings:{StoreId}:removed", $"lightning:{StoreId}:cleared"
-            ],
-            h.Writes.Entries);
+        Assert.Null(spark.Lightning.Stores[StoreId].ConnectionString);
     }
 
+    /// <remarks>
+    /// The other half, at the same call site: the service clears only a configuration that is its own, not
+    /// whatever the store's Lightning payment method happens to hold.
+    /// </remarks>
     [Fact]
     public async Task Remove_leaves_another_nodes_configuration_alone()
     {
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        var (spark, provisioner) = await OverTheRealServiceAsync();
+        using var _ = spark;
+        Assert.True((await provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
 
         // The merchant moved to their own node after setting Spark up.
         const string ownNode = "type=lnd-rest;server=https://127.0.0.1:8080/;macaroon=abcdef";
-        h.Config.Add(StoreId, ownNode);
+        spark.Lightning.Add(StoreId, ownNode);
 
-        await h.Provisioner.RemoveAsync(StoreId);
+        await provisioner.RemoveAsync(StoreId);
 
-        Assert.Equal(ownNode, h.Config.Stores[StoreId].ConnectionString);
+        Assert.Equal(ownNode, spark.Lightning.Stores[StoreId].ConnectionString);
+    }
+
+    /// <summary>A provisioner over a started <c>SparkService</c>, for what the service does on its behalf.</summary>
+    private static async Task<(SparkServiceHarness Spark, SparkStoreProvisioner Provisioner)>
+        OverTheRealServiceAsync()
+    {
+        var spark = SparkServiceHarness.Create();
+        spark.Lightning.Add(StoreId);
+        await spark.Service.StartAsync(CancellationToken.None);
+
+        var provisioner = new SparkStoreProvisioner(
+            spark.Service,
+            new SparkLightningWiring(spark.Lightning, NullLogger<SparkLightningWiring>.Instance),
+            spark.Protector,
+            new CapturingLogger<SparkStoreProvisioner>());
+        return (spark, provisioner);
     }
 
     #endregion
