@@ -256,7 +256,8 @@ public sealed class SparkServiceHarness : IDisposable
 
         // The USDC/USDT path over in-memory fakes, with the service itself as its store runtime — so it is
         // built after the service, and the deferred factory's closure makes that ordering safe. Available
-        // regardless of the harness's chain, so the event path's routing of a cross-chain receive can be exercised; with no quotes open it changes nothing.
+        // regardless of the harness's chain, so the event path's routing of a cross-chain receive can be
+        // exercised; with no quotes open it changes nothing.
         StablecoinHarness? stablecoins = null;
 
         // The real file store over the harness's temp data directory — the layout, the owner-only
