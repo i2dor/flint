@@ -372,27 +372,30 @@ public class SparkUnilateralExitSeamTests
     }
 
     /// <remarks>
+    /// <para>
     /// Null rather than the original exception, so the client can use it as an exception filter and let anything
     /// else escape with its own stack rather than re-throwing a copy.
-    /// </remarks>
-    [Fact]
-    public void Any_other_failure_is_left_alone()
-    {
-        Assert.Null(SparkErrors.TranslateUnilateralExit(new SdkException.NetworkException("@v1=offline")));
-    }
-
-    /// <remarks>
+    /// </para>
+    /// <para>
     /// There is exactly one translation left. SDK 0.25 removed <c>SdkException.FundingUtxoConflict</c> along with
     /// the build shape that produced it — a spent funding output is now followed to whatever it became rather
-    /// than reported — so the filter must not claim a conflict it no longer recognises.
+    /// than reported — so the filter must not claim a conflict it no longer recognises, and the ordinary
+    /// <c>InsufficientFunds</c> is a different shortfall from the CPFP one, not another spelling of it.
+    /// </para>
     /// </remarks>
-    [Fact]
-    public void Only_the_CPFP_shortfall_is_translated()
+    [Theory]
+    [InlineData("network")]
+    [InlineData("insufficient-funds")]
+    public void Any_other_failure_is_left_alone(string failure)
     {
-        Assert.IsType<SparkExitFundingShortfallException>(
-            SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientCpfpFunds(1)));
+        SdkException exception = failure switch
+        {
+            "network" => new SdkException.NetworkException("@v1=offline"),
+            "insufficient-funds" => new SdkException.InsufficientFunds(tokenIdentifier: null),
+            _ => throw new ArgumentOutOfRangeException(nameof(failure), failure, "No exception for this row.")
+        };
 
-        Assert.Null(SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientFunds(tokenIdentifier: null)));
+        Assert.Null(SparkErrors.TranslateUnilateralExit(exception));
     }
 
     /// <summary>
