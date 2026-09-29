@@ -105,13 +105,48 @@ namespace BTCPayServer.Plugins.Flint.Tests.LocalRegtest;
 /// operator would see), and the tag helpers are MVC's.
 /// </para>
 /// <para>
-/// Run it with <c>dotnet test --filter "FullyQualifiedName~RenderExitScreensTests"</c>; the files land in
-/// <see cref="ExitScreenRenderer.OutputDirectory"/> and are inert (they link BTCPay's own stylesheets by
-/// absolute URL, so they want the server this repo's checkout already runs).
+/// <b>Running it for review.</b> Set <see cref="ExitScreenRenderer.OutputDirectoryVariable"/> to a directory and
+/// run <c>dotnet test --filter "FullyQualifiedName~RenderExitScreensTests"</c>; the files land there, one per
+/// screen, overwritten in place, and are inert (they link BTCPay's own stylesheets by absolute URL, so they
+/// want the server this repo's checkout already runs). For example
+/// <c>SPARK_EXIT_SCREENS_DIR=/tmp/flint-screens dotnet test …</c>.
+/// </para>
+/// <para>
+/// <b>In every other run</b> it has no Category, deliberately: it is the only test in the default run that
+/// executes <c>Exit.cshtml</c>, so a page that throws while rendering the model the controller projects fails
+/// here and nowhere else. Without the variable each test writes to a fresh temporary directory and
+/// deletes it afterwards, so a routine run neither leaves files behind nor races another checkout's run for a
+/// shared path.
 /// </para>
 /// </remarks>
-public class RenderExitScreensTests
+public sealed class RenderExitScreensTests : IDisposable
 {
+    /// <summary>Where this test's screens go: the review directory if one was named, otherwise its own.</summary>
+    private readonly string _outputDirectory;
+
+    /// <summary>Whether <see cref="_outputDirectory"/> is this test's own, to be deleted when it finishes.</summary>
+    private readonly bool _ownsOutputDirectory;
+
+    public RenderExitScreensTests()
+    {
+        if (Environment.GetEnvironmentVariable(ExitScreenRenderer.OutputDirectoryVariable) is { } configured
+            && !string.IsNullOrWhiteSpace(configured))
+        {
+            _outputDirectory = configured.Trim();
+        }
+        else
+        {
+            _outputDirectory = Directory.CreateTempSubdirectory("flint-screens-").FullName;
+            _ownsOutputDirectory = true;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_ownsOutputDirectory)
+            Directory.Delete(_outputDirectory, recursive: true);
+    }
+
     private const string Store = SparkSurfaceHarness.AttackerStore;
 
     /// <summary>A regtest address, so a destination in a screen reads like one a merchant would type.</summary>
@@ -376,10 +411,10 @@ public class RenderExitScreensTests
     }
 
     /// <summary>Writes one screen to the output directory, which is the deliverable.</summary>
-    private static void WriteScreen(string fileName, string html)
+    private void WriteScreen(string fileName, string html)
     {
-        Directory.CreateDirectory(ExitScreenRenderer.OutputDirectory);
-        File.WriteAllText(Path.Combine(ExitScreenRenderer.OutputDirectory, fileName), html);
+        Directory.CreateDirectory(_outputDirectory);
+        File.WriteAllText(Path.Combine(_outputDirectory, fileName), html);
 
         Assert.False(string.IsNullOrWhiteSpace(html));
     }
@@ -453,8 +488,11 @@ public class RenderExitScreensTests
 /// </remarks>
 internal static class ExitScreenRenderer
 {
-    /// <summary>Where the screens are written. Cleared of nothing — one file per screen, overwritten in place.</summary>
-    public const string OutputDirectory = "/tmp/flint-screens";
+    /// <summary>
+    /// The variable naming a directory to keep the screens in for review. Unset, each test uses a temporary
+    /// directory of its own and deletes it — see <see cref="RenderExitScreensTests"/>.
+    /// </summary>
+    public const string OutputDirectoryVariable = "SPARK_EXIT_SCREENS_DIR";
 
     /// <summary>The compiled item path of the unilateral-exit page.</summary>
     public const string ExitItemPath = "/Views/Spark/Exit.cshtml";
