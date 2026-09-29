@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Reflection;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Plugins.Flint.Controllers;
@@ -8,6 +9,7 @@ using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -439,21 +441,18 @@ public class GreenfieldSparkStoreScopeTests
     public async Task Removal_proceeds_for_the_authorised_store()
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Lightning.Add(
-            SparkSurfaceHarness.AttackerStore,
-            SparkConnectionString.Format(
-                SparkSurfaceHarness.AttackerStore, SparkSurfaceHarness.VictimPaymentKey));
 
         var result = await h.Api.Remove(SparkSurfaceHarness.AttackerStore, CancellationToken.None);
 
         Assert.IsType<OkResult>(result);
-        Assert.Null(h.Settings.Settings[SparkSurfaceHarness.AttackerStore]);
 
-        // Its own Lightning configuration was cleared, and the victim's was not.
-        Assert.Null(h.Lightning.Stores[SparkSurfaceHarness.AttackerStore].ConnectionString);
+        // Its own settings were removed, and nothing else was written. Clearing the Lightning configuration is
+        // SparkService's job on that removal, and SparkStoreProvisionerTests proves it over the real service.
+        var write = Assert.Single(h.Settings.Writes);
+        Assert.Equal(SparkSurfaceHarness.AttackerStore, write.StoreId);
+        Assert.Null(write.Settings);
         Assert.Equal(
-            SparkSurfaceHarness.VictimNode,
-            h.Lightning.Stores[SparkSurfaceHarness.VictimStore].ConnectionString);
+            "victim-protected", h.Settings.Settings[SparkSurfaceHarness.VictimStore]!.ProtectedMnemonic);
     }
 
     [Fact]
@@ -490,7 +489,7 @@ public class GreenfieldSparkStoreScopeTests
     /// <b>The type list is derived from the controller, not written down.</b> It used to be three names typed by
     /// hand, and by the time Wave 7 added two more body-bound models the guard had silently stopped covering
     /// them — a guard that protects whatever somebody remembered is a guard that protects less every wave.
-    /// Reflecting over the <c>[FromBody]</c> parameters means a new endpoint is covered the moment it exists.
+    /// Reflecting over the body-bound parameters means a new endpoint is covered the moment it exists.
     /// </para>
     /// </remarks>
     [Fact]
@@ -528,6 +527,7 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData(typeof(SweepSettingsInput))]
     [InlineData(typeof(SparkClaimDepositRequest))]
     [InlineData(typeof(StableBalanceInput))]
+    [InlineData(typeof(SparkStablecoinsInput))]
     public void Every_body_bound_model_is_reached_by_the_store_id_guard(Type expected)
     {
         Assert.Contains(expected, BodyBoundModels());
@@ -545,11 +545,35 @@ public class GreenfieldSparkStoreScopeTests
     private static List<Type> BodyBoundModels() =>
         typeof(GreenfieldSparkController)
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
             .SelectMany(m => m.GetParameters())
-            .Where(p => p.GetCustomAttribute<FromBodyAttribute>() is not null)
+            .Where(IsBoundFromBody)
             .Select(p => Nullable.GetUnderlyingType(p.ParameterType) ?? p.ParameterType)
             .Distinct()
             .ToList();
+
+    /// <summary>
+    /// Whether the framework reads this parameter from the request body.
+    /// </summary>
+    /// <remarks>
+    /// Not only an explicit <c>[FromBody]</c>. The controller is an <c>[ApiController]</c>, and for one of those
+    /// ASP.NET Core infers the body for any parameter that names no binding source and is a complex type (one no
+    /// <see cref="TypeConverter"/> makes from a string) other than a cancellation token or an
+    /// uploaded file. An endpoint that left the attribute off would still take its model from the body, so a
+    /// guard that looked for the attribute alone would miss exactly that endpoint.
+    /// </remarks>
+    private static bool IsBoundFromBody(ParameterInfo parameter)
+    {
+        var declared = parameter.GetCustomAttributes().OfType<IBindingSourceMetadata>().FirstOrDefault();
+        if (declared?.BindingSource is { } source)
+            return source == BindingSource.Body;
+
+        var type = Nullable.GetUnderlyingType(parameter.ParameterType) ?? parameter.ParameterType;
+        return type != typeof(CancellationToken)
+               && !typeof(IFormFile).IsAssignableFrom(type)
+               && !typeof(IFormFileCollection).IsAssignableFrom(type)
+               && !TypeDescriptor.GetConverter(type).CanConvertFrom(typeof(string));
+    }
 
     private static void AssertStoreNotFound(IActionResult result)
     {

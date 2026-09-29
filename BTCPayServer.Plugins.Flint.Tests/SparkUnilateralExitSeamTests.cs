@@ -424,14 +424,6 @@ public class SparkUnilateralExitSeamTests
         Assert.Null(SparkErrors.TranslateUnilateralExit(new SdkException.InsufficientFunds(tokenIdentifier: null)));
     }
 
-    [Fact]
-    public void The_exit_errors_never_reach_a_merchant_with_a_UniFFI_prefix()
-    {
-        var described = SparkErrors.Describe(new SdkException.InsufficientCpfpFunds(1_234));
-        Assert.False(string.IsNullOrWhiteSpace(described));
-        Assert.DoesNotContain("@v1=", described);
-    }
-
     /// <summary>
     /// A stored exit rebuilt into the SDK's response keeps every field <c>CheckUnilateralExit</c> judges it by.
     /// </summary>

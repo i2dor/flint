@@ -105,8 +105,9 @@ public class SparkInvoiceCreditorTests
     [Fact]
     public async Task Crediting_twice_records_the_payment_once()
     {
-        // Exactly-once, asserted through the mechanism that provides it rather than around it: the second
-        // attempt is refused by the payments primary key, not by this plugin remembering it tried.
+        // Exactly-once across repeat passes over one row. Neither repeat reaches an insert: the stamp stops
+        // the first, and the lookup finding the payment already on the invoice stops the second. The insert
+        // the primary key refuses is the race below.
         var (creditor, store, credits, _) = Create();
         var record = Settled(store);
         credits.Mint(Hash, InvoiceId, StoreId);
@@ -117,13 +118,34 @@ public class SparkInvoiceCreditorTests
         Assert.Equal(SparkInvoiceCreditResult.AlreadyCredited,
             await creditor.CreditAsync(store.Records[Hash], Ct));
 
-        // And even with the stamp cleared — a crash between the insert and the mark — the insert is refused.
+        // And even with the stamp cleared — a crash between the insert and the mark — the invoice is seen to
+        // hold the payment already, and the row is stamped without inserting again.
         store.Records[Hash].CreditedAt = null;
         Assert.Equal(SparkInvoiceCreditResult.AlreadyRecorded,
             await creditor.CreditAsync(store.Records[Hash], Ct));
 
-        Assert.Single(credits.Credits);
+        Assert.Single(credits.Attempts);
         Assert.Single(credits.CreditsFor(InvoiceId));
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+    }
+
+    [Fact]
+    public async Task A_credit_whose_insert_loses_to_BTCPay_is_marked_without_a_second_payment()
+    {
+        // The race the payments primary key exists for: BTCPay's own listener records the payment after this
+        // plugin's lookup found the invoice empty, and before its insert. The insert is refused, the merchant
+        // is credited once, by core, and the row must still be stamped or every later pass asks again.
+        var (creditor, store, credits, _) = Create();
+        var record = Settled(store);
+        credits.Mint(Hash, InvoiceId, StoreId).CreditedByBTCPayAfterNextLookup(Hash);
+
+        Assert.Equal(SparkInvoiceCreditResult.AlreadyRecorded, await creditor.CreditAsync(record, Ct));
+
+        // Tried and refused, which is what tells this apart from the lookup short-circuit above.
+        Assert.Single(credits.Attempts);
+        Assert.Empty(credits.Credits);
+        Assert.NotNull(store.Records[Hash].CreditedAt);
+        Assert.Null(store.Records[Hash].CreditAbandonedAt);
     }
 
     [Fact]

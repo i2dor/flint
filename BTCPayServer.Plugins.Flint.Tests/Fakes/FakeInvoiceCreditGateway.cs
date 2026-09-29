@@ -39,6 +39,13 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 /// only adding to the index — that asymmetry is the superseding — and a credit fills the prompt's preimage only
 /// when the prompt is still offering the BOLT11 that was paid.
 /// </para>
+/// <para>
+/// <b>Every read and write is atomic under one lock.</b> The startup reconciliation pass and the SDK event
+/// path credit the same row concurrently by design, and Postgres serialises their inserts on the primary key.
+/// An unlocked <c>HashSet</c> does not: two racing adds of the same pair can both succeed, which recorded one
+/// payment twice and made the service-level credit tests flaky. For the same reason the lists are handed out
+/// as snapshots rather than the live collections.
+/// </para>
 /// </remarks>
 public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
 {
@@ -48,10 +55,12 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     /// <inheritdoc cref="LightningPaymentMethodId" />
     public const string LnurlPaymentMethodId = "BTC-LNURL";
 
+    private readonly object _gate = new();
     private readonly Dictionary<string, Row> _addressInvoices = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Row> _pluginIndex = new(StringComparer.Ordinal);
     private readonly HashSet<(string Id, string PaymentMethodId)> _payments = [];
     private readonly Dictionary<string, Prompt> _prompts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _creditedByBTCPayAfterNextLookup = new(StringComparer.Ordinal);
 
     private sealed record Row(string InvoiceId, string StoreId, string PaymentMethodId);
 
@@ -62,14 +71,27 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
         public string? Preimage { get; set; }
     }
 
+    private readonly List<SparkInvoiceCreditRequest> _credits = [];
+    private readonly List<SparkInvoiceCreditRequest> _attempts = [];
+    private int _lookups;
+
     /// <summary>Every accepted insert, in order. One entry per payment actually credited.</summary>
-    public List<SparkInvoiceCreditRequest> Credits { get; } = [];
+    public IReadOnlyList<SparkInvoiceCreditRequest> Credits
+    {
+        get { lock (_gate) return _credits.ToList(); }
+    }
 
     /// <summary>Every attempt, accepted or not — so a test can tell "refused" from "never tried".</summary>
-    public List<SparkInvoiceCreditRequest> Attempts { get; } = [];
+    public IReadOnlyList<SparkInvoiceCreditRequest> Attempts
+    {
+        get { lock (_gate) return _attempts.ToList(); }
+    }
 
     /// <summary>How many times a payment hash has been looked up.</summary>
-    public int Lookups { get; private set; }
+    public int Lookups
+    {
+        get { lock (_gate) return _lookups; }
+    }
 
     /// <summary>
     /// Payment hashes whose invoice reports no usable payment prompt, to exercise the not-retryable path.
@@ -94,13 +116,16 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
         string paymentMethodId = LightningPaymentMethodId,
         bool indexInCore = true)
     {
-        // Insert-only, like the real tables: superseding a BOLT11 does not remove the old hash's row.
-        if (indexInCore)
-            _addressInvoices.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
-        _pluginIndex.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
-        // The prompt, by contrast, is replaced — this invoice now offers this BOLT11 and no longer the previous
-        // one. Minting X then Y is exactly the supersession the credit path exists for.
-        _prompts[invoiceId] = new Prompt { PaymentHash = paymentHash };
+        lock (_gate)
+        {
+            // Insert-only, like the real tables: superseding a BOLT11 does not remove the old hash's row.
+            if (indexInCore)
+                _addressInvoices.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
+            _pluginIndex.TryAdd(paymentHash, new Row(invoiceId, storeId, paymentMethodId));
+            // The prompt, by contrast, is replaced — this invoice now offers this BOLT11 and no longer the
+            // previous one. Minting X then Y is exactly the supersession the credit path exists for.
+            _prompts[invoiceId] = new Prompt { PaymentHash = paymentHash };
+        }
         return this;
     }
 
@@ -112,12 +137,18 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     /// is why it is asserted on separately. BTCPay's own listener fills it only when its own insert wins, so
     /// whenever this plugin wins the race instead, filling it is this plugin's job.
     /// </remarks>
-    public string? PromptPreimageFor(string invoiceId) =>
-        _prompts.GetValueOrDefault(invoiceId)?.Preimage;
+    public string? PromptPreimageFor(string invoiceId)
+    {
+        lock (_gate)
+            return _prompts.GetValueOrDefault(invoiceId)?.Preimage;
+    }
 
     /// <summary>The BOLT11 payment hash an invoice's prompt currently offers.</summary>
-    public string? PromptPaymentHashFor(string invoiceId) =>
-        _prompts.GetValueOrDefault(invoiceId)?.PaymentHash;
+    public string? PromptPaymentHashFor(string invoiceId)
+    {
+        lock (_gate)
+            return _prompts.GetValueOrDefault(invoiceId)?.PaymentHash;
+    }
 
     /// <summary>
     /// Records a payment against an invoice the way BTCPay's own Lightning listener would, so a test can set
@@ -127,13 +158,35 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
         string paymentHash,
         string paymentMethodId = LightningPaymentMethodId)
     {
-        _payments.Add((paymentHash, paymentMethodId));
+        lock (_gate)
+            _payments.Add((paymentHash, paymentMethodId));
         return this;
     }
 
-    /// <summary>Payments recorded against one BTCPay invoice, whoever recorded them.</summary>
-    public IReadOnlyList<SparkInvoiceCreditRequest> CreditsFor(string invoiceId) =>
-        Credits.Where(c => c.InvoiceId == invoiceId).ToList();
+    /// <summary>
+    /// Has BTCPay's own listener record this payment just after the next lookup of it, so the plugin's insert
+    /// that follows loses the race on the primary key.
+    /// </summary>
+    /// <remarks>
+    /// The only way to reach that refusal from a single caller: a payment already recorded when the lookup
+    /// runs is reported as held, and the creditor stops before it inserts anything.
+    /// </remarks>
+    public FakeInvoiceCreditGateway CreditedByBTCPayAfterNextLookup(string paymentHash)
+    {
+        lock (_gate)
+            _creditedByBTCPayAfterNextLookup.Add(paymentHash);
+        return this;
+    }
+
+    /// <summary>
+    /// Payments this plugin inserted against one BTCPay invoice. One recorded by
+    /// <see cref="CreditedByBTCPay"/> is not among them.
+    /// </summary>
+    public IReadOnlyList<SparkInvoiceCreditRequest> CreditsFor(string invoiceId)
+    {
+        lock (_gate)
+            return _credits.Where(c => c.InvoiceId == invoiceId).ToList();
+    }
 
     public Task<SparkInvoiceCreditMatch?> FindByPaymentHashAsync(
         string paymentHash,
@@ -142,21 +195,27 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
         if (FailWith is not null)
             throw FailWith;
 
-        Lookups++;
-        // The real gateway consults core's table first and the plugin's own index only when that has no row —
-        // the LUD-21-off LNURL case modelled by Mint(..., indexInCore: false). Either index can resolve the
-        // hash; core's index just takes precedence, exactly as in the production gateway.
-        var row = _addressInvoices.GetValueOrDefault(paymentHash)
-                  ?? _pluginIndex.GetValueOrDefault(paymentHash);
-        if (row is null)
+        lock (_gate)
         {
-            return Task.FromResult<SparkInvoiceCreditMatch?>(null);
+            _lookups++;
+            // The real gateway consults core's table first and the plugin's own index only when that has no
+            // row — the LUD-21-off LNURL case modelled by Mint(..., indexInCore: false). Either index can
+            // resolve the hash; core's index just takes precedence, exactly as in the production gateway.
+            var row = _addressInvoices.GetValueOrDefault(paymentHash)
+                      ?? _pluginIndex.GetValueOrDefault(paymentHash);
+            if (row is null)
+            {
+                return Task.FromResult<SparkInvoiceCreditMatch?>(null);
+            }
+            var match = new SparkInvoiceCreditMatch(
+                row.InvoiceId,
+                row.StoreId,
+                row.PaymentMethodId,
+                _payments.Contains((paymentHash, row.PaymentMethodId)));
+            if (_creditedByBTCPayAfterNextLookup.Remove(paymentHash))
+                _payments.Add((paymentHash, row.PaymentMethodId));
+            return Task.FromResult<SparkInvoiceCreditMatch?>(match);
         }
-        return Task.FromResult<SparkInvoiceCreditMatch?>(new SparkInvoiceCreditMatch(
-            row.InvoiceId,
-            row.StoreId,
-            row.PaymentMethodId,
-            _payments.Contains((paymentHash, row.PaymentMethodId))));
     }
 
     public Task<SparkInvoiceCreditOutcome> AddSettledPaymentAsync(
@@ -166,37 +225,40 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
         if (FailWith is not null)
             throw FailWith;
 
-        Attempts.Add(request);
-
-        // "Which invoice was this minted for" is the question, and either index can answer it — the same
-        // existence test as the real gateway's re-read of the invoice by id.
-        if (!_addressInvoices.ContainsKey(request.PaymentHash)
-            && !_pluginIndex.ContainsKey(request.PaymentHash))
+        lock (_gate)
         {
-            return Task.FromResult(SparkInvoiceCreditOutcome.InvoiceGone);
+            _attempts.Add(request);
+
+            // "Which invoice was this minted for" is the question, and either index can answer it — the same
+            // existence test as the real gateway's re-read of the invoice by id.
+            if (!_addressInvoices.ContainsKey(request.PaymentHash)
+                && !_pluginIndex.ContainsKey(request.PaymentHash))
+            {
+                return Task.FromResult(SparkInvoiceCreditOutcome.InvoiceGone);
+            }
+
+            if (PromptMissingFor.Contains(request.PaymentHash))
+                return Task.FromResult(SparkInvoiceCreditOutcome.PromptMissing);
+
+            // The primary key decides, exactly as it does in Postgres.
+            if (!_payments.Add((request.PaymentHash, request.PaymentMethodId)))
+                return Task.FromResult(SparkInvoiceCreditOutcome.AlreadyRecorded);
+
+            _credits.Add(request);
+
+            // And the winner of that insert backfills the prompt's preimage — but only if the prompt is still
+            // offering the BOLT11 that was paid. Crediting a superseded X must not stamp X's preimage onto the
+            // prompt now offering Y, which would have LUD-21 verify hand a payer a proof for an invoice they did
+            // not pay.
+            if (request.Preimage is not null
+                && _prompts.TryGetValue(request.InvoiceId, out var prompt)
+                && prompt.Preimage is null
+                && string.Equals(prompt.PaymentHash, request.PaymentHash, StringComparison.Ordinal))
+            {
+                prompt.Preimage = request.Preimage;
+            }
+
+            return Task.FromResult(SparkInvoiceCreditOutcome.CreditedNow);
         }
-
-        if (PromptMissingFor.Contains(request.PaymentHash))
-            return Task.FromResult(SparkInvoiceCreditOutcome.PromptMissing);
-
-        // The primary key decides, exactly as it does in Postgres.
-        if (!_payments.Add((request.PaymentHash, request.PaymentMethodId)))
-            return Task.FromResult(SparkInvoiceCreditOutcome.AlreadyRecorded);
-
-        Credits.Add(request);
-
-        // And the winner of that insert backfills the prompt's preimage — but only if the prompt is still
-        // offering the BOLT11 that was paid. Crediting a superseded X must not stamp X's preimage onto the
-        // prompt now offering Y, which would have LUD-21 verify hand a payer a proof for an invoice they did not
-        // pay.
-        if (request.Preimage is not null
-            && _prompts.TryGetValue(request.InvoiceId, out var prompt)
-            && prompt.Preimage is null
-            && string.Equals(prompt.PaymentHash, request.PaymentHash, StringComparison.Ordinal))
-        {
-            prompt.Preimage = request.Preimage;
-        }
-
-        return Task.FromResult(SparkInvoiceCreditOutcome.CreditedNow);
     }
 }

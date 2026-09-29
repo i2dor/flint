@@ -572,16 +572,20 @@ public class StablecoinPaymentServiceTests
     [Fact]
     public async Task A_network_listed_before_networks_needed_an_icon_is_refused_without_asking_the_provider()
     {
+        // The listed option matches a live route exactly, so only the icon rule stands between it and a quote.
+        const string contract = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85";
         var setup = Create();
         var invoice = Invoice(setup);
-        invoice.Prompts[StablecoinPayments.Usdc.PaymentMethodId].Networks.Add(
-            new StablecoinNetworkOption { Chain = "optimism", Name = "Optimism", ChainId = "10" });
-        setup.Sdk.CrossChainReceiveRoutes.Add(
-            FakeSparkSdkClient.ReceiveRoute("optimism", "10", "USDC", "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6));
+        invoice.Prompts[StablecoinPayments.Usdc.PaymentMethodId].Networks.Add(new StablecoinNetworkOption
+        {
+            Chain = "optimism", Name = "Optimism", ChainId = "10", ContractAddress = contract
+        });
+        setup.Sdk.CrossChainReceiveRoutes.Add(FakeSparkSdkClient.ReceiveRoute("optimism", "10", "USDC", contract, 6));
 
         var result = await setup.Service.QuoteAsync("invoice-1", StablecoinPayments.Usdc.PaymentMethodId, "optimism", Ct);
 
         Assert.Null(result.Quote);
+        Assert.Equal("This invoice does not take USDC on that network.", result.Error);
         Assert.Empty(setup.Sdk.CrossChainReceiveCalls);
     }
 

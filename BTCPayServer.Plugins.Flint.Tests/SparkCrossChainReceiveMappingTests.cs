@@ -153,23 +153,34 @@ public class SparkCrossChainReceiveMappingTests
     }
 
     [Fact]
-    public async Task A_failed_read_keeps_the_last_list_and_is_not_retried_for_a_minute()
+    public async Task A_failed_read_keeps_the_last_list_and_is_retried_only_after_a_minute()
     {
         var writes = new WriteLog();
         var sdk = new FakeSparkSdkClient(writes);
         var time = new StubTimeProvider(DateTimeOffset.UtcNow);
         var cache = new StablecoinRouteCache(time, NullLogger<StablecoinRouteCache>.Instance);
         var fresh = await cache.GetAsync("store-1", sdk, TimeSpan.FromSeconds(5), Ct);
+        int Reads() => writes.Entries.Count(e => e == "sdk:cc-receive-routes");
 
         time.Advance(StablecoinPayments.RouteCacheTtl + TimeSpan.FromSeconds(1));
         sdk.FailCrossChainReceiveRoutesWith = new SdkException.NetworkException("@v1=unreachable");
         var stale = await cache.GetAsync("store-1", sdk, TimeSpan.FromSeconds(5), Ct);
+        time.Advance(StablecoinRouteCache.FailureBackoff - TimeSpan.FromSeconds(1));
         var again = await cache.GetAsync("store-1", sdk, TimeSpan.FromSeconds(5), Ct);
 
         Assert.Same(fresh, stale);
         Assert.Same(fresh, again);
-        // One read on the way in, one failed refresh, and no stampede after it.
-        Assert.Equal(2, writes.Entries.Count(e => e == "sdk:cc-receive-routes"));
+        // One read on the way in, one failed refresh, and no stampede for the rest of the backoff.
+        Assert.Equal(2, Reads());
+
+        // Past the backoff the provider is asked again, so one blip does not pin checkout to a stale list.
+        time.Advance(TimeSpan.FromSeconds(2));
+        sdk.FailCrossChainReceiveRoutesWith = null;
+        sdk.CrossChainReceiveRoutes.RemoveAll(r => r.Chain != "tron");
+        var recovered = await cache.GetAsync("store-1", sdk, TimeSpan.FromSeconds(5), Ct);
+
+        Assert.Equal(3, Reads());
+        Assert.Equal("tron", Assert.Single(recovered!).Chain);
     }
 
     #endregion

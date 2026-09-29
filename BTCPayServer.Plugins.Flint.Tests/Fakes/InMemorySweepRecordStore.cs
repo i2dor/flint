@@ -243,8 +243,9 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
     /// <remarks>
     /// Hand-written, and therefore able to drop a column silently — which it did: every Wave 7 field was missing
     /// here at first, so a cross-chain row round-tripped through this store as a cooperative exit and the engine
-    /// could not tell which recovery strategy it needed. <c>InMemorySweepRecordStoreTests</c> now enumerates the
-    /// properties by reflection and fails when one is missed, so it cannot happen again quietly.
+    /// could not tell which recovery strategy it needed. The store contract's
+    /// <c>A_record_round_trips_with_every_field</c> now sets every property by reflection and fails when a round
+    /// trip loses one, so it cannot happen again quietly.
     /// </remarks>
     internal static SweepRecord Copy(SweepRecord source) => new()
     {

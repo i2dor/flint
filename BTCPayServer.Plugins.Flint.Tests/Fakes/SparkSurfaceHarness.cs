@@ -195,7 +195,7 @@ public sealed class SparkSurfaceHarness
             .Add(VictimStore, VictimNode);
 
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
-        var settings = new FakeSparkStoreSettingsStore(wiring, writeLog);
+        var settings = new FakeSparkStoreSettingsStore(writeLog);
 
         // The victim is a going concern: Spark configured, its own payment key, its own node config.
         settings.Settings[VictimStore] = new SparkSettings

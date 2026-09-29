@@ -431,6 +431,98 @@ public class SparkPluginStartupTests
     }
 
     /// <summary>
+    /// The exit explorer's direct client, as the factory builds it, refuses to dial an address that is never an
+    /// explorer — whatever the URL said.
+    /// </summary>
+    /// <remarks>
+    /// The explorer URL is an operator setting and the exit page asks it on every view, so this client is the
+    /// one outbound request an admin can aim anywhere. Resolved from the real container rather than from a
+    /// hand-built <c>SocketsHttpHandler</c>: a copy of the handler would stay green if the registration in
+    /// <c>SparkPlugin</c> lost its connect filter, which is the only place the filter does anything.
+    /// </remarks>
+    [Theory]
+    [InlineData("169.254.169.254")] // the cloud metadata service, the target that matters
+    [InlineData("224.0.0.1")]
+    public async Task The_exit_explorer_client_refuses_to_dial_an_address_that_is_never_an_explorer(string host)
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetAsync($"http://{host}:80/api", TestContext.Current.CancellationToken));
+        Assert.Contains("never a block explorer", ex.ToString());
+    }
+
+    /// <summary>
+    /// The same client still reaches loopback, where a self-hosted esplora lives, and hands a redirect back
+    /// rather than following it.
+    /// </summary>
+    /// <remarks>
+    /// Both halves matter. The filter must not grow to refuse loopback and private ranges — a local esplora is
+    /// the privacy-preserving choice the override exists for — and a 3xx must stay a response: followed, it
+    /// would let a public host send the server somewhere the checks on the setting never saw.
+    /// </remarks>
+    [Fact]
+    public async Task The_exit_explorer_client_reaches_loopback_and_does_not_follow_a_redirect()
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        // Bound to port 0 and kept open, so no other test can take the port between choosing it and listening.
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serve = ServeRedirectAsync(listener, port, stop.Token);
+
+        try
+        {
+            using var response = await client.GetAsync(
+                $"http://127.0.0.1:{port}/", TestContext.Current.CancellationToken);
+            Assert.Equal(System.Net.HttpStatusCode.Redirect, response.StatusCode);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            listener.Stop();
+            // Observed, but never allowed to replace the assertion's own failure.
+            await serve.ContinueWith(_ => { }, TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>
+    /// Answers every connection: <c>/</c> with a 302 to <c>/followed</c>, anything else with a 200, so a client
+    /// that follows the redirect fails the status assertion rather than hanging.
+    /// </summary>
+    private static async Task ServeRedirectAsync(
+        System.Net.Sockets.TcpListener listener, int port, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var connection = await listener.AcceptTcpClientAsync(cancellationToken);
+            var stream = connection.GetStream();
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync(cancellationToken) ?? "";
+            while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellationToken)))
+            {
+                // Headers: nothing here needs them.
+            }
+
+            var response = requestLine.StartsWith("GET / ", StringComparison.Ordinal)
+                ? $"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/followed\r\n"
+                : "HTTP/1.1 200 OK\r\n";
+            var bytes = System.Text.Encoding.ASCII.GetBytes(response + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(bytes, cancellationToken);
+        }
+    }
+
+    private static HttpClient ExitExplorerClient(SparkTestHost host) =>
+        host.Resolve(
+            $"IHttpClientFactory.CreateClient({SparkExitFundingExplorer.HttpClientName})",
+            provider => provider.GetRequiredService<IHttpClientFactory>()
+                .CreateClient(SparkExitFundingExplorer.HttpClientName));
+
+    /// <summary>
     /// BTCPay's own services plus the plugin's, in one container, with a hard timeout on every resolution.
     /// </summary>
     /// <remarks>

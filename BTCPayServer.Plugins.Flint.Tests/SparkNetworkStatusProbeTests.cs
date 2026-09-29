@@ -1,5 +1,4 @@
 using BTCPayServer.Plugins.Flint.Sdk;
-using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -11,13 +10,10 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The never-throw tests run against the real static SDK call. Where the native library loads it performs a
-/// network call and returns something; where it does not, it returns null. Either is a pass — what must not
-/// happen is an exception reaching the status action.
-/// </para>
-/// <para>
-/// The cache tests drive the probe seam with a fake clock, because the behaviour worth pinning is the cache
-/// policy — call counts and TTL boundaries — not the SDK call itself, which the plugin cannot fake.
+/// Every test drives the probe seam with a fake clock rather than the real static SDK call, which is a network
+/// round trip to a third party and has no place in the default run. The behaviour worth pinning is what the
+/// probe does with that call's outcome — a throw kept from the status action, call counts and TTL boundaries —
+/// not the SDK call itself, which the plugin cannot fake.
 /// </para>
 /// </remarks>
 public class SparkNetworkStatusProbeTests
@@ -27,26 +23,38 @@ public class SparkNetworkStatusProbeTests
     [Fact]
     public async Task A_failing_probe_reports_unknown_rather_than_throwing()
     {
-        // Runs against the real probe. Where the native library loads it performs a network call and returns
-        // something; where it does not, it returns null. Either is a pass — what must not happen is an exception
-        // reaching the status action.
-        var probe = new SparkNetworkStatusProbe(new CapturingLogger<SparkNetworkStatusProbe>());
+        // The FFI boundary can throw anything; what must not happen is that exception reaching the status action.
+        var probe = Create(_ => throw new InvalidOperationException("the SDK threw"), new FakeClock().UtcNow);
 
-        var status = await probe.TryGetAsync(CancellationToken.None);
-
-        Assert.True(status is null || status.Status.Length > 0);
+        Assert.Null(await probe.TryGetAsync(Ct));
     }
 
-    [Fact]
-    public async Task A_cancelled_probe_still_returns_rather_than_throwing()
+    /// <remarks>
+    /// Two different paths: a request already cancelled never gets past the single-flight gate, while one
+    /// cancelled after it is in is the probe's own <see cref="OperationCanceledException"/>, which only the
+    /// catch around the SDK call keeps from the status action.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_cancelled_probe_still_returns_rather_than_throwing(bool cancelledDuringTheCall)
     {
-        var probe = new SparkNetworkStatusProbe(new CapturingLogger<SparkNetworkStatusProbe>());
         using var cts = new CancellationTokenSource();
-        await cts.CancelAsync();
+        var probed = false;
+        var probe = Create(async ct =>
+        {
+            probed = true;
+            await cts.CancelAsync();
+            ct.ThrowIfCancellationRequested();
+            return Operational();
+        }, new FakeClock().UtcNow);
+        if (!cancelledDuringTheCall)
+            await cts.CancelAsync();
 
         var status = await probe.TryGetAsync(cts.Token);
 
-        Assert.True(status is null || status.Status.Length > 0);
+        Assert.Null(status);
+        Assert.Equal(cancelledDuringTheCall, probed);
     }
 
     [Theory]

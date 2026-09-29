@@ -46,6 +46,20 @@ public class SparkErrorsTests
         }
     }
 
+    /// <summary>The exit's CPFP shortfall names the amount the funding address needs, in sats.</summary>
+    /// <remarks>
+    /// The variant carries the amount in a named field rather than <c>v1</c>, so without its own arm it would fall
+    /// through to the synthesised message and the operator would lose the one number they have to act on.
+    /// </remarks>
+    [Fact]
+    public void Describe_gives_the_CPFP_shortfall_as_the_sats_the_funding_address_needs()
+    {
+        var described = SparkErrors.Describe(new SdkException.InsufficientCpfpFunds(1_234));
+
+        Assert.Contains("at least 1,234 sat", described);
+        Assert.DoesNotContain("@v1=", described);
+    }
+
     /// <summary>A disposed SDK instance is described in plain words, not with the SDK's own text.</summary>
     /// <remarks>
     /// This once failed now and then in a full parallel run, with "Spark reported an error that could not be shown

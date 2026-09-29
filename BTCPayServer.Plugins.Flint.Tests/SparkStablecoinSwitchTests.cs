@@ -55,8 +55,11 @@ public class SparkStablecoinSwitchTests
     {
         var h = SparkSurfaceHarness.Create(configureAttackerStore: false, mainnet: true);
 
-        await h.Mvc.Stablecoins(Store, enabled: true, CancellationToken.None);
+        var result = await h.Mvc.Stablecoins(Store, enabled: true, CancellationToken.None);
 
+        var redirect = Assert.IsType<RedirectToActionResult>(result);
+        Assert.Equal(nameof(SparkController.Setup), redirect.ActionName);
+        Assert.Equal(Store, redirect.RouteValues?["storeId"]);
         Assert.Empty(h.Stablecoins.StoreConfig.Enabled);
     }
 

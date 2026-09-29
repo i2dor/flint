@@ -84,7 +84,11 @@ public class LNPaymentMethodSetupTabheadTests
         // The legitimate flow — authorised store and model agree — must keep working unchanged.
         var html = await SetupTabViewRenderer.RenderTabheadAsync(harness.Service, authorisedStoreId: WalletStore, WalletStore);
 
-        // And it is the real pill: the script that fills core's connection-string field is present.
-        Assert.Contains("<script", html);
+        // And it is the real pill: the script that fills core's connection-string field carries this store's own
+        // connection string — spelled out here rather than built by the formatter, so the value Save writes is
+        // pinned, not just the presence of a script.
+        Assert.Contains(
+            $"const sparkConnectionString = \"type=flint;store-id={WalletStore};key={PaymentKey}\";",
+            html);
     }
 }
