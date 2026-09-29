@@ -30,12 +30,6 @@ public sealed class FakeSparkStoreRuntime : ISparkStoreRuntime
     /// <summary>Every store an import of the queue was asked for, in order.</summary>
     public List<string> ImportRequests { get; } = [];
 
-    /// <summary>
-    /// Where an export from the page is stored when it succeeds; null stores nothing. The production rules
-    /// for when it is stored live in <c>SparkService</c> and are tested there.
-    /// </summary>
-    public IExitStateBackupStore? Backups { get; set; }
-
     public Task<ExitStateImportReport> ImportPendingExitStateAsync(
         string storeId, CancellationToken cancellationToken = default)
     {
@@ -51,13 +45,9 @@ public sealed class FakeSparkStoreRuntime : ISparkStoreRuntime
 
         try
         {
+            // Never stored: the production rules for when an export is stored live in SparkService and are
+            // tested there.
             var exported = await client.ExportUnilateralExitStateAsync(cancellationToken);
-            if (exported.Length > 0 && Backups is not null)
-            {
-                await Backups.WriteAsync(storeId, exported, null, cancellationToken);
-                return new ExitStateExportResult(exported, true);
-            }
-
             return new ExitStateExportResult(exported, false);
         }
         catch (Exception ex)
@@ -102,30 +92,23 @@ public sealed class FakeSparkNetworkStatusProbe : ISparkNetworkStatusProbe
 }
 
 /// <summary>
-/// Grants or refuses every policy uniformly.
+/// Grants every policy.
 /// </summary>
 /// <remarks>
-/// Uniform on purpose. The store-scoping tests need authorisation to <em>succeed</em>, because the hole being
+/// Granting on purpose. The store-scoping tests need authorisation to <em>succeed</em>, because the hole being
 /// tested is precisely the one where authorisation succeeds against the caller's own store and the action then
 /// operates on a different one. A fake that refused would make those tests pass for the wrong reason.
 /// </remarks>
 public sealed class FakeAuthorizationService : IAuthorizationService
 {
-    private readonly bool _succeed;
-
-    public FakeAuthorizationService(bool succeed = true)
-    {
-        _succeed = succeed;
-    }
-
     public Task<AuthorizationResult> AuthorizeAsync(
         ClaimsPrincipal user,
         object? resource,
         IEnumerable<IAuthorizationRequirement> requirements) =>
-        Task.FromResult(_succeed ? AuthorizationResult.Success() : AuthorizationResult.Failed());
+        Task.FromResult(AuthorizationResult.Success());
 
     public Task<AuthorizationResult> AuthorizeAsync(ClaimsPrincipal user, object? resource, string policyName) =>
-        Task.FromResult(_succeed ? AuthorizationResult.Success() : AuthorizationResult.Failed());
+        Task.FromResult(AuthorizationResult.Success());
 }
 
 /// <summary>
