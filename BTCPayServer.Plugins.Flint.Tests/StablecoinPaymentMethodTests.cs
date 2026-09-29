@@ -53,27 +53,14 @@ public class StablecoinPaymentMethodTests
         Assert.Equal(0m, prompt.PaymentMethodFee);
     }
 
+    /// <remarks>
+    /// The payment half only: a prompt's round trip is owned by the test below, which goes through the invoice
+    /// blob BTCPay actually stores rather than through the handler's serializer alone.
+    /// </remarks>
     [Fact]
-    public void Prompt_and_payment_details_round_trip_through_the_handlers_serializer()
+    public void Payment_details_round_trip_through_the_handlers_serializer()
     {
         var handler = Handler();
-        var details = new StablecoinPromptDetails
-        {
-            Networks = [new StablecoinNetworkOption { Chain = "base", Name = "Base", ContractAddress = "0xabc" }],
-            Quote = new StablecoinActiveQuote
-            {
-                QuoteId = "q1", Chain = "base", ChainName = "Base", DepositAddress = "0xdep", Amount = "10.08",
-                PaymentRequest = "ethereum:0xabc@8453/transfer?address=0xdep&uint256=10080000",
-                ExpiresAt = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000), Due = 10m, Fee = 0.08m
-            }
-        };
-
-        var parsed = (StablecoinPromptDetails)handler.ParsePaymentPromptDetails(JToken.FromObject(details, handler.Serializer));
-
-        Assert.Equal("base", Assert.Single(parsed.Networks).Chain);
-        Assert.Equal("10.08", parsed.Quote!.Amount);
-        Assert.Equal(0.08m, parsed.Quote.Fee);
-
         var payment = new StablecoinPaymentDetails
         {
             QuoteId = "q1", Chain = "tron", Asset = "USDT", DepositAddress = "Tdep", DestinationAsset = "BTC",
@@ -91,7 +78,7 @@ public class StablecoinPaymentMethodTests
         // NBitcoin converters write every date inside the prompt's details as Unix seconds. A handler serializer
         // without those converters wrote an ISO date, could not read back the integer BTCPay stored, and threw from
         // inside BTCPay's Greenfield invoice endpoint — which BTCPay 2.4 answers by disabling the plugin and
-        // restarting the server. The handler's own round trip, above, never saw it.
+        // restarting the server. A round trip through the handler's serializer alone never saw it.
         var handler = Handler();
         var expires = DateTimeOffset.FromUnixTimeSeconds(1_790_267_071);
         var details = Details();
