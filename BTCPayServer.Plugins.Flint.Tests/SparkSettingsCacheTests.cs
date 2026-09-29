@@ -233,69 +233,128 @@ public class SparkSettingsCacheTests
     }
 
     /// <summary>
-    /// Every property is copied, checked by reflection so adding one without extending Clone fails here.
+    /// Every stored property is copied, nested sections included and deep, checked by reflection so adding one
+    /// without extending a <c>Clone</c> fails here.
     /// </summary>
     /// <remarks>
-    /// A hand-written list would have to be remembered, which is the thing that gets forgotten. A property
-    /// missing from <c>Clone</c> is a setting that silently reverts to its default on the next read — and for
-    /// <c>ProtectedMnemonic</c> that would be a store whose wallet stops starting.
+    /// <para>
+    /// A hand-written list would have to be remembered, which is the thing that gets forgotten — this test's own
+    /// list had already missed <c>UnilateralExit</c>. A property missing from <c>Clone</c> is a setting that
+    /// silently reverts to its default on the next read — and for <c>ProtectedMnemonic</c> that would be a store
+    /// whose wallet stops starting.
+    /// </para>
+    /// <para>
+    /// Every stored property gets its own value, different from its default, so a dropped property and two
+    /// properties copied into each other's slots both fail. Each section is walked the same way, which covers
+    /// the section's own <c>Clone</c>, and must not be the source's instance: shallow would defeat the point, as
+    /// every edit that matters lands on a section rather than on a scalar.
+    /// </para>
     /// </remarks>
     [Fact]
     public void Clone_copies_every_property()
     {
-        var properties = typeof(SparkSettings)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanRead)
-            .ToList();
+        var source = new SparkSettings();
+        var seed = 0;
+        Fill(source, ref seed);
 
-        Assert.NotEmpty(properties);
-        Assert.All(properties, p => Assert.True(
-            p.CanWrite,
-            $"SparkSettings.{p.Name} has no setter this test can vary, so Clone() could drop it unnoticed."));
-
-        var source = new SparkSettings
-        {
-            ProtectedMnemonic = "protected-blob",
-            SeedSource = SeedSource.HotWallet,
-            PaymentKey = "a-payment-key",
-            ApiKeyOverride = "an-api-key",
-            Sweep = new SweepSettings { Enabled = true, StaticAddress = "bcrt1qoriginal" },
-            Deposits = new SparkDepositSettings { MaxManualClaimFeeSats = 4_242 },
-            StableBalance = new StableBalanceSettings { Enabled = true, Label = "ORIGINAL" }
-        };
-
-        var clone = source.Clone();
-
-        Assert.Equal(source.ProtectedMnemonic, clone.ProtectedMnemonic);
-        Assert.Equal(source.SeedSource, clone.SeedSource);
-        Assert.Equal(source.PaymentKey, clone.PaymentKey);
-        Assert.Equal(source.ApiKeyOverride, clone.ApiKeyOverride);
-        Assert.Equal(source.Sweep.Enabled, clone.Sweep.Enabled);
-        Assert.Equal(source.Sweep.StaticAddress, clone.Sweep.StaticAddress);
-        Assert.Equal(source.Deposits.MaxManualClaimFeeSats, clone.Deposits.MaxManualClaimFeeSats);
-        Assert.Equal(source.StableBalance.Enabled, clone.StableBalance.Enabled);
-        Assert.Equal(source.StableBalance.Label, clone.StableBalance.Label);
+        AssertCopied(source, source.Clone(), nameof(SparkSettings));
     }
 
-    [Fact]
-    public void Clone_is_deep_over_the_nested_settings()
+    /// <summary>
+    /// The properties a <c>Clone</c> has to carry: every public one with a setter, plus any get-only
+    /// auto-property.
+    /// </summary>
+    /// <remarks>
+    /// Computed properties (<c>EffectiveLabel</c> and the like) have no backing field and nothing to copy; if
+    /// Clone dropped what one reads, the check on that stored property catches it. A get-only auto-property is
+    /// included on purpose: it holds state that Clone cannot assign, so it fails the setter check below rather
+    /// than being skipped by a filter.
+    /// </remarks>
+    private static List<PropertyInfo> StoredProperties(Type type) =>
+        type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+            .Where(p => p.CanWrite
+                        || type.GetField($"<{p.Name}>k__BackingField",
+                            BindingFlags.NonPublic | BindingFlags.Instance) is not null)
+            .ToList();
+
+    /// <summary>A settings section: one of the plugin's own classes, cloned deep rather than copied as a value.</summary>
+    private static bool IsSection(Type type) =>
+        type.IsClass && type != typeof(string) && type.Assembly == typeof(SparkSettings).Assembly;
+
+    private static void Fill(object target, ref int seed)
     {
-        // Shallow would defeat the point: every edit that matters lands on one of these three, not on a scalar.
-        var source = new SparkSettings
+        var type = target.GetType();
+        var defaults = Activator.CreateInstance(type)!;
+        var properties = StoredProperties(type);
+        Assert.NotEmpty(properties);
+
+        foreach (var property in properties)
         {
-            Sweep = new SweepSettings { MaxFeePercent = 1 },
-            Deposits = new SparkDepositSettings { MaxManualClaimFeeSats = 1 },
-            StableBalance = new StableBalanceSettings { MaxSlippageBps = 1 }
-        };
+            Assert.True(
+                property.CanWrite,
+                $"{type.Name}.{property.Name} has no setter this test can vary, so Clone() could drop it unnoticed.");
 
-        var clone = source.Clone();
-        clone.Sweep.MaxFeePercent = 49;
-        clone.Deposits.MaxManualClaimFeeSats = 99_999;
-        clone.StableBalance.MaxSlippageBps = 500;
+            if (IsSection(property.PropertyType))
+            {
+                var section = Activator.CreateInstance(property.PropertyType)!;
+                Fill(section, ref seed);
+                property.SetValue(target, section);
+                continue;
+            }
 
-        Assert.Equal(1, source.Sweep.MaxFeePercent);
-        Assert.Equal(1, source.Deposits.MaxManualClaimFeeSats);
-        Assert.Equal(1u, source.StableBalance.MaxSlippageBps);
+            var value = DistinctValueFor(type, property, property.GetValue(defaults), ++seed);
+            Assert.False(
+                Equals(value, property.GetValue(defaults)),
+                $"{type.Name}.{property.Name}: the value chosen equals the default, so a dropped copy would pass.");
+            property.SetValue(target, value);
+        }
+    }
+
+    private static void AssertCopied(object source, object clone, string path)
+    {
+        Assert.False(ReferenceEquals(source, clone), $"{path} is the source's own instance, not a copy.");
+
+        foreach (var property in StoredProperties(source.GetType()))
+        {
+            var expected = property.GetValue(source);
+            var actual = property.GetValue(clone);
+
+            if (IsSection(property.PropertyType))
+            {
+                AssertCopied(expected!, actual!, $"{path}.{property.Name}");
+                continue;
+            }
+
+            Assert.True(
+                Equals(expected, actual),
+                $"{path}.{property.Name} was not copied by Clone(): expected {expected}, got {actual}.");
+        }
+    }
+
+    /// <summary>A value for this property that no other property shares and that differs from its default.</summary>
+    private static object DistinctValueFor(Type owner, PropertyInfo property, object? defaultValue, int seed)
+    {
+        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+
+        if (type == typeof(bool))
+            return !(bool)(defaultValue ?? false);
+        if (type == typeof(long))
+            return 1_000_000L + seed;
+        if (type == typeof(uint))
+            return 1_000u + (uint)seed;
+        if (type == typeof(double))
+            return 0.25d + seed;
+        if (type == typeof(string))
+            return $"distinct-{owner.Name}-{property.Name}";
+        if (type.IsEnum)
+        {
+            return Enum.GetValues(type).Cast<object>().First(value => !Equals(value, defaultValue));
+        }
+
+        throw new NotSupportedException(
+            $"{owner.Name}.{property.Name} is a {type.Name}, which this test does not know how to vary. Add a case "
+            + "above so Clone() stays covered.");
     }
 
     [Fact]
