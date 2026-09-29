@@ -1,5 +1,5 @@
 using System.IO;
-using System.Runtime.CompilerServices;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -26,12 +26,8 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// </remarks>
 public class SparkSetupCustodyWarningTests
 {
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
-
     private static string SetupView => Path.Combine(
-        RepositoryRoot, "BTCPayServer.Plugins.Flint", "Views", "Spark", "Setup.cshtml");
+        RepoPaths.Plugin, "Views", "Spark", "Setup.cshtml");
 
     [Fact]
     public void The_setup_page_names_the_server_operator_as_a_custodian()

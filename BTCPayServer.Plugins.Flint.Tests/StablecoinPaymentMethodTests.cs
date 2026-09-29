@@ -247,8 +247,7 @@ public class StablecoinPaymentMethodTests
         // its own: this pins the pieces it cannot work without. It once fell back to its own copy of a quote the
         // invoice had stopped offering — after a short payment settled that quote — and kept a payer sending to it.
         var view = File.ReadAllText(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
-            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+            RepoPaths.Plugin, "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
 
         Assert.Contains("local.id !== this.withdrawnId", view);
         Assert.Contains("id !== this.localBasis", view);
@@ -262,8 +261,7 @@ public class StablecoinPaymentMethodTests
         // URI names the token contract first, and pasted where only an address is read, the contract becomes the
         // recipient and the payment is gone.
         var view = File.ReadAllText(Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", "BTCPayServer.Plugins.Flint",
-            "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
+            RepoPaths.Plugin, "Views", "Shared", "Spark", "StablecoinCheckout.cshtml"));
         var qr = System.Text.RegularExpressions.Regex.Match(
             view, "<div class=\"qr-container[^>]*>\\s*<div>\\s*<qrcode[^>]*>", System.Text.RegularExpressions.RegexOptions.Singleline);
 

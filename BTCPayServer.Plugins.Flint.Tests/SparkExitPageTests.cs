@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Text;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Plugins.Flint.Controllers;
@@ -1379,16 +1378,7 @@ public class SparkExitPageTests
 
     /// <summary>The exit template's own text, for the assertions no unrendered view model can carry.</summary>
     private static string ExitTemplate() => File.ReadAllText(
-        Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint", "Views", "Spark", "Exit.cshtml"));
-
-    /// <summary>
-    /// Repository root, from this file's compile-time path — the same trick
-    /// <see cref="ViewComponentCompatibilityTests"/> uses, and for the same reason: the output directory's depth
-    /// below the project is an MSBuild detail.
-    /// </summary>
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
+        Path.Combine(RepoPaths.Plugin, "Views", "Spark", "Exit.cshtml"));
 
     #endregion
 }

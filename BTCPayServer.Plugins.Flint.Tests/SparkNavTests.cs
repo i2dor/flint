@@ -1,10 +1,10 @@
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using BTCPayServer.Components.MainNav;
 using BTCPayServer.Data;
 using BTCPayServer.Models.StoreViewModels;
 using BTCPayServer.Plugins.Flint.Controllers;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using BTCPayServer.Plugins.Flint.Views;
 using Microsoft.AspNetCore.Mvc;
 using Xunit;
@@ -31,19 +31,9 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// </remarks>
 public class SparkNavTests
 {
-    private static string PluginDirectory => Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint");
+    private static string NavView => Path.Combine(RepoPaths.Plugin, "Views", "Shared", "Spark", "SparkNav.cshtml");
 
-    private static string NavView => Path.Combine(PluginDirectory, "Views", "Shared", "Spark", "SparkNav.cshtml");
-
-    private static string PageViewsDirectory => Path.Combine(PluginDirectory, "Views", "Spark");
-
-    /// <summary>
-    /// Repository root, derived from this file's compile-time path — see the note on the same member in
-    /// <see cref="ViewComponentCompatibilityTests"/>.
-    /// </summary>
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
+    private static string PageViewsDirectory => Path.Combine(RepoPaths.Plugin, "Views", "Spark");
 
     /// <summary>
     /// No model core could hand the extension point makes the store-id resolution throw.
