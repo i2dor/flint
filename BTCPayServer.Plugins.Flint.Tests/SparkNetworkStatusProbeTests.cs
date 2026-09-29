@@ -29,16 +29,32 @@ public class SparkNetworkStatusProbeTests
         Assert.Null(await probe.TryGetAsync(Ct));
     }
 
-    [Fact]
-    public async Task A_cancelled_probe_still_returns_rather_than_throwing()
+    /// <remarks>
+    /// Two different paths: a request already cancelled never gets past the single-flight gate, while one
+    /// cancelled after it is in is the probe's own <see cref="OperationCanceledException"/>, which only the
+    /// catch around the SDK call keeps from the status action.
+    /// </remarks>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_cancelled_probe_still_returns_rather_than_throwing(bool cancelledDuringTheCall)
     {
-        var probe = Create(async _ => Operational(), new FakeClock().UtcNow);
         using var cts = new CancellationTokenSource();
-        await cts.CancelAsync();
+        var probed = false;
+        var probe = Create(async ct =>
+        {
+            probed = true;
+            await cts.CancelAsync();
+            ct.ThrowIfCancellationRequested();
+            return Operational();
+        }, new FakeClock().UtcNow);
+        if (!cancelledDuringTheCall)
+            await cts.CancelAsync();
 
         var status = await probe.TryGetAsync(cts.Token);
 
         Assert.Null(status);
+        Assert.Equal(cancelledDuringTheCall, probed);
     }
 
     [Theory]
