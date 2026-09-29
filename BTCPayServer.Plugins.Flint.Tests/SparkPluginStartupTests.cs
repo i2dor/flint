@@ -468,37 +468,12 @@ public class SparkPluginStartupTests
         using var container = SparkTestHost.Create(_output);
         using var client = ExitExplorerClient(container);
 
-        using var listener = new System.Net.HttpListener();
-        var port = FreeLoopbackPort();
-        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        // Bound to port 0 and kept open, so no other test can take the port between choosing it and listening.
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
         listener.Start();
-        var serve = Task.Run(async () =>
-        {
-            while (listener.IsListening)
-            {
-                System.Net.HttpListenerContext context;
-                try
-                {
-                    context = await listener.GetContextAsync();
-                }
-                catch (Exception) when (!listener.IsListening)
-                {
-                    return;
-                }
-
-                if (context.Request.Url?.AbsolutePath == "/")
-                {
-                    context.Response.StatusCode = 302;
-                    context.Response.RedirectLocation = $"http://127.0.0.1:{port}/followed";
-                }
-                else
-                {
-                    context.Response.StatusCode = 200;
-                }
-
-                context.Response.Close();
-            }
-        }, TestContext.Current.CancellationToken);
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serve = ServeRedirectAsync(listener, port, stop.Token);
 
         try
         {
@@ -508,8 +483,36 @@ public class SparkPluginStartupTests
         }
         finally
         {
+            await stop.CancelAsync();
             listener.Stop();
-            await serve;
+            // Observed, but never allowed to replace the assertion's own failure.
+            await serve.ContinueWith(_ => { }, TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>
+    /// Answers every connection: <c>/</c> with a 302 to <c>/followed</c>, anything else with a 200, so a client
+    /// that follows the redirect fails the status assertion rather than hanging.
+    /// </summary>
+    private static async Task ServeRedirectAsync(
+        System.Net.Sockets.TcpListener listener, int port, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var connection = await listener.AcceptTcpClientAsync(cancellationToken);
+            var stream = connection.GetStream();
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync(cancellationToken) ?? "";
+            while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellationToken)))
+            {
+                // Headers: nothing here needs them.
+            }
+
+            var response = requestLine.StartsWith("GET / ", StringComparison.Ordinal)
+                ? $"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/followed\r\n"
+                : "HTTP/1.1 200 OK\r\n";
+            var bytes = System.Text.Encoding.ASCII.GetBytes(response + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(bytes, cancellationToken);
         }
     }
 
@@ -518,15 +521,6 @@ public class SparkPluginStartupTests
             $"IHttpClientFactory.CreateClient({SparkExitFundingExplorer.HttpClientName})",
             provider => provider.GetRequiredService<IHttpClientFactory>()
                 .CreateClient(SparkExitFundingExplorer.HttpClientName));
-
-    private static int FreeLoopbackPort()
-    {
-        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-        probe.Start();
-        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
-        probe.Stop();
-        return port;
-    }
 
     /// <summary>
     /// BTCPay's own services plus the plugin's, in one container, with a hard timeout on every resolution.
