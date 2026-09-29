@@ -73,7 +73,8 @@ public sealed class SparkNetworkStatusProbe : ISparkNetworkStatusProbe
     }
 
     /// <summary>
-    /// Test seam: the SDK call and the clock, so cache semantics are testable without a network.
+    /// Test seam: the SDK call and the clock, so cache semantics and the never-throw guard are testable without
+    /// a network.
     /// </summary>
     internal SparkNetworkStatusProbe(
         ILogger<SparkNetworkStatusProbe> logger,
@@ -113,7 +114,18 @@ public sealed class SparkNetworkStatusProbe : ISparkNetworkStatusProbe
             if (_utcNow() < FromTicks(Volatile.Read(ref _expiresUtcTicks)))
                 return _cached;
 
-            var status = await _probe(_logger, cancellationToken).ConfigureAwait(false);
+            SparkNetworkStatus? status;
+            try
+            {
+                status = await _probe(_logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // The last line of defence against a throw from the FFI boundary: a status page must not 500.
+                _logger.LogDebug(ex, "Could not read the Spark network status");
+                status = null;
+            }
+
             _cached = status;
             // Volatile.Write after the value write: a reader that sees the new expiry also sees the new
             // status (release ordering), never the reverse.
@@ -131,35 +143,26 @@ public sealed class SparkNetworkStatusProbe : ISparkNetworkStatusProbe
     private static async Task<SparkNetworkStatus?> ProbeCoreAsync(
         ILogger logger, CancellationToken cancellationToken)
     {
-        // Kept static and exception-free by the same rules as before: the deadline degrades a slow
-        // endpoint to null, and the catch is the last line of defence against a throw from the FFI boundary.
-        try
-        {
-            var status = await SparkDeadline
-                .OrNullAsync(
-                    // No proxy: the plugin configures none anywhere else either, and this probe must reach the
-                    // same network the wallets do.
-                    BreezSdkSparkMethods.GetSparkStatus(new GetSparkStatusRequest(proxy: null)),
-                    Deadline,
-                    () => logger.LogDebug(
-                        "Reading the Spark network status exceeded {Seconds}s", Deadline.TotalSeconds),
-                    cancellationToken)
-                .ConfigureAwait(false);
+        // The deadline degrades a slow endpoint to null; a throw is caught around the call in TryGetAsync.
+        var status = await SparkDeadline
+            .OrNullAsync(
+                // No proxy: the plugin configures none anywhere else either, and this probe must reach the
+                // same network the wallets do.
+                BreezSdkSparkMethods.GetSparkStatus(new GetSparkStatusRequest(proxy: null)),
+                Deadline,
+                () => logger.LogDebug(
+                    "Reading the Spark network status exceeded {Seconds}s", Deadline.TotalSeconds),
+                cancellationToken)
+            .ConfigureAwait(false);
 
-            if (status is null)
-                return null;
-
-            return new SparkNetworkStatus(
-                status.status.ToString(),
-                // Unix seconds, as a u64. Clamped rather than trusted: a malformed value from a third-party
-                // endpoint must not throw out of a status page.
-                ToTimestamp(status.lastUpdated));
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Could not read the Spark network status");
+        if (status is null)
             return null;
-        }
+
+        return new SparkNetworkStatus(
+            status.status.ToString(),
+            // Unix seconds, as a u64. Clamped rather than trusted: a malformed value from a third-party
+            // endpoint must not throw out of a status page.
+            ToTimestamp(status.lastUpdated));
     }
 
 
