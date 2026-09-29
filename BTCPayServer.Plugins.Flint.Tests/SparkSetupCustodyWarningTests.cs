@@ -20,8 +20,10 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// The warning mirrors BTCPay core's own wallet-generation form, which shows a non-admin the same warning for
 /// an on-chain seed: it is shown to everyone except a <c>ServerAdmin</c>, the one caller operating the host the
 /// seed is stored on. The read of the view source is deliberate — like the nav tests, this pins the copy that
-/// actually renders, not a model field that might not reach the page; render-time behaviour is covered by
-/// <see cref="SparkSurfaceHarness"/>'s admin/non-admin identities.
+/// actually renders, not a model field that might not reach the page. Nothing in the suite renders
+/// <c>Setup.cshtml</c>, so that the warning really is hidden from a <c>ServerAdmin</c> at render time rests on
+/// the conditional pinned below, not on a rendered page; <see cref="SparkSurfaceHarness"/>'s admin/non-admin
+/// identities drive the controllers' own gates, not this view.
 /// </para>
 /// </remarks>
 public class SparkSetupCustodyWarningTests

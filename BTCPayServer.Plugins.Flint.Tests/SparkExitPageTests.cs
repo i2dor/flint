@@ -36,8 +36,9 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// carry rather than smooth over.
 /// </para>
 /// <para>
-/// The third is the template, asserted as text because no test in this suite renders a view (see
-/// <see cref="ViewComponentCompatibilityTests"/> for why, and what it costs). What is checked there is
+/// The third is the template, asserted as text. <see cref="LocalRegtest.RenderExitScreensTests"/> does execute
+/// it, but as a review tool: it proves each state renders, not what any of them says, and every other test here
+/// works on the model a view would receive. What is checked there is
 /// load-bearing and would not fail anything else: signed hex sits behind
 /// <c>CanModifyStoreSettings</c>, the funding shortfall is judged by the largest single output rather than the
 /// total, and no state of the page is a dead end whose only control is the one its own copy forbids.
