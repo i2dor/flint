@@ -15,7 +15,8 @@ namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 /// persisted the settings.</description></item>
 /// <item><description><see cref="NextSetDeclinesWith"/> — the quiet failure. The real implementation stores
 /// the settings and reports that the wallet declined to start, without any exception: a seed another store
-/// already owns, an unsupported chain, a seed this server cannot decrypt.</description></item>
+/// already owns, an unsupported chain, a seed this server cannot decrypt. The old wallet is torn down either
+/// way, when constructed with a <see cref="FakeSparkStoreRuntime"/>.</description></item>
 /// <item><description><b>A write replaces the store's SDK handle, and disposes the old one</b>, when
 /// constructed with a <see cref="FakeSparkStoreRuntime"/>. <c>SparkService.Set</c> reconciles the running
 /// instance with the new settings by tearing the old one down and connecting a fresh one, so <em>any handle a
@@ -132,14 +133,20 @@ public sealed class FakeSparkStoreSettingsStore : ISparkStoreSettingsStore
             throw failure;
         }
 
+        // A decline leaves no wallet behind, as in SparkService, which tears the old instance down before it
+        // checks anything that can refuse. Leaving the old handle live let a caller that reused it pass.
         if (NextSetDeclinesWith is { } once)
         {
             NextSetDeclinesWith = null;
+            TeardownWallet(storeId);
             return SparkSettingsApplied.NotRunning(once);
         }
 
         if (AlwaysDeclineWith is { } always)
+        {
+            TeardownWallet(storeId);
             return SparkSettingsApplied.NotRunning(always);
+        }
 
         ReconnectWallet(storeId);
         return SparkSettingsApplied.Running;
