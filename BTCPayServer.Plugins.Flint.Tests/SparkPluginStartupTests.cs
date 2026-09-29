@@ -431,6 +431,104 @@ public class SparkPluginStartupTests
     }
 
     /// <summary>
+    /// The exit explorer's direct client, as the factory builds it, refuses to dial an address that is never an
+    /// explorer — whatever the URL said.
+    /// </summary>
+    /// <remarks>
+    /// The explorer URL is an operator setting and the exit page asks it on every view, so this client is the
+    /// one outbound request an admin can aim anywhere. Resolved from the real container rather than from a
+    /// hand-built <c>SocketsHttpHandler</c>: a copy of the handler would stay green if the registration in
+    /// <c>SparkPlugin</c> lost its connect filter, which is the only place the filter does anything.
+    /// </remarks>
+    [Theory]
+    [InlineData("169.254.169.254")] // the cloud metadata service, the target that matters
+    [InlineData("224.0.0.1")]
+    public async Task The_exit_explorer_client_refuses_to_dial_an_address_that_is_never_an_explorer(string host)
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetAsync($"http://{host}:80/api", TestContext.Current.CancellationToken));
+        Assert.Contains("never a block explorer", ex.ToString());
+    }
+
+    /// <summary>
+    /// The same client still reaches loopback, where a self-hosted esplora lives, and hands a redirect back
+    /// rather than following it.
+    /// </summary>
+    /// <remarks>
+    /// Both halves matter. The filter must not grow to refuse loopback and private ranges — a local esplora is
+    /// the privacy-preserving choice the override exists for — and a 3xx must stay a response: followed, it
+    /// would let a public host send the server somewhere the checks on the setting never saw.
+    /// </remarks>
+    [Fact]
+    public async Task The_exit_explorer_client_reaches_loopback_and_does_not_follow_a_redirect()
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        using var listener = new System.Net.HttpListener();
+        var port = FreeLoopbackPort();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        var serve = Task.Run(async () =>
+        {
+            while (listener.IsListening)
+            {
+                System.Net.HttpListenerContext context;
+                try
+                {
+                    context = await listener.GetContextAsync();
+                }
+                catch (Exception) when (!listener.IsListening)
+                {
+                    return;
+                }
+
+                if (context.Request.Url?.AbsolutePath == "/")
+                {
+                    context.Response.StatusCode = 302;
+                    context.Response.RedirectLocation = $"http://127.0.0.1:{port}/followed";
+                }
+                else
+                {
+                    context.Response.StatusCode = 200;
+                }
+
+                context.Response.Close();
+            }
+        }, TestContext.Current.CancellationToken);
+
+        try
+        {
+            using var response = await client.GetAsync(
+                $"http://127.0.0.1:{port}/", TestContext.Current.CancellationToken);
+            Assert.Equal(System.Net.HttpStatusCode.Redirect, response.StatusCode);
+        }
+        finally
+        {
+            listener.Stop();
+            await serve;
+        }
+    }
+
+    private static HttpClient ExitExplorerClient(SparkTestHost host) =>
+        host.Resolve(
+            $"IHttpClientFactory.CreateClient({SparkExitFundingExplorer.HttpClientName})",
+            provider => provider.GetRequiredService<IHttpClientFactory>()
+                .CreateClient(SparkExitFundingExplorer.HttpClientName));
+
+    private static int FreeLoopbackPort()
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+
+    /// <summary>
     /// BTCPay's own services plus the plugin's, in one container, with a hard timeout on every resolution.
     /// </summary>
     /// <remarks>
