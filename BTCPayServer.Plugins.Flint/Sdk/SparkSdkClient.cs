@@ -1397,7 +1397,7 @@ public sealed class SparkSdkClient : ISparkSdkClient
             nameof(kind), kind, "Unknown plugin unilateral-exit transaction kind.")
     };
 
-    internal static ExitTransactionStatus ToSdkExitTxStatus(SparkExitTxStatus status)
+    private static ExitTransactionStatus ToSdkExitTxStatus(SparkExitTxStatus status)
     {
         ArgumentNullException.ThrowIfNull(status);
 
