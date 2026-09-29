@@ -60,6 +60,7 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     private readonly Dictionary<string, Row> _pluginIndex = new(StringComparer.Ordinal);
     private readonly HashSet<(string Id, string PaymentMethodId)> _payments = [];
     private readonly Dictionary<string, Prompt> _prompts = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _creditedByBTCPayAfterNextLookup = new(StringComparer.Ordinal);
 
     private sealed record Row(string InvoiceId, string StoreId, string PaymentMethodId);
 
@@ -163,6 +164,21 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
     }
 
     /// <summary>
+    /// Has BTCPay's own listener record this payment just after the next lookup of it, so the plugin's insert
+    /// that follows loses the race on the primary key.
+    /// </summary>
+    /// <remarks>
+    /// The only way to reach that refusal from a single caller: a payment already recorded when the lookup
+    /// runs is reported as held, and the creditor stops before it inserts anything.
+    /// </remarks>
+    public FakeInvoiceCreditGateway CreditedByBTCPayAfterNextLookup(string paymentHash)
+    {
+        lock (_gate)
+            _creditedByBTCPayAfterNextLookup.Add(paymentHash);
+        return this;
+    }
+
+    /// <summary>
     /// Payments this plugin inserted against one BTCPay invoice. One recorded by
     /// <see cref="CreditedByBTCPay"/> is not among them.
     /// </summary>
@@ -191,11 +207,14 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
             {
                 return Task.FromResult<SparkInvoiceCreditMatch?>(null);
             }
-            return Task.FromResult<SparkInvoiceCreditMatch?>(new SparkInvoiceCreditMatch(
+            var match = new SparkInvoiceCreditMatch(
                 row.InvoiceId,
                 row.StoreId,
                 row.PaymentMethodId,
-                _payments.Contains((paymentHash, row.PaymentMethodId))));
+                _payments.Contains((paymentHash, row.PaymentMethodId)));
+            if (_creditedByBTCPayAfterNextLookup.Remove(paymentHash))
+                _payments.Add((paymentHash, row.PaymentMethodId));
+            return Task.FromResult<SparkInvoiceCreditMatch?>(match);
         }
     }
 
