@@ -160,6 +160,25 @@ public abstract class InvoiceRecordStoreContractTests
     }
 
     [Fact]
+    public async Task Settling_rejects_an_empty_payment_id_or_a_negative_amount_and_leaves_the_row_unpaid()
+    {
+        // The received amount is what gets credited to the merchant's BTCPay invoice, and the payment id is the
+        // only key the SDK can look the payment up by. A settlement missing either is a caller bug, and it must
+        // be refused before it is written rather than persisted as a paid row that is then credited.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord(), Ct);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "", 100_000, null, DateTimeOffset.UtcNow, Ct));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.SettleAsync(
+            StoreId, PaymentFixture.PaymentHash, "sdk-1", -1, null, DateTimeOffset.UtcNow, Ct));
+
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Equal(InvoiceRecordStatus.Unpaid, reread!.Status);
+        Assert.Null(reread.AmountReceivedMsat);
+    }
+
+    [Fact]
     public async Task Settling_a_cancelled_invoice_credits_it_like_any_other()
     {
         // A cancelled invoice is still payable on the service provider — Spark has no way to withdraw it —
@@ -340,9 +359,9 @@ public abstract class InvoiceRecordStoreContractTests
     [Fact]
     public async Task An_expired_but_unpaid_invoice_can_still_settle()
     {
-        // The capability the computed-expiry design exists to preserve, asserted at the store boundary rather
-        // than only through the non-production in-memory state machine. The service provider accepts a late
-        // payment and Spark cannot stop it, so refusing it here would leave real money unattributed.
+        // The capability the computed-expiry design exists to preserve, asserted at the store boundary where the
+        // transition lives. The service provider accepts a late payment and Spark cannot stop it, so refusing it
+        // here would leave real money unattributed.
         var store = await CreateStoreAsync();
         await store.AddAsync(NewRecord(
             createdAt: DateTimeOffset.UtcNow.AddHours(-2),
@@ -721,12 +740,19 @@ public abstract class InvoiceRecordStoreContractTests
     public async Task An_unsettled_invoice_is_never_labelled_abandoned()
     {
         // Same interlock as the credit stamp, and for the same reason: an unpaid row has no settlement to give
-        // up on, and stamping one would permanently suppress the credit of the payment that later arrives.
+        // up on, and stamping one would permanently suppress the credit of the payment that later arrives. A
+        // cancelled invoice is refused too: on Spark it is still payable.
         var store = await CreateStoreAsync();
         await store.AddAsync(NewRecord(), Ct);
-
         Assert.False(await store.MarkCreditAbandonedAsync(
             StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        Assert.True(await store.CancelAsync(StoreId, PaymentFixture.PaymentHash, Ct));
+        Assert.False(await store.MarkCreditAbandonedAsync(
+            StoreId, PaymentFixture.PaymentHash, DateTimeOffset.UtcNow, Ct));
+
+        var reread = await store.GetAsync(StoreId, PaymentFixture.PaymentHash, Ct);
+        Assert.Null(reread!.CreditAbandonedAt);
     }
 
     [Fact]

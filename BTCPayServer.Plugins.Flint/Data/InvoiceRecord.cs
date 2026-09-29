@@ -74,7 +74,7 @@ public class InvoiceRecord
 
     /// <summary>
     /// Persisted status. Natural expiry is deliberately <em>not</em> written here — see
-    /// <see cref="EffectiveStatus"/> and <see cref="TryCancel"/>.
+    /// <see cref="EffectiveStatus"/> and <see cref="IInvoiceRecordStore.CancelAsync"/>.
     /// </summary>
     public InvoiceRecordStatus Status { get; set; } = InvoiceRecordStatus.Unpaid;
 
@@ -149,9 +149,9 @@ public class InvoiceRecord
     /// <para>
     /// Natural expiry is computed rather than persisted, and that distinction is load-bearing.
     /// <see cref="InvoiceRecordStatus.Expired"/> in the database means "cancelled locally" (see
-    /// <see cref="TryCancel"/>), not "no longer payable". If natural expiry were persisted the same way, a
-    /// payment arriving a second after expiry — which the SSP will happily accept, because the Spark SDK
-    /// has no way to stop it — would be silently dropped instead of recorded.
+    /// <see cref="IInvoiceRecordStore.CancelAsync"/>), not "no longer payable". If natural expiry were
+    /// persisted the same way, a payment arriving a second after expiry — which the SSP will happily accept,
+    /// because the Spark SDK has no way to stop it — would be silently dropped instead of recorded.
     /// </para>
     /// <para>
     /// A <em>cancelled</em> invoice is reported <b>unpaid</b>, not expired. Cancellation cannot withdraw
@@ -183,102 +183,6 @@ public class InvoiceRecord
             InvoiceRecordStatus.Unpaid when now > ExpiresAt => InvoiceRecordStatus.Expired,
             _ => Status
         };
-
-    /// <summary>
-    /// Applies a settlement to this record, crediting a late payment of a cancelled invoice too.
-    /// </summary>
-    /// <remarks>
-    /// The Spark SDK has no invoice-cancellation primitive, so a cancelled invoice can still be paid on
-    /// the SSP's side. That payment is real money into the store's wallet, and refusing to credit it would
-    /// leave it unattributed: the funds in the Spark balance, swept later, with no BTCPay invoice ever
-    /// marked paid and no record of what the money was for. Cancellation therefore marks the invoice
-    /// locally (<see cref="TryCancel"/>) but never bars the settlement — the invoice is credited exactly
-    /// as if it had not been cancelled, and the payment's hash identifies which invoice that is.
-    /// </remarks>
-    public InvoiceSettlementOutcome TrySettle(
-        string sdkPaymentId,
-        long amountReceivedMsat,
-        string? preimage,
-        DateTimeOffset settledAt)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(sdkPaymentId);
-        ArgumentOutOfRangeException.ThrowIfNegative(amountReceivedMsat);
-
-        if (Status is InvoiceRecordStatus.Paid)
-        {
-            // Idempotent replay (event plus poll, or a restart mid-settlement). Backfill anything we
-            // did not know the first time, but never move the amount or the settlement timestamp:
-            // the first observation is the one BTCPay already credited.
-            SdkPaymentId ??= sdkPaymentId;
-            Preimage ??= preimage;
-            return InvoiceSettlementOutcome.AlreadySettled;
-        }
-
-        Status = InvoiceRecordStatus.Paid;
-        SdkPaymentId = sdkPaymentId;
-        AmountReceivedMsat = amountReceivedMsat;
-        Preimage = preimage ?? Preimage;
-        SettledAt = settledAt;
-        return InvoiceSettlementOutcome.Settled;
-    }
-
-    /// <summary>
-    /// Records that this settlement has reached its BTCPay invoice. Returns true only when this call is what
-    /// set the timestamp.
-    /// </summary>
-    /// <remarks>
-    /// Guarded on <see cref="InvoiceRecordStatus.Paid"/> as well as on the column still being empty, and both
-    /// guards matter. A row that is not paid has no settlement to credit, so marking one would permanently
-    /// suppress the credit of the payment that later arrives; and re-stamping an already-credited row would
-    /// move a timestamp that records when the merchant's invoice was actually paid. Same predicate as the
-    /// store's conditional UPDATE (<c>WHERE Status = Paid AND CreditedAt IS NULL</c>), which is what keeps the
-    /// two implementations of <see cref="IInvoiceRecordStore"/> observably identical.
-    /// </remarks>
-    public bool TryMarkCredited(DateTimeOffset creditedAt)
-    {
-        if (Status is not InvoiceRecordStatus.Paid || CreditedAt is not null)
-            return false;
-        CreditedAt = creditedAt;
-        return true;
-    }
-
-    /// <summary>
-    /// Records that this settlement will never reach a BTCPay invoice. Returns true only when this call is what
-    /// set the timestamp.
-    /// </summary>
-    /// <remarks>
-    /// Guarded on <see cref="InvoiceRecordStatus.Paid"/> and on <em>both</em> credit columns still being empty.
-    /// The <see cref="CreditedAt"/> guard is the one that matters: a row the previous pass credited must not
-    /// then be labelled abandoned, which would make the wallet look short by an amount that was in fact
-    /// accounted for. The self-guard is what makes the operator warning fire exactly once — the caller emits it
-    /// only when this returns true. Same predicate as the store's conditional UPDATE
-    /// (<c>WHERE Status = Paid AND CreditedAt IS NULL AND CreditAbandonedAt IS NULL</c>), which is what keeps
-    /// the two implementations of <see cref="IInvoiceRecordStore"/> observably identical.
-    /// </remarks>
-    public bool TryMarkCreditAbandoned(DateTimeOffset abandonedAt)
-    {
-        if (Status is not InvoiceRecordStatus.Paid || CreditedAt is not null || CreditAbandonedAt is not null)
-            return false;
-        CreditAbandonedAt = abandonedAt;
-        return true;
-    }
-
-    /// <summary>
-    /// Marks an unpaid invoice cancelled. Returns true only when this call is what changed the status.
-    /// </summary>
-    /// <remarks>
-    /// "Did anything change", not "is it cancelled now": an already-cancelled invoice returns false, and so
-    /// does a paid one. That is the same predicate the store's conditional UPDATE evaluates
-    /// (<c>WHERE Status = Unpaid</c>), which is what keeps the two implementations of
-    /// <see cref="IInvoiceRecordStore"/> observably identical.
-    /// </remarks>
-    public bool TryCancel()
-    {
-        if (Status is not InvoiceRecordStatus.Unpaid)
-            return false;
-        Status = InvoiceRecordStatus.Expired;
-        return true;
-    }
 }
 
 public enum InvoiceRecordStatus

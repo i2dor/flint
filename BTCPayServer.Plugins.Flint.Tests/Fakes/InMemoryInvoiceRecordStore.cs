@@ -3,13 +3,24 @@ using BTCPayServer.Plugins.Flint.Data;
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 
 /// <summary>
-/// In-memory <see cref="IInvoiceRecordStore"/> with the same semantics as the EF implementation, so the
-/// client's behaviour can be tested without Postgres.
+/// In-memory <see cref="IInvoiceRecordStore"/> whose transitions match the EF implementation's, so the
+/// client's behaviour can be tested without Postgres. <see cref="InvoiceRecordStoreContractTests"/> holds the
+/// two to the same contract.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Every method runs under one lock, so each compare-and-set is atomic as the EF store's conditional UPDATE is.
 /// The startup reconciliation pass and the SDK event path settle and credit the same row concurrently by
 /// design; unlocked, both could pass the same guard and both report that they made the change.
+/// </para>
+/// <para>
+/// One deliberate difference: reads hand out the <em>live</em> stored rows, where EF returns detached copies,
+/// so a record a caller holds changes under it when a later call settles or stamps that row. Tests rely on
+/// this to edit a stored row in place (see <see cref="Records"/>). It is acceptable because no caller treats a
+/// record it holds as the outcome of a transition — each acts on what the compare-and-set returns — and a
+/// concurrent double credit is stopped by BTCPay's <c>Payments</c> primary key, which the credit gateway's
+/// insert collides on, not by the record's fields.
+/// </para>
 /// </remarks>
 public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
 {
@@ -158,6 +169,8 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         DateTimeOffset settledAt,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrEmpty(sdkPaymentId);
+        ArgumentOutOfRangeException.ThrowIfNegative(amountReceivedMsat);
         if (FailSettleFor.Contains(paymentHash))
             throw new InvalidOperationException($"settle failure injected for {paymentHash}");
 
@@ -167,8 +180,23 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
             if (record is null || record.StoreId != storeId)
                 return Task.FromResult(new InvoiceSettlementResult(InvoiceSettlementOutcome.NotFound, null));
 
-            var outcome = record.TrySettle(sdkPaymentId, amountReceivedMsat, preimage, settledAt);
-            return Task.FromResult(new InvoiceSettlementResult(outcome, record));
+            if (record.Status is InvoiceRecordStatus.Paid)
+            {
+                // A replay: backfill only what is missing. The amount and the settlement time belong to
+                // whoever settled it first, because that is what BTCPay has already been told.
+                record.SdkPaymentId ??= sdkPaymentId;
+                record.Preimage ??= preimage;
+                return Task.FromResult(
+                    new InvoiceSettlementResult(InvoiceSettlementOutcome.AlreadySettled, record));
+            }
+
+            // Unpaid or cancelled alike: a cancelled invoice is still payable on Spark.
+            record.Status = InvoiceRecordStatus.Paid;
+            record.SdkPaymentId = sdkPaymentId;
+            record.AmountReceivedMsat = amountReceivedMsat;
+            record.Preimage = preimage ?? record.Preimage;
+            record.SettledAt = settledAt;
+            return Task.FromResult(new InvoiceSettlementResult(InvoiceSettlementOutcome.Settled, record));
         }
     }
 
@@ -181,9 +209,14 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         lock (_gate)
         {
             var record = _records.GetValueOrDefault(paymentHash);
-            if (record is null || record.StoreId != storeId)
+            if (record is null || record.StoreId != storeId ||
+                record.Status is not InvoiceRecordStatus.Paid || record.CreditedAt is not null)
+            {
                 return Task.FromResult(false);
-            return Task.FromResult(record.TryMarkCredited(creditedAt));
+            }
+
+            record.CreditedAt = creditedAt;
+            return Task.FromResult(true);
         }
     }
 
@@ -196,9 +229,14 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         lock (_gate)
         {
             var record = _records.GetValueOrDefault(paymentHash);
-            if (record is null || record.StoreId != storeId)
+            if (record is null || record.StoreId != storeId || record.Status is not InvoiceRecordStatus.Paid ||
+                record.CreditedAt is not null || record.CreditAbandonedAt is not null)
+            {
                 return Task.FromResult(false);
-            return Task.FromResult(record.TryMarkCreditAbandoned(abandonedAt));
+            }
+
+            record.CreditAbandonedAt = abandonedAt;
+            return Task.FromResult(true);
         }
     }
 
@@ -252,9 +290,11 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         lock (_gate)
         {
             var record = _records.GetValueOrDefault(paymentHash);
-            if (record is null || record.StoreId != storeId)
+            if (record is null || record.StoreId != storeId || record.Status is not InvoiceRecordStatus.Unpaid)
                 return Task.FromResult(false);
-            return Task.FromResult(record.TryCancel());
+
+            record.Status = InvoiceRecordStatus.Expired;
+            return Task.FromResult(true);
         }
     }
 
