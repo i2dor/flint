@@ -360,8 +360,8 @@ public sealed class SparkSurfaceHarness
     /// The default unilateral-exit service: a store with nothing in flight, and a refusal for every write.
     /// </summary>
     /// <remarks>
-    /// The exit flow is behind an environment switch and off for the whole suite bar the tests that turn it on,
-    /// so this exists to satisfy the constructor rather than to be exercised. It answers the read with an empty,
+    /// The tests that exercise the exit flow supply their own service, so this exists to satisfy the
+    /// constructor for every other surface test rather than to be exercised. It answers the read with an empty,
     /// unacknowledged store — the state every other page test is implicitly asserting nothing about — and
     /// refuses every write with a sentence that names itself, so a test that unexpectedly reaches one sees where
     /// it came from.

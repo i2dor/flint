@@ -1,4 +1,5 @@
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using BTCPayServer.Plugins.Flint.Tests.Postgres;
 using Xunit;
 
@@ -60,37 +61,27 @@ public abstract class UnilateralExitRecordStoreContractTests
         FundingKeyIndex = fundingKeyIndex
     };
 
+    /// <remarks>
+    /// Not an assertion that a property setter works: the round trip goes through the store, so on Postgres this
+    /// is what proves the entity is mapped, and in memory it proves the hand-written
+    /// <c>InMemoryUnilateralExitRecordStore.Copy</c> carries every column. Either omission reads back as a default
+    /// rather than failing, and on this table that means signed transactions nobody can broadcast any more. Every
+    /// property is set through <see cref="EveryProperty"/>, so a column added later is held to the same.
+    /// </remarks>
     [Fact]
     public async Task A_record_round_trips_with_every_field()
     {
-        // Not an assertion that a property setter works: the round trip goes through the store, so this is what
-        // proves the entity is mapped. An unmapped column reads back as its default, and on this table that means
-        // signed transactions nobody can broadcast any more.
-        var store = await CreateStoreAsync();
-        var record = NewRecord("exit-1", fundingKeyIndex: 7);
-        record.FundingUtxosJson = """[{"Txid":"aa","Vout":0,"ValueSat":44000,"PubkeyHex":"02ff"}]""";
-        record.TransactionsJson = """[{"Kind":"Fanout","Txid":"bb","TxHex":"0200"}]""";
-        record.LastError = "nothing in particular";
+        var properties = EveryProperty.Of<UnilateralExitRecord>(nameof(UnilateralExitRecord.IsActive));
+        var record = EveryProperty.Filled<UnilateralExitRecord>(properties);
+        // Still a distinct, non-default value — just this test's own, as the class remarks ask.
+        record.StoreId = _storeId;
 
+        var store = await CreateStoreAsync();
         Assert.True(await store.CreateAsync(record, Ct));
-        var read = await store.GetAsync(_storeId, "exit-1", Ct);
+        var read = await store.GetAsync(_storeId, record.Id, Ct);
 
         Assert.NotNull(read);
-        Assert.Equal(_storeId, read.StoreId);
-        Assert.Equal(UnilateralExitStatus.AwaitingFunding, read.Status);
-        Assert.Equal(Origin, read.CreatedUtc);
-        Assert.Equal(Origin, read.UpdatedUtc);
-        Assert.Equal(Destination, read.DestinationAddress);
-        Assert.Equal(12, read.FeeRateSatPerVbyte);
-        Assert.Equal("""["leaf-a","leaf-b"]""", read.LeafIdsJson);
-        Assert.Equal(480_000, read.RecoverableValueSat);
-        Assert.Equal(31_000, read.TotalFeeSat);
-        Assert.Equal(44_000, read.SingleUtxoFundingSat);
-        Assert.Equal(Funding, read.FundingAddress);
-        Assert.Equal(7, read.FundingKeyIndex);
-        Assert.Equal(record.FundingUtxosJson, read.FundingUtxosJson);
-        Assert.Equal(record.TransactionsJson, read.TransactionsJson);
-        Assert.Equal("nothing in particular", read.LastError);
+        EveryProperty.AssertCarried(record, read, properties, "the round trip");
     }
 
     [Fact]
@@ -381,6 +372,19 @@ public abstract class UnilateralExitRecordStoreContractTests
         Assert.Equal(5, await store.NextFundingKeyIndexAsync(_storeId, Ct));
         Assert.Equal(41, await store.NextFundingKeyIndexAsync(_otherStoreId, Ct));
     }
+}
+
+/// <summary>
+/// The contract against the in-memory implementation the service tests run on.
+/// </summary>
+/// <remarks>
+/// The disagreement that would matter most here — an update that quietly rewrites the destination or the leaf
+/// set an operator funded against — is one no service test could see.
+/// </remarks>
+public class InMemoryUnilateralExitRecordStoreTests : UnilateralExitRecordStoreContractTests
+{
+    protected override Task<IUnilateralExitRecordStore> CreateStoreAsync() =>
+        Task.FromResult<IUnilateralExitRecordStore>(new InMemoryUnilateralExitRecordStore());
 }
 
 /// <summary>The contract against the production EF store and a real Postgres database.</summary>

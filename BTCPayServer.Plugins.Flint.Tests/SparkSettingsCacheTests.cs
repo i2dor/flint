@@ -244,8 +244,11 @@ public class SparkSettingsCacheTests
     /// whose wallet stops starting.
     /// </para>
     /// <para>
-    /// Every stored property gets its own value, different from its default, so a dropped property and two
-    /// properties copied into each other's slots both fail. Each section is walked the same way, which covers
+    /// Every stored property gets a value different from its default, so a dropped property fails. Two properties
+    /// copied into each other's slots fail too wherever <see cref="DistinctValues"/> can tell them apart — every
+    /// number, string and enum here — but not two plain bools with the same default (<c>StableBalance</c>'s
+    /// <c>Enabled</c> and <c>DisclosureAcknowledged</c>, say): each has only one non-default value, so both are set
+    /// true and a swap between them reads the same. Each section is walked the same way, which covers
     /// the section's own <c>Clone</c>, and must not be the source's instance: shallow would defeat the point, as
     /// every edit that matters lands on a section rather than on a scalar.
     /// </para>
@@ -254,8 +257,7 @@ public class SparkSettingsCacheTests
     public void Clone_copies_every_property()
     {
         var source = new SparkSettings();
-        var seed = 0;
-        Fill(source, ref seed);
+        Fill(source, new DistinctValues());
 
         AssertCopied(source, source.Clone(), nameof(SparkSettings));
     }
@@ -282,7 +284,7 @@ public class SparkSettingsCacheTests
     private static bool IsSection(Type type) =>
         type.IsClass && type != typeof(string) && type.Assembly == typeof(SparkSettings).Assembly;
 
-    private static void Fill(object target, ref int seed)
+    private static void Fill(object target, DistinctValues values)
     {
         var type = target.GetType();
         var defaults = Activator.CreateInstance(type)!;
@@ -298,16 +300,12 @@ public class SparkSettingsCacheTests
             if (IsSection(property.PropertyType))
             {
                 var section = Activator.CreateInstance(property.PropertyType)!;
-                Fill(section, ref seed);
+                Fill(section, values);
                 property.SetValue(target, section);
                 continue;
             }
 
-            var value = DistinctValueFor(type, property, property.GetValue(defaults), ++seed);
-            Assert.False(
-                Equals(value, property.GetValue(defaults)),
-                $"{type.Name}.{property.Name}: the value chosen equals the default, so a dropped copy would pass.");
-            property.SetValue(target, value);
+            property.SetValue(target, values.For(property, property.GetValue(defaults)));
         }
     }
 
@@ -330,31 +328,6 @@ public class SparkSettingsCacheTests
                 Equals(expected, actual),
                 $"{path}.{property.Name} was not copied by Clone(): expected {expected}, got {actual}.");
         }
-    }
-
-    /// <summary>A value for this property that no other property shares and that differs from its default.</summary>
-    private static object DistinctValueFor(Type owner, PropertyInfo property, object? defaultValue, int seed)
-    {
-        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-
-        if (type == typeof(bool))
-            return !(bool)(defaultValue ?? false);
-        if (type == typeof(long))
-            return 1_000_000L + seed;
-        if (type == typeof(uint))
-            return 1_000u + (uint)seed;
-        if (type == typeof(double))
-            return 0.25d + seed;
-        if (type == typeof(string))
-            return $"distinct-{owner.Name}-{property.Name}";
-        if (type.IsEnum)
-        {
-            return Enum.GetValues(type).Cast<object>().First(value => !Equals(value, defaultValue));
-        }
-
-        throw new NotSupportedException(
-            $"{owner.Name}.{property.Name} is a {type.Name}, which this test does not know how to vary. Add a case "
-            + "above so Clone() stays covered.");
     }
 
     [Fact]

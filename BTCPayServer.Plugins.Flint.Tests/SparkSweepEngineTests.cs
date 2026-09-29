@@ -1479,19 +1479,6 @@ public class SparkSweepEngineTests
         Assert.DoesNotContain("CA-protected-blob", h.Logger.AllText);
     }
 
-    [Fact]
-    public async Task A_refusal_logs_its_reason_and_its_code()
-    {
-        var h = CreateHarness(addressSource: new FakeSweepAddressSource
-        {
-            Result = SweepAddressResult.NoWallet("This store has no Bitcoin wallet.")
-        });
-
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
-
-        Assert.Contains("refusing to sweep (NoDestination) — This store has no Bitcoin wallet.", h.Logger.AllText);
-    }
-
     [Theory]
     [MemberData(nameof(EveryRefusalShape))]
     public async Task Every_refusal_shape_logs_a_reason_and_records_its_code(
@@ -1508,7 +1495,8 @@ public class SparkSweepEngineTests
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.False(string.IsNullOrWhiteSpace(result.Reason));
-        Assert.Contains($"refusing to sweep ({expected})", h.Logger.AllText);
+        // The whole line, so the reason an operator reads in the log is the one the record and the caller got.
+        Assert.Contains($"refusing to sweep ({expected}) — {result.Reason}", h.Logger.AllText);
 
         var record = Assert.Single(h.Records.Records).Value;
         Assert.Equal(expected, record.RefusalCode);

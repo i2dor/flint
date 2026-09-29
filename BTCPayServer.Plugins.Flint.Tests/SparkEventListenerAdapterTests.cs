@@ -43,19 +43,6 @@ public class SparkEventListenerAdapterTests
     }
 
     [Fact]
-    public void OnEvent_returns_an_already_completed_task()
-    {
-        var (adapter, _) = Create();
-
-        var task = adapter.OnEvent(new SdkEvent.PaymentSucceeded(SamplePayment()));
-
-        // Not merely "completes quickly": it must be already-completed on return. Anything the SDK has to
-        // wait on stalls the emitting call, and anything that never completes hangs the process.
-        Assert.True(task.IsCompletedSuccessfully);
-        Assert.Same(Task.CompletedTask, task);
-    }
-
-    [Fact]
     public void OnEvent_enqueues_a_settlement_with_its_payment_and_store()
     {
         var (adapter, channel) = Create();

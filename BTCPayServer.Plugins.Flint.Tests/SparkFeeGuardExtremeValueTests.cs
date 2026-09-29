@@ -121,29 +121,6 @@ public class SparkFeeGuardExtremeValueTests
     }
 
     /// <summary>
-    /// And an infinite flat ceiling alongside it is no better.
-    /// </summary>
-    /// <remarks>
-    /// <c>MaxFeeFlatSats</c> is a <c>long</c>, so it cannot be infinite — but pairing the largest one there is
-    /// with an infinite percentage is the closest a stored blob can get to "no limit at all", and it is the
-    /// shape the Wave 4 mutation found once already.
-    /// </remarks>
-    [Fact]
-    public void An_infinite_percentage_beside_the_largest_flat_ceiling_still_refuses()
-    {
-        var settings = new SweepSettings
-        {
-            MaxFeePercent = double.PositiveInfinity,
-            MaxFeeFlatSats = long.MaxValue
-        };
-
-        var quote = new SparkOnchainQuote(
-            100_000, 60_000, FeesIncluded: true, new SparkOnchainFeeQuote("q", Origin, 60_000, 60_000, 60_000));
-
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, SparkSweepEngine.ApproveQuote(settings, quote)?.Code);
-    }
-
-    /// <summary>
     /// The same, on the cross-chain rail, which computes its ceiling differently.
     /// </summary>
     /// <remarks>
@@ -185,6 +162,31 @@ public class SparkFeeGuardExtremeValueTests
         Assert.Null(SparkSweepEngine.ApproveQuote(settings, quote));
         Assert.Null(SparkSweepEngine.ApproveCrossChainQuote(
             settings, SparkSendAmount.FromSats(500_000), Quote(1_000_000, 700_000), sweepableSats: 500_000));
+    }
+
+    /// <summary>
+    /// On the cross-chain rail, a percentage above the backstop is held at the backstop, not below it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Through the engine this line is not reachable</b>: the value guard's 10% band fires before the 50% line
+    /// ever could, so no end-to-end test can exercise it. It is kept because it is the guard that holds if the
+    /// value check is ever narrowed or bypassed, so it is asserted directly. The allowed half is what pins where
+    /// the line sits: a clamp tighter than the backstop would still refuse every extreme above.
+    /// </remarks>
+    [Fact]
+    public void A_cross_chain_percentage_above_the_backstop_is_held_at_the_backstop()
+    {
+        var settings = new SweepSettings { MaxFeePercent = 90 };
+        var amount = SparkSendAmount.FromSats(500_000);
+
+        // A 60% spread: inside the merchant's 90%, outside the 50% line.
+        Assert.Equal(
+            SweepRefusalCode.FeeAboveLimit,
+            SparkSweepEngine.ApproveCrossChainQuote(settings, amount, Quote(1_000_000, 400_000), 500_000)?.Code);
+
+        // And a 40% spread is inside both, so the line is a line.
+        Assert.Null(SparkSweepEngine.ApproveCrossChainQuote(
+            settings, amount, Quote(1_000_000, 600_000), 500_000));
     }
 
     /// <summary>

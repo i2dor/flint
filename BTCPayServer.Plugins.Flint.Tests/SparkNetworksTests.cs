@@ -79,17 +79,7 @@ public class SparkWalletKeyTests
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     [Fact]
-    public void The_same_seed_on_the_same_network_yields_the_same_key()
-    {
-        Assert.Equal(
-            Services.SparkService.DeriveWalletKey(Mnemonic, null, SdkNetwork.Mainnet),
-            Services.SparkService.DeriveWalletKey(Mnemonic, null, SdkNetwork.Mainnet));
-    }
-
-    [Theory]
-    [InlineData("  {0}\n")]
-    [InlineData("{0}")]
-    public void Cosmetic_differences_in_the_same_seed_do_not_change_the_key(string format)
+    public void Cosmetic_differences_in_the_same_seed_do_not_change_the_key()
     {
         // The guard exists to stop two live SDK instances landing on one wallet. Hashing the raw string would
         // let the same seed pasted with a trailing newline, an internal double space, a tab, or different
@@ -109,8 +99,8 @@ public class SparkWalletKeyTests
             .Distinct()
             .ToList();
 
+        // One key across every spelling, which is also the proof that deriving it is deterministic.
         Assert.Single(keys);
-        _ = format;
     }
 
     [Fact]
@@ -132,14 +122,6 @@ public class SparkWalletKeyTests
         Assert.Equal(
             Services.SparkService.DeriveWalletKey(nonsense, null, SdkNetwork.Mainnet),
             Services.SparkService.DeriveWalletKey($" not a valid mnemonic at   all\n", null, SdkNetwork.Mainnet));
-    }
-
-    [Fact]
-    public void Trailing_whitespace_does_not_change_the_key()
-    {
-        Assert.Equal(
-            Services.SparkService.DeriveWalletKey(Mnemonic, null, SdkNetwork.Mainnet),
-            Services.SparkService.DeriveWalletKey($"  {Mnemonic}\n", null, SdkNetwork.Mainnet));
     }
 
     [Fact]

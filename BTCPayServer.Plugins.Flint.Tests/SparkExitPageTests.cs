@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Text;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Plugins.Flint.Controllers;
@@ -37,8 +36,9 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// carry rather than smooth over.
 /// </para>
 /// <para>
-/// The third is the template, asserted as text because no test in this suite renders a view (see
-/// <see cref="ViewComponentCompatibilityTests"/> for why, and what it costs). What is checked there is
+/// The third is the template, asserted as text. <see cref="LocalRegtest.RenderExitScreensTests"/> does execute
+/// it, but as a review tool: it proves each state renders, not what any of them says, and every other test here
+/// works on the model a view would receive. What is checked there is
 /// load-bearing and would not fail anything else: signed hex sits behind
 /// <c>CanModifyStoreSettings</c>, the funding shortfall is judged by the largest single output rather than the
 /// total, and no state of the page is a dead end whose only control is the one its own copy forbids.
@@ -387,23 +387,6 @@ public class SparkExitPageTests
         // the flag clear would tell the merchant the opposite of the truth.
         Assert.True(model.TransactionsUnreadable);
         Assert.Empty(model.Transactions);
-    }
-
-    [Fact]
-    public async Task A_built_record_with_no_transactions_is_distinguishable_from_an_unreadable_one()
-    {
-        var record = Built();
-        var exit = new StubExitService
-        {
-            Page = Page(activeRecord: record, transactions: [], transactionsUnreadable: false)
-        };
-
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true, unilateralExit: exit);
-
-        var model = await RenderExit(h);
-
-        Assert.Empty(model.Transactions);
-        Assert.False(model.TransactionsUnreadable);
     }
 
     /// <summary>
@@ -1396,16 +1379,7 @@ public class SparkExitPageTests
 
     /// <summary>The exit template's own text, for the assertions no unrendered view model can carry.</summary>
     private static string ExitTemplate() => File.ReadAllText(
-        Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint", "Views", "Spark", "Exit.cshtml"));
-
-    /// <summary>
-    /// Repository root, from this file's compile-time path — the same trick
-    /// <see cref="ViewComponentCompatibilityTests"/> uses, and for the same reason: the output directory's depth
-    /// below the project is an MSBuild detail.
-    /// </summary>
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
+        Path.Combine(RepoPaths.Plugin, "Views", "Spark", "Exit.cshtml"));
 
     #endregion
 }

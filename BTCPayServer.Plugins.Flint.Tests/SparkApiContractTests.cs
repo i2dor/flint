@@ -357,9 +357,11 @@ public class SparkApiContractTests
     [Fact]
     public async Task Nothing_in_the_published_document_offers_a_unilateral_exit()
     {
-        // The exit-path policy, asserted against the artefact merchants and integrators read. Sweeps are cooperative
-        // exits only; a documented path, parameter, field or enum value suggesting otherwise would be a promise the
-        // plugin does not keep and must not start keeping by accident.
+        // The API's exit-path policy, asserted against the artefact merchants and integrators read. Every sweep the
+        // API can cause is a cooperative exit; the plugin's unilateral exit is deliberately UI-only, because it ends
+        // in signed transactions an operator broadcasts by hand after a disclosure an API client cannot be shown.
+        // A documented path, parameter, field or enum value suggesting otherwise would be a promise the API does
+        // not keep and must not start keeping by accident.
         //
         // Names and enum values only, deliberately. Prose is allowed to say the word — the drainWhenSweeping
         // description exists precisely to deny that "drain" means a unilateral exit, and a check that banned the

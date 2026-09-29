@@ -305,11 +305,11 @@ public class SparkStorePassSchedulerTests
         // continuation runs on the thread pool, so this is a real handoff and not a formality.
         release = true;
         hung.SetResult();
-        await WaitUntilAsync(async () =>
+        await Eventually.True(async () =>
         {
             var probe = await pass.RunAsync(["s1"], Visit, NeverFails, Ct);
             return probe.Visited == 1;
-        });
+        }, "the abandoned visit's mark was never cleared");
 
         Assert.Contains("enter:s1", log.Entries);
         Assert.True(log.Entries.Count(e => e == "enter:s1") >= 2);
@@ -387,19 +387,6 @@ public class SparkStorePassSchedulerTests
             cts.Token));
 
         Assert.Equal(["s1"], log.Entries);
-    }
-
-    private static async Task WaitUntilAsync(Func<Task<bool>> condition)
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            if (await condition())
-                return;
-            await Task.Delay(10, Ct);
-        }
-
-        Assert.Fail("the condition was never met within 5s");
     }
 }
 

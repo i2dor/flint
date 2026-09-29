@@ -83,6 +83,42 @@ public abstract class OutgoingPaymentStoreContractTests
         Assert.Equal(2, next.AttemptCount);
     }
 
+    /// <remarks>
+    /// Every column of a row that has been registered, reported and retried, read back through the store: on
+    /// Postgres that proves the entity is mapped, and in memory that the hand-written
+    /// <c>InMemoryOutgoingPaymentStore.Copy</c> carries every column. This store takes its fields as arguments
+    /// rather than as a record, so they cannot be set by reflection, but the read can still be checked by it: a
+    /// column dropped by either reads back as its default, so a property added later is held to the same. The
+    /// timestamps are whole microseconds in UTC, which is what <c>timestamptz</c> keeps.
+    /// </remarks>
+    [Fact]
+    public async Task A_reported_retry_reads_back_every_field()
+    {
+        var store = await CreateStoreAsync();
+        var firstAttemptAt = new DateTimeOffset(2026, 8, 4, 12, 0, 0, TimeSpan.Zero);
+        var reportedAt = firstAttemptAt.AddMinutes(3);
+        await store.RegisterAttemptAsync(
+            StoreId, PaymentFixture.PaymentHash, "key-1", Bolt11, firstAttemptAt, Ct);
+        Assert.True(await store.TryMarkReportedAsync(StoreId, PaymentFixture.PaymentHash, reportedAt, Ct));
+
+        var read = await store.RegisterAttemptAsync(
+            StoreId, PaymentFixture.PaymentHash, "key-1", Bolt11, firstAttemptAt.AddMinutes(5), Ct);
+
+        Assert.Equal(PaymentFixture.PaymentHash, read.PaymentHash);
+        Assert.Equal(StoreId, read.StoreId);
+        Assert.Equal("key-1", read.IdempotencyKey);
+        Assert.Equal(Bolt11, read.Bolt11);
+        // The first attempt's time, not the retry's.
+        Assert.Equal(firstAttemptAt, read.FirstAttemptAt);
+        Assert.Equal(2, read.AttemptCount);
+        Assert.Equal(reportedAt, read.ReportedAt);
+
+        var defaults = new OutgoingPaymentRecord();
+        Assert.All(EveryProperty.Of<OutgoingPaymentRecord>(), property => Assert.False(
+            Equals(property.GetValue(defaults), property.GetValue(read)),
+            $"OutgoingPaymentRecord.{property.Name} read back as its default, as a dropped column does."));
+    }
+
     [Fact]
     public async Task Reporting_an_unknown_payment_reports_false()
     {

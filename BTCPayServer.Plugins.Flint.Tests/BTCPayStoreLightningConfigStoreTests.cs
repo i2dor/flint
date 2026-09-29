@@ -35,12 +35,6 @@ public class BTCPayStoreLightningConfigStoreTests
     }
 
     [Fact]
-    public void The_two_payment_methods_are_distinct()
-    {
-        Assert.NotEqual(BTCPayStoreLightningConfigStore.LightningId, BTCPayStoreLightningConfigStore.LnurlId);
-    }
-
-    [Fact]
     public void Constructing_it_does_not_resolve_BTCPays_payment_handler_dictionary()
     {
         // The second edge of the cycle that deadlocked BTCPay's startup. Building

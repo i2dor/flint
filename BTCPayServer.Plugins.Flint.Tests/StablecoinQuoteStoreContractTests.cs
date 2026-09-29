@@ -80,6 +80,29 @@ public abstract class StablecoinQuoteStoreContractTests
         Assert.Null(read.SdkPaymentId);
     }
 
+    /// <remarks>
+    /// The round trip goes through the store, so on Postgres this proves the entity is mapped, and in memory it
+    /// proves the hand-written <c>InMemoryStablecoinQuoteStore.Copy</c> carries every column — the service tests
+    /// read every quote back through that copy, so one it dropped would be a field they silently ran without.
+    /// The settlement columns are set on the added row directly, which both stores persist as given.
+    /// </remarks>
+    [Fact]
+    public async Task A_quote_round_trips_with_every_field()
+    {
+        // Computed from the base-unit strings, which are covered themselves.
+        var properties = EveryProperty.Of<StablecoinQuote>(
+            nameof(StablecoinQuote.Asked),
+            nameof(StablecoinQuote.ExpectedReceived),
+            nameof(StablecoinQuote.ServiceFee));
+        var quote = EveryProperty.Filled<StablecoinQuote>(properties);
+
+        var store = await CreateStoreAsync();
+        await store.AddAsync(quote, Ct);
+        var read = Assert.Single(await store.ListForInvoiceAsync(quote.InvoiceId, Ct));
+
+        EveryProperty.AssertCarried(quote, read, properties, "the round trip");
+    }
+
     [Fact]
     public async Task Open_quotes_are_the_unsettled_ones_inside_the_window_for_one_store()
     {

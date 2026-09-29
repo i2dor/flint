@@ -93,6 +93,8 @@ public class StablecoinQuoteMatcherTests
     [Theory]
     [InlineData(10_100_001)]
     [InlineData(10_100_000)]
+    // Neither twin's amount: still the fingerprint's two quotes, not a near-miss for either.
+    [InlineData(10_000_000)]
     public void Two_quotes_with_one_fingerprint_are_not_told_apart_by_the_amount_paid(long paid)
     {
         // What the matcher once did, and how it credited the wrong invoice: twin quotes asked 10.1 and 10.100001, and
@@ -106,6 +108,8 @@ public class StablecoinQuoteMatcherTests
 
         Assert.Equal(StablecoinMatchKind.Ambiguous, match.Kind);
         Assert.Null(match.Quote);
+        // Both twins reported, so whoever resolves it by hand knows how many invoices are in question.
+        Assert.Equal(2, match.Candidates);
     }
 
     [Fact]
@@ -152,18 +156,6 @@ public class StablecoinQuoteMatcherTests
         Assert.True(StablecoinQuoteMatcher.FingerprintTaken(quotes, route, 10_000, 80_000));
         Assert.False(StablecoinQuoteMatcher.FingerprintTaken(quotes, route, 10_000, 80_001));
         Assert.False(StablecoinQuoteMatcher.FingerprintTaken(quotes, route with { Chain = "ethereum" }, 10_000, 80_000));
-    }
-
-    [Fact]
-    public void Two_quotes_with_one_fingerprint_and_an_inexact_payment_are_left_for_a_human()
-    {
-        var match = StablecoinQuoteMatcher.Match(
-            [Quote("a", 10_100_000), Quote("b", 10_100_001)],
-            Arrival(paid: 10_000_000));
-
-        Assert.Equal(StablecoinMatchKind.Ambiguous, match.Kind);
-        Assert.Null(match.Quote);
-        Assert.Equal(2, match.Candidates);
     }
 
     [Fact]

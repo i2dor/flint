@@ -431,6 +431,31 @@ public class SparkPluginStartupTests
     }
 
     /// <summary>
+    /// The cross-store Lightning configuration sweep is on BTCPay's scheduler, at its own interval.
+    /// </summary>
+    /// <remarks>
+    /// The sweep is the backstop for a cross-store configuration written outside HTTP, and BTCPay's launcher is
+    /// the only thing that runs it — its first pass at startup included, so <c>SparkService</c> does not. An
+    /// unregistered task fails nothing and leaves such a configuration live indefinitely. Read the way the
+    /// launcher reads it: every <see cref="BTCPayServer.HostedServices.ScheduledTask"/>, then the task type
+    /// resolved from the container.
+    /// </remarks>
+    [Fact]
+    public void The_cross_store_Lightning_configuration_sweep_is_scheduled()
+    {
+        using var host = SparkTestHost.Create(_output);
+
+        var scheduled = host.Resolve(
+            "IEnumerable<ScheduledTask> (what PeriodicTaskLauncherHostedService starts)",
+            provider => provider.GetServices<BTCPayServer.HostedServices.ScheduledTask>().ToList());
+
+        var sweep = Assert.Single(scheduled, task => task.PeriodicTaskType == typeof(SparkLightningConfigSweepTask));
+        Assert.Equal(Constants.ConfigSweepInterval, sweep.Every);
+        Assert.IsType<SparkLightningConfigSweepTask>(host.Resolve(
+            nameof(SparkLightningConfigSweepTask), provider => provider.GetService(sweep.PeriodicTaskType)));
+    }
+
+    /// <summary>
     /// The exit explorer's direct client, as the factory builds it, refuses to dial an address that is never an
     /// explorer — whatever the URL said.
     /// </summary>
