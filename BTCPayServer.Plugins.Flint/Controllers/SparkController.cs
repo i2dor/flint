@@ -10,6 +10,7 @@ using BTCPayServer.Data;
 using BTCPayServer.Models.StoreViewModels;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
+using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -1061,7 +1062,12 @@ public class SparkController : Controller
 
     [HttpGet("history")]
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
-    public async Task<IActionResult> WalletHistory([FromRoute] string storeId, CancellationToken cancellationToken)
+    public async Task<IActionResult> WalletHistory(
+        [FromRoute] string storeId,
+        [FromQuery] string? direction,
+        [FromQuery] int period = 0,
+        [FromQuery] int skip = 0,
+        CancellationToken cancellationToken = default)
     {
         if (!ResolveStore(storeId, out var store))
             return NotFound();
@@ -1071,8 +1077,37 @@ public class SparkController : Controller
         if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
-        var payments = await _sendPayment.ListAllAsync(storeId, 50, cancellationToken).ConfigureAwait(false);
-        return View(new SparkWalletHistoryViewModel { StoreId = storeId, Payments = payments });
+        const int pageSize = 25;
+        skip = Math.Max(0, skip);
+
+        SparkPaymentDirection? dir = direction switch
+        {
+            "send"    => SparkPaymentDirection.Send,
+            "receive" => SparkPaymentDirection.Receive,
+            _         => null
+        };
+
+        DateTimeOffset? from = period > 0
+            ? DateTimeOffset.UtcNow.AddDays(-period)
+            : null;
+
+        // Fetch one extra to detect whether a next page exists.
+        var raw = await _sendPayment.ListAllAsync(
+            storeId, dir, from, skip, pageSize + 1, cancellationToken).ConfigureAwait(false);
+
+        var hasMore = raw.Count > pageSize;
+        var payments = hasMore ? raw.Take(pageSize).ToList() : raw;
+
+        return View(new SparkWalletHistoryViewModel
+        {
+            StoreId   = storeId,
+            Payments  = payments,
+            Direction = dir,
+            Period    = period,
+            Skip      = skip,
+            Count     = pageSize,
+            HasMore   = hasMore
+        });
     }
 
     #endregion

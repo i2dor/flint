@@ -8,6 +8,11 @@
     BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
         new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
             Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
+
+    var dirParam   = Model.Direction switch { SparkPaymentDirection.Send => "send", SparkPaymentDirection.Receive => "receive", _ => "" };
+    var periodParam = Model.Period;
+    var prevSkip   = Math.Max(0, Model.Skip - Model.Count);
+    var nextSkip   = Model.Skip + Model.Count;
 }
 
 <div class="sticky-header">
@@ -16,9 +21,48 @@
 
 <partial name="_StatusMessage" />
 
+@* Direction filter *@
+<div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+    <div class="btn-group" role="group" aria-label="Filter by direction">
+        <a class="btn btn-sm @(Model.Direction == null ? "btn-primary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="" asp-route-period="@periodParam" asp-route-skip="0">
+            All
+        </a>
+        <a class="btn btn-sm @(Model.Direction == SparkPaymentDirection.Receive ? "btn-primary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="receive" asp-route-period="@periodParam" asp-route-skip="0">
+            Received
+        </a>
+        <a class="btn btn-sm @(Model.Direction == SparkPaymentDirection.Send ? "btn-primary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="send" asp-route-period="@periodParam" asp-route-skip="0">
+            Sent
+        </a>
+    </div>
+
+    <div class="btn-group" role="group" aria-label="Filter by period">
+        <a class="btn btn-sm @(Model.Period == 0 ? "btn-secondary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="@dirParam" asp-route-period="0" asp-route-skip="0">
+            All time
+        </a>
+        <a class="btn btn-sm @(Model.Period == 7 ? "btn-secondary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="@dirParam" asp-route-period="7" asp-route-skip="0">
+            7 days
+        </a>
+        <a class="btn btn-sm @(Model.Period == 30 ? "btn-secondary" : "btn-outline-secondary")"
+           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+           asp-route-direction="@dirParam" asp-route-period="30" asp-route-skip="0">
+            30 days
+        </a>
+    </div>
+</div>
+
 @if (Model.Payments.Count == 0)
 {
-    <p class="text-secondary">No completed payments yet.</p>
+    <p class="text-secondary">No completed payments found.</p>
 }
 else
 {
@@ -31,6 +75,7 @@ else
                     <th class="text-end">Amount (sat)</th>
                     <th class="text-end">Fee (sat)</th>
                     <th>Description / hash</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -64,10 +109,43 @@ else
                                 <span class="text-secondary">-</span>
                             }
                         </td>
+                        <td class="text-end text-nowrap">
+                            @if (!string.IsNullOrEmpty(p.Bolt11))
+                            {
+                                <button type="button" class="btn btn-link btn-sm p-0 text-secondary"
+                                        data-clipboard="@p.Bolt11"
+                                        title="Copy BOLT11 invoice">
+                                    <span class="fa fa-copy"></span>
+                                </button>
+                            }
+                        </td>
                     </tr>
                 }
             </tbody>
         </table>
     </div>
-    <div class="form-text">Showing the last @Model.Payments.Count payments.</div>
+
+    <div class="d-flex justify-content-between align-items-center mt-2">
+        <div class="form-text">
+            Showing @(Model.Skip + 1)-@(Model.Skip + Model.Payments.Count)@(Model.HasMore ? "+" : "").
+        </div>
+        <div class="d-flex gap-2">
+            @if (Model.Skip > 0)
+            {
+                <a class="btn btn-sm btn-outline-secondary"
+                   asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+                   asp-route-direction="@dirParam" asp-route-period="@periodParam" asp-route-skip="@prevSkip">
+                    &larr; Previous
+                </a>
+            }
+            @if (Model.HasMore)
+            {
+                <a class="btn btn-sm btn-outline-secondary"
+                   asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
+                   asp-route-direction="@dirParam" asp-route-period="@periodParam" asp-route-skip="@nextSkip">
+                    Next &rarr;
+                </a>
+            }
+        </div>
+    </div>
 }

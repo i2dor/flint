@@ -157,6 +157,9 @@ public sealed class SparkSendPaymentService(
 
     public async Task<IReadOnlyList<SparkPayment>> ListAllAsync(
         string storeId,
+        SparkPaymentDirection? direction,
+        DateTimeOffset? from,
+        int skip,
         int limit,
         CancellationToken cancellationToken)
     {
@@ -165,8 +168,10 @@ public sealed class SparkSendPaymentService(
             return [];
         return await sdk.ListPaymentsAsync(
             new SparkListPaymentsQuery(
-                Direction: null,
+                Direction: direction,
                 CompletedOnly: true,
+                From: from,
+                Offset: skip,
                 Limit: limit),
             cancellationToken).ConfigureAwait(false);
     }

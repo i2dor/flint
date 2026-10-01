@@ -4,6 +4,23 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9.1] - 2026-10-01
+
+### Added
+
+- **Wallet history: direction filter.** Three tabs (All / Received / Sent) let you narrow the list to
+  payments in one direction without leaving the page.
+
+- **Wallet history: period filter.** Buttons for All time / Last 7 days / Last 30 days restrict the list
+  to the chosen window.
+
+- **Wallet history: pagination.** The page now shows 25 payments at a time with Previous / Next controls.
+  An extra row is fetched in the background to determine whether a next page exists, so no extra round-trip
+  is needed to render the navigation buttons.
+
+- **Wallet history: BOLT11 copy button.** Each row with a stored BOLT11 invoice now shows a copy icon that
+  copies the invoice string to the clipboard.
+
 ## [0.1.9.0] - 2026-09-27
 
 ### Added
