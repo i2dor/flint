@@ -5,6 +5,14 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.2.1.3] - 2026-10-02
+
+### Fixed
+
+- CI: pin .NET SDK to 10.0.400 in `local-regtest.yml` and `ci.yml` to match `global.json` (`rollForward: disable`)
+- Tests: pass `null!` for `SparkSendPaymentService` in `SparkSurfaceHarness` test harness
+
+
 ## [1.2.1.1] - 2026-10-02
 
 ### Added
