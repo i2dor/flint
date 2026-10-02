@@ -5,6 +5,21 @@ All notable changes to this plugin are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.2.1.1] - 2026-10-02
+
+### Added
+
+- **Send payment** — send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
+- **Receive payment** — generate a BOLT11 invoice with optional amount and description; QR code shown inline.
+- **Wallet history** — paginated payment history with direction filter (All / Received / Sent), period filter
+  (All time / 7 days / 30 days), and one-click BOLT11 copy.
+
+### Fixed
+
+- Sweep engine: `GetInfo(ensureSynced: false)` after an explicit `SyncWallet` — `ensureSynced: true`
+  applies only to the SDK's first sync in a session and was leaving the balance stale.
+
+
 ## [1.2.1] — 2026-09-28
 
 The unilateral exit stops being an experiment behind a server switch and becomes a supported feature on every
