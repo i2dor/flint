@@ -84,7 +84,7 @@ public static class Constants
     /// bump (v2.4.2, then straight to v2.4.4) moved this constant and left the floor alone, which is exactly
     /// what the two being separate constants is for — a bump here must never silently drop every host below it.
     /// </remarks>
-    public const string BuiltAgainstBTCPayServerVersion = "2.4.4";
+    public const string BuiltAgainstBTCPayServerVersion = "2.4.5";
 
     /// <summary>
     /// The <c>type=</c> discriminator of our Lightning connection string.
