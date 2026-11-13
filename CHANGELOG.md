@@ -19,6 +19,16 @@ All notable changes to this plugin are recorded here. The format follows
 - Sweep engine: `GetInfo(ensureSynced: false)` after an explicit `SyncWallet`. `ensureSynced: true`
   applies only to the SDK's first sync in a session and was leaving the balance stale.
 
+## [1.3.1.1] - 2026-11-13
+
+### Added
+
+- **SparkLedger**: append-only ledger recording every Lightning receive, stablecoin receive, send, sweep,
+  and unilateral exit with amount, fee, timestamp, and SDK payment reference. Enables
+  `opening_balance + SUM(credits) - SUM(debits) = current_SDK_balance` reconciliation.
+- **Backfill endpoint**: `POST /api/v1/stores/{storeId}/spark/ledger/backfill?dryRun=true` replays
+  existing settled payments into the ledger. Dry-run is the default; each payment type is idempotent.
+
 ## [1.3.1] — 2026-10-14
 
 Two fixes to USDC/USDT payments from the 1.3.1 security review, Breez Spark SDK 0.26.1, and a README without its

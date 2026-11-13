@@ -40,7 +40,7 @@ public class SparkLightningClientTests
             store,
             broadcaster,
             new SparkInvoiceCreditor(
-                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
 
         var client = new SparkLightningClient(

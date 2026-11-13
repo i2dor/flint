@@ -93,7 +93,7 @@ public class SparkFundedRegtestTests
             // There is no BTCPay here, so no invoice to credit; an empty gateway keeps the settlement path
             // whole while leaving crediting to the tests that own it.
             new SparkInvoiceCreditor(
-                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
         var client = new SparkLightningClient(
             _wallet.StoreId,
@@ -413,6 +413,7 @@ public class SparkFundedRegtestTests
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             new FakeCrossChainValueOracle(),
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             TimeProvider.System,
             NullLogger<SparkSweepEngine>.Instance);
     }

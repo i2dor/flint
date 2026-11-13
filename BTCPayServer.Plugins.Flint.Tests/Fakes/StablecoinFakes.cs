@@ -368,7 +368,7 @@ public sealed class StablecoinHarness
         Log = new CapturingLogger<StablecoinPaymentService>();
         Routes = new StablecoinRouteCache(Time, NullLogger<StablecoinRouteCache>.Instance);
         Service = new StablecoinPaymentService(
-            Quotes, Invoices, StoreConfig, runtime, Routes, Oracle, Time, available, Log);
+            Quotes, Invoices, StoreConfig, runtime, Routes, Oracle, new InMemorySparkLedgerStore(), Time, available, Log);
     }
 
     public TimeProvider Time { get; }

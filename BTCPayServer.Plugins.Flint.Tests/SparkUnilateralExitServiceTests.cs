@@ -2950,6 +2950,7 @@ public class SparkUnilateralExitServiceTests
                 Protector,
                 ExplorerClient,
                 Backups,
+                new InMemorySparkLedgerStore(),
                 Network.RegTest,
                 Time,
                 NullLogger<SparkUnilateralExitService>.Instance);

@@ -601,6 +601,50 @@
                     }
                 ]
             }
+        },
+        "/api/v1/stores/{storeId}/spark/ledger/backfill": {
+            "post": {
+                "tags": [
+                    "Spark"
+                ],
+                "summary": "Backfill the SparkLedger from existing payment history",
+                "description": "Replays settled Lightning receives, stablecoin receives, sends, sweeps, and unilateral exits into the SparkLedger table. Each payment type is inserted only when no ledger entry already references it, so the command is safe to run more than once. Runs in dry-run mode by default: nothing is written and the response shows what would be inserted.",
+                "operationId": "Spark_BackfillLedger",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/StoreId"
+                    },
+                    {
+                        "name": "dryRun",
+                        "in": "query",
+                        "required": false,
+                        "description": "When true (the default) no rows are written; the response shows what would be created.",
+                        "schema": {
+                            "type": "boolean",
+                            "default": true
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A per-category count of skipped, created, and failed entries"
+                    },
+                    "403": {
+                        "description": "If you are authenticated but forbidden to modify the specified store"
+                    },
+                    "404": {
+                        "description": "The store was not found or Spark is not set up for this store"
+                    }
+                },
+                "security": [
+                    {
+                        "API_Key": [
+                            "btcpay.store.canmodifystoresettings"
+                        ],
+                        "Basic": []
+                    }
+                ]
+            }
         }
     },
     "components": {

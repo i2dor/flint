@@ -53,7 +53,7 @@ public class SparkSettlementReconcilerTests
         var reconciler = new SparkSettlementReconciler(
             store,
             broadcaster,
-            new SparkInvoiceCreditor(credits, store, NullLogger<SparkInvoiceCreditor>.Instance),
+            new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             log);
         return (reconciler, store, broadcaster, log, credits);
     }
@@ -76,7 +76,7 @@ public class SparkSettlementReconcilerTests
         var reconciler = new SparkSettlementReconciler(
             store,
             new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
-            new SparkInvoiceCreditor(credits, store, creditLog),
+            new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), creditLog),
             NullLogger<SparkSettlementReconciler>.Instance);
         return (reconciler, store, credits, creditLog);
     }
@@ -1149,7 +1149,7 @@ public class SparkReconcileStoresTests
             new SparkSettlementReconciler(
                 store,
                 new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
-                new SparkInvoiceCreditor(credits, store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
                 NullLogger<SparkSettlementReconciler>.Instance),
             store,
             credits);

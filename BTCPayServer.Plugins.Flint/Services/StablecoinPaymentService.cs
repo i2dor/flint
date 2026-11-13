@@ -130,6 +130,7 @@ public sealed class StablecoinPaymentService
     private readonly ISparkStoreRuntime _runtime;
     private readonly StablecoinRouteCache _routes;
     private readonly ICrossChainValueOracle _valueOracle;
+    private readonly ISparkLedgerStore _ledger;
     private readonly TimeProvider _time;
     private readonly ILogger<StablecoinPaymentService> _logger;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _storeGates = new(StringComparer.Ordinal);
@@ -147,6 +148,7 @@ public sealed class StablecoinPaymentService
         ISparkStoreRuntime runtime,
         StablecoinRouteCache routes,
         ICrossChainValueOracle valueOracle,
+        ISparkLedgerStore ledger,
         TimeProvider time,
         bool available,
         ILogger<StablecoinPaymentService> logger)
@@ -157,6 +159,7 @@ public sealed class StablecoinPaymentService
         _storeConfig = storeConfig;
         _runtime = runtime;
         _routes = routes;
+        _ledger = ledger;
         _time = time;
         Available = available;
         _logger = logger;
@@ -845,7 +848,7 @@ public sealed class StablecoinPaymentService
         if (settled is not null)
         {
             return settled.CreditedAt is null
-                ? await CreditAsync(settled, cancellationToken).ConfigureAwait(false)
+                ? await CreditAsync(settled, payment.AmountSats * 1000L, cancellationToken).ConfigureAwait(false)
                 : StablecoinReceiveOutcome.AlreadyCredited;
         }
 
@@ -888,7 +891,7 @@ public sealed class StablecoinPaymentService
             }
 
             return winner.CreditedAt is null
-                ? await CreditAsync(winner, cancellationToken).ConfigureAwait(false)
+                ? await CreditAsync(winner, payment.AmountSats * 1000L, cancellationToken).ConfigureAwait(false)
                 : StablecoinReceiveOutcome.AlreadyCredited;
         }
 
@@ -903,7 +906,7 @@ public sealed class StablecoinPaymentService
         var fresh = await _quotes
             .FindBySdkPaymentIdAsync(storeId, payment.SdkPaymentId, cancellationToken)
             .ConfigureAwait(false);
-        return await CreditAsync(fresh ?? quote, cancellationToken).ConfigureAwait(false);
+        return await CreditAsync(fresh ?? quote, payment.AmountSats * 1000L, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1013,7 +1016,10 @@ public sealed class StablecoinPaymentService
         string.Equals(quote.DestinationAsset, "BTC", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Records a settled quote's payment on its BTCPay invoice, and marks it recorded.</summary>
-    private async Task<StablecoinReceiveOutcome> CreditAsync(StablecoinQuote quote, CancellationToken cancellationToken)
+    private async Task<StablecoinReceiveOutcome> CreditAsync(
+        StablecoinQuote quote,
+        long? sdkAmountMsat,
+        CancellationToken cancellationToken)
     {
         if (quote.SdkPaymentId is not { } paymentId)
             return StablecoinReceiveOutcome.CreditFailed;
@@ -1092,7 +1098,36 @@ public sealed class StablecoinPaymentService
                 _logger.LogInformation(
                     "Store {StoreId}: recorded {Value} {Asset} (network cost {Fee}) on invoice {InvoiceId}",
                     quote.StoreId, value, quote.Asset, fee, quote.InvoiceId);
-                await _quotes.TryMarkCreditedAsync(quote.Id, _time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                var creditedAt = _time.GetUtcNow();
+                await _quotes.TryMarkCreditedAsync(quote.Id, creditedAt, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await _ledger.AppendAsync(new SparkLedgerEntry
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        StoreId = quote.StoreId,
+                        EntryType = SparkLedgerEntryType.StablecoinReceive,
+                        AmountMsat = sdkAmountMsat ?? 0,
+                        FeeMsat = 0,
+                        OccurredAt = quote.SettledAt ?? creditedAt,
+                        RecordedAt = creditedAt,
+                        SdkPaymentId = quote.SdkPaymentId,
+                        BtcPayInvoiceId = quote.InvoiceId,
+                        StablecoinQuoteId = quote.Id,
+                        StablecoinChain = quote.Chain,
+                        StablecoinAsset = quote.Asset,
+                        StablecoinPaidBaseUnits = quote.PaidBaseUnits,
+                        StablecoinExternalTxHash = quote.ExternalTxHash,
+                        IsBackfill = false,
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: stablecoin receive {SdkPaymentId} credited but ledger append failed; "
+                        + "backfill will recover the entry",
+                        quote.StoreId, quote.SdkPaymentId);
+                }
                 return StablecoinReceiveOutcome.Credited;
 
             case StablecoinCreditOutcome.AlreadyRecorded:
@@ -1335,7 +1370,7 @@ public sealed class StablecoinPaymentService
             .ConfigureAwait(false);
         foreach (var quote in pending)
         {
-            if (await CreditAsync(quote, cancellationToken).ConfigureAwait(false) is StablecoinReceiveOutcome.Credited)
+            if (await CreditAsync(quote, null, cancellationToken).ConfigureAwait(false) is StablecoinReceiveOutcome.Credited)
                 credited++;
         }
 

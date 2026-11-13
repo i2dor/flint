@@ -223,6 +223,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
     private readonly SparkExitFundingExplorer _explorer;
     private readonly Network _network;
     private readonly TimeProvider _timeProvider;
+    private readonly ISparkLedgerStore _ledger;
     private readonly ILogger<SparkUnilateralExitService> _logger;
 
     /// <summary>
@@ -253,6 +254,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         SparkMnemonicProtector mnemonicProtector,
         SparkExitFundingExplorer explorer,
         IExitStateBackupStore backups,
+        ISparkLedgerStore ledger,
         Network? network,
         TimeProvider timeProvider,
         ILogger<SparkUnilateralExitService> logger)
@@ -263,6 +265,7 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
         _mnemonicProtector = mnemonicProtector;
         _explorer = explorer;
         _backups = backups;
+        _ledger = ledger;
         _network = network ?? Network.Main;
         _timeProvider = timeProvider;
         _logger = logger;
@@ -1512,6 +1515,27 @@ public sealed class SparkUnilateralExitService : ISparkUnilateralExitService
                 _logger.LogWarning(
                     "Store {StoreId}: unilateral exit {ExitId} marked completed on the operator's word, without a "
                     + "check confirming it finished",
+                    storeId, record.Id);
+            }
+
+            try
+            {
+                await _ledger.AppendAsync(new SparkLedgerEntry
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    StoreId = storeId,
+                    EntryType = SparkLedgerEntryType.UnilateralExit,
+                    AmountMsat = record.RecoverableValueSat * 1000L,
+                    FeeMsat = record.TotalFeeSat * 1000L,
+                    OccurredAt = record.UpdatedUtc,
+                    RecordedAt = record.UpdatedUtc,
+                    IsBackfill = false,
+                }, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Store {StoreId}: unilateral exit {ExitId} completed but ledger append failed",
                     storeId, record.Id);
             }
 

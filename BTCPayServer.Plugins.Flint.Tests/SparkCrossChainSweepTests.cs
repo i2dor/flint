@@ -148,7 +148,7 @@ public class SparkCrossChainSweepTests
 
         // And the engine's own ordering: sync before the balance read that sizes the sweep.
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(sync >= 0 && read > sync, Trace(h));
     }
 
@@ -1568,6 +1568,7 @@ public class SparkCrossChainSweepTests
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             oracle,
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             time, NullLogger<SparkSweepEngine>.Instance);
 
         return new TestHarness(engine, sdk, records, settings, time, log, oracle, runtime);

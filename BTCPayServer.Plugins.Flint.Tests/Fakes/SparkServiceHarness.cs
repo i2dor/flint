@@ -245,7 +245,7 @@ public sealed class SparkServiceHarness : IDisposable
             invoices,
             broadcaster,
             new SparkInvoiceCreditor(
-                durable.Credits, invoices, NullLogger<SparkInvoiceCreditor>.Instance),
+                durable.Credits, invoices, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
 

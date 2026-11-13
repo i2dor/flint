@@ -1,0 +1,14 @@
+<Project>
+  <!--
+    Remove all Blazor .razor components from the btcpayserver submodule build.
+    Some components (e.g. VerifyAddress.razor) fail to compile with SDK 10.0.400.
+    We reference btcpayserver for its C# types only; its Blazor components are not needed.
+    This runs in the targets phase (after SDK default includes are set up) so the Remove
+    correctly clears the already-populated RazorComponent item list.
+  -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'BTCPayServer'">
+    <RazorComponent Remove="@(RazorComponent)" />
+    <AdditionalFiles Remove="@(AdditionalFiles->WithMetadataValue('Identity', '$(MSBuildProjectDirectory)\Blazor\VaultBridge\Elements\VerifyAddress.razor'))" />
+    <AdditionalFiles Remove="**/*.razor" />
+  </ItemGroup>
+</Project>

@@ -38,7 +38,7 @@ public class SparkInvoiceCreditorTests
         var store = new InMemoryInvoiceRecordStore();
         var credits = new FakeInvoiceCreditGateway();
         var log = new CapturingLogger<SparkInvoiceCreditor>();
-        return (new SparkInvoiceCreditor(credits, store, log), store, credits, log);
+        return (new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), log), store, credits, log);
     }
 
     /// <summary>A settled record, as the settlement path leaves one.</summary>

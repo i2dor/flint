@@ -18,6 +18,8 @@ public class SparkPluginDbContext : DbContext
 
     public DbSet<UnilateralExitRecord> UnilateralExitRecords { get; set; } = null!;
 
+    public DbSet<SparkLedgerEntry> SparkLedger { get; set; } = null!;
+
     /// <summary>
     /// Name of the partial unique index that enforces one active unilateral exit per store.
     /// </summary>
@@ -141,6 +143,25 @@ public class SparkPluginDbContext : DbContext
                 .HasDatabaseName("IX_StablecoinQuotes_StoreId_SettledAt_Uncredited");
             entity.Property(quote => quote.DueAmount).HasPrecision(38, 18);
             entity.Property(quote => quote.FeeAmount).HasPrecision(38, 18);
+        });
+
+        modelBuilder.Entity<SparkLedgerEntry>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.ToTable("SparkLedger");
+            // History page: newest first within a store.
+            entity.HasIndex(e => new { e.StoreId, e.OccurredAt })
+                .HasDatabaseName("IX_SparkLedger_StoreId_OccurredAt");
+            // Idempotency guard on the live write path: one entry per SDK payment per store.
+            entity.HasIndex(e => new { e.StoreId, e.SdkPaymentId })
+                .HasFilter("\"SdkPaymentId\" IS NOT NULL")
+                .HasDatabaseName("IX_SparkLedger_StoreId_SdkPaymentId");
+            // Backfill Lightning lookup: payment hash per store.
+            entity.HasIndex(e => new { e.StoreId, e.PaymentHash })
+                .HasFilter("\"PaymentHash\" IS NOT NULL")
+                .HasDatabaseName("IX_SparkLedger_StoreId_PaymentHash");
+            entity.Property(e => e.InvoiceRateEur).HasPrecision(38, 10);
+            entity.Property(e => e.InvoiceRateRon).HasPrecision(38, 10);
         });
 
         modelBuilder.Entity<UnilateralExitRecord>(entity =>

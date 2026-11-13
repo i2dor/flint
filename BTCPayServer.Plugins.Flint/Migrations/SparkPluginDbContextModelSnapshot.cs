@@ -443,6 +443,87 @@ namespace BTCPayServer.Plugins.Flint.Migrations
 
                     b.ToTable("UnilateralExitRecords", "BTCPayServer.Plugins.Flint");
                 });
+
+            modelBuilder.Entity("BTCPayServer.Plugins.Flint.Data.SparkLedgerEntry", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<long>("AmountMsat")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("BtcPayInvoiceId")
+                        .HasColumnType("text");
+
+                    b.Property<int>("EntryType")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("FeeMsat")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("InvoiceRateAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal?>("InvoiceRateEur")
+                        .HasPrecision(38, 10)
+                        .HasColumnType("numeric(38,10)");
+
+                    b.Property<decimal?>("InvoiceRateRon")
+                        .HasPrecision(38, 10)
+                        .HasColumnType("numeric(38,10)");
+
+                    b.Property<string>("InvoiceRateSource")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("IsBackfill")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PaymentHash")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("RecordedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SdkPaymentId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StablecoinAsset")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StablecoinChain")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StablecoinExternalTxHash")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StablecoinPaidBaseUnits")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StablecoinQuoteId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("StoreId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("StoreId", "OccurredAt")
+                        .HasDatabaseName("IX_SparkLedger_StoreId_OccurredAt");
+
+                    b.HasIndex("StoreId", "PaymentHash")
+                        .HasDatabaseName("IX_SparkLedger_StoreId_PaymentHash")
+                        .HasFilter("\"PaymentHash\" IS NOT NULL");
+
+                    b.HasIndex("StoreId", "SdkPaymentId")
+                        .HasDatabaseName("IX_SparkLedger_StoreId_SdkPaymentId")
+                        .HasFilter("\"SdkPaymentId\" IS NOT NULL");
+
+                    b.ToTable("SparkLedger", "BTCPayServer.Plugins.Flint");
+                });
 #pragma warning restore 612, 618
         }
     }

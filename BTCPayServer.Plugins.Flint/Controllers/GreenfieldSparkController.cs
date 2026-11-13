@@ -92,6 +92,7 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
     private readonly StablecoinPaymentService _stablecoins;
+    private readonly SparkLedgerBackfillService _backfill;
     private readonly ILogger<GreenfieldSparkController> _logger;
 
     public GreenfieldSparkController(
@@ -104,6 +105,7 @@ public class GreenfieldSparkController : ControllerBase
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
         StablecoinPaymentService stablecoins,
+        SparkLedgerBackfillService backfill,
         ILogger<GreenfieldSparkController> logger)
     {
         _settingsStore = settingsStore;
@@ -115,6 +117,7 @@ public class GreenfieldSparkController : ControllerBase
         _deposits = deposits;
         _stableBalance = stableBalance;
         _stablecoins = stablecoins;
+        _backfill = backfill;
         _logger = logger;
     }
 
@@ -772,6 +775,34 @@ public class GreenfieldSparkController : ControllerBase
         Quote = preview.Quote is { } quote ? SparkSweepQuoteData.From(quote) : null,
         Settings = SweepSettingsInput.From(preview.Settings)
     };
+
+    #endregion
+
+    #region Ledger backfill
+
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPost("~/api/v1/stores/{storeId}/spark/ledger/backfill")]
+    public async Task<IActionResult> BackfillLedger(
+        [FromRoute] string storeId,
+        [FromQuery] bool dryRun = true,
+        CancellationToken cancellationToken = default)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        var report = await _backfill.RunAsync(store.Id, dryRun, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            dryRun = report.DryRun,
+            storeId = report.StoreId,
+            lightningReceives = new { report.LightningReceives.Skipped, report.LightningReceives.Created, report.LightningReceives.Failed },
+            stablecoinReceives = new { report.StablecoinReceives.Skipped, report.StablecoinReceives.Created, report.StablecoinReceives.Failed },
+            sends = new { report.Sends.Skipped, report.Sends.Created, report.Sends.Failed },
+            sweeps = new { report.Sweeps.Skipped, report.Sweeps.Created, report.Sweeps.Failed },
+            unilateralExits = new { report.UnilateralExits.Skipped, report.UnilateralExits.Created, report.UnilateralExits.Failed },
+            total = new { report.Total.Skipped, report.Total.Created, report.Total.Failed },
+        });
+    }
 
     #endregion
 

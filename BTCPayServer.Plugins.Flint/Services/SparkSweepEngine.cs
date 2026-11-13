@@ -221,6 +221,7 @@ public sealed class SparkSweepEngine
     private readonly ICrossChainValueOracle _valueOracle;
     private readonly TimeProvider _timeProvider;
     private readonly ISweepTransactionLabeler _transactionLabeler;
+    private readonly ISparkLedgerStore _ledger;
     private readonly ILogger<SparkSweepEngine> _logger;
 
     /// <summary>
@@ -243,6 +244,7 @@ public sealed class SparkSweepEngine
         CrossChainRouteResolver routes,
         ICrossChainValueOracle valueOracle,
         ISweepTransactionLabeler transactionLabeler,
+        ISparkLedgerStore ledger,
         TimeProvider timeProvider,
         ILogger<SparkSweepEngine> logger,
         IUnilateralExitRecordStore? unilateralExits = null)
@@ -255,6 +257,7 @@ public sealed class SparkSweepEngine
         _routes = routes;
         _valueOracle = valueOracle;
         _transactionLabeler = transactionLabeler;
+        _ledger = ledger;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -2137,6 +2140,33 @@ public sealed class SparkSweepEngine
                 "Store {StoreId}: sweep {IdempotencyKey} resolved as {Status} "
                 + "(fee {FeeSats} sat, txid {TxId})",
                 storeId, record.IdempotencyKey, status, payment.FeeSats, payment.TxId ?? "unknown");
+
+            // Write ledger entry when the debit becomes irrevocable (Sent = tx broadcast).
+            if (status is SweepRecordStatus.Sent)
+            {
+                try
+                {
+                    await _ledger.AppendAsync(new SparkLedgerEntry
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        StoreId = storeId,
+                        EntryType = SparkLedgerEntryType.Sweep,
+                        AmountMsat = record.AmountSats * 1000L,
+                        FeeMsat = payment.FeeSats * 1000L,
+                        OccurredAt = payment.Timestamp,
+                        RecordedAt = now,
+                        SdkPaymentId = payment.SdkPaymentId,
+                        PaymentHash = payment.PaymentHash,
+                        IsBackfill = false,
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: sweep {IdempotencyKey} sent but ledger append failed",
+                        storeId, record.IdempotencyKey);
+                }
+            }
 
             // The reconciliation path learns the txid from the SDK's payment rather than from the row, so this
             // covers a sweep whose send raced a crash — the label lands when the fate is finally known. The

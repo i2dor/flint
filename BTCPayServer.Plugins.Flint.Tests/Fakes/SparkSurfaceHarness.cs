@@ -241,6 +241,7 @@ public sealed class SparkSurfaceHarness
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             valueOracle,
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             TimeProvider.System, NullLogger<SparkSweepEngine>.Instance);
 
         var provisionerLog = new CapturingLogger<SparkStoreProvisioner>();
@@ -300,6 +301,7 @@ public sealed class SparkSurfaceHarness
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
             depositService, stableBalanceService, stablecoins.Service,
+            new SparkLedgerBackfillService(null!, new InMemorySparkLedgerStore(), NullLogger<SparkLedgerBackfillService>.Instance),
             NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };

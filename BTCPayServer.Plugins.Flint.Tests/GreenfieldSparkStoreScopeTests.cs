@@ -247,6 +247,7 @@ public class GreenfieldSparkStoreScopeTests
     [InlineData("stable-put")]
     [InlineData("stablecoins-get")]
     [InlineData("stablecoins-put")]
+    [InlineData("ledger-backfill")]
     public async Task Every_endpoint_refuses_when_no_store_was_authorised_at_all(string endpoint)
     {
         // The other half of the guard: HttpContext carries no authorised store, which is what a future filter
@@ -279,6 +280,8 @@ public class GreenfieldSparkStoreScopeTests
                 SparkSurfaceHarness.AttackerStore, CancellationToken.None),
             "stablecoins-put" => await h.Api.UpdateStablecoins(
                 SparkSurfaceHarness.AttackerStore, new SparkStablecoinsInput { Enabled = true }, CancellationToken.None),
+            "ledger-backfill" => await h.Api.BackfillLedger(
+                SparkSurfaceHarness.AttackerStore, dryRun: true, CancellationToken.None),
             _ => await h.Api.Sweep(SparkSurfaceHarness.AttackerStore, null, CancellationToken.None)
         };
 

@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -33,6 +34,7 @@ public sealed class SparkSendPaymentService(
     ISparkStoreSettingsStore settingsStore,
     IHttpClientFactory httpClientFactory,
     IBolt11Parser bolt11Parser,
+    ISparkLedgerStore ledger,
     ILogger<SparkSendPaymentService> logger)
 {
     /// <summary>
@@ -113,6 +115,29 @@ public sealed class SparkSendPaymentService(
                 return SparkSendOutcome.Failure("fee-too-high", result.RejectedReason);
 
             var p = result.Payment!;
+            var now = DateTimeOffset.UtcNow;
+            try
+            {
+                await ledger.AppendAsync(new SparkLedgerEntry
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    StoreId = storeId,
+                    EntryType = SparkLedgerEntryType.Send,
+                    AmountMsat = p.AmountSats * 1000L,
+                    FeeMsat = p.FeeSats * 1000L,
+                    OccurredAt = p.Timestamp,
+                    RecordedAt = now,
+                    SdkPaymentId = p.SdkPaymentId,
+                    PaymentHash = p.PaymentHash,
+                    IsBackfill = false,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex,
+                    "Store {StoreId}: send {PaymentHash} succeeded but ledger append failed",
+                    storeId, p.PaymentHash);
+            }
             return SparkSendOutcome.Success(new SparkSendPaymentResult(
                 PaymentId: idempotencyKey,
                 PaymentHash: p.PaymentHash,

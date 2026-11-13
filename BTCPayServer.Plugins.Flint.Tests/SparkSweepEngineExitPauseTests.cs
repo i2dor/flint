@@ -126,6 +126,7 @@ public class SparkSweepEngineExitPauseTests
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             new FakeCrossChainValueOracle(),
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             new StubTimeProvider(Origin),
             NullLogger<SparkSweepEngine>.Instance,
             exits);

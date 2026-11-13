@@ -334,6 +334,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 provider.GetRequiredService<SparkMnemonicProtector>(),
                 provider.GetRequiredService<SparkExitFundingExplorer>(),
                 provider.GetRequiredService<IExitStateBackupStore>(),
+                provider.GetRequiredService<ISparkLedgerStore>(),
                 SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType),
                 provider.GetRequiredService<TimeProvider>(),
                 provider.GetRequiredService<ILogger<SparkUnilateralExitService>>());
@@ -352,6 +353,8 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ISweepRecordStore, EfSweepRecordStore>();
         services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
         services.AddSingleton<IUnilateralExitRecordStore, EfUnilateralExitRecordStore>();
+        services.AddSingleton<ISparkLedgerStore, EfSparkLedgerStore>();
+        services.AddSingleton<SparkLedgerBackfillService>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {
             var factory = provider.GetRequiredService<SparkPluginDbContextFactory>();
@@ -464,6 +467,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
                 provider.GetRequiredService<ISparkStoreRuntime>(),
                 provider.GetRequiredService<StablecoinRouteCache>(),
                 provider.GetRequiredService<ICrossChainValueOracle>(),
+                provider.GetRequiredService<ISparkLedgerStore>(),
                 provider.GetRequiredService<TimeProvider>(),
                 SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType) == Network.Main,
                 provider.GetRequiredService<ILogger<StablecoinPaymentService>>());

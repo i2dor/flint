@@ -123,7 +123,7 @@ public sealed class FakeSparkSdkClient : ISparkSdkClient
     {
         ThrowIfConfigured();
         ReceiveCalls.Add(new ReceiveCall(description, amountSats, expirySecs));
-        return Task.FromResult(new SparkReceiveResult(NextPaymentRequest, 0));
+        return Task.FromResult(new SparkReceiveResult(NextPaymentRequest, 0, string.Empty));
     }
 
     /// <summary>

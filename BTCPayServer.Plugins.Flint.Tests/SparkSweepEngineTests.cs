@@ -83,7 +83,7 @@ public class SparkSweepEngineTests
             NullLogger<SweepDestinationResolver>.Instance);
 
         var engine = new SparkSweepEngine(
-            settings, runtime, records, resolver, Routes(), Oracle(), labeler, time, logger);
+            settings, runtime, records, resolver, Routes(), Oracle(), labeler, new InMemorySparkLedgerStore(), time, logger);
         return new Harness(engine, sdk, records, addresses, settings, runtime, time, log, logger, labeler);
     }
 
@@ -199,9 +199,10 @@ public class SparkSweepEngineTests
         Assert.Equal(
             [
                 // The balance is synced and read first, because a threshold decision on a stale balance is the wrong
-                // sweep…
+                // sweep. The sync is explicit (SyncWalletAsync) followed by a cached read, since ensureSynced alone
+                // was observed staying stale on the funded run.
                 "sdk:sync",
-                "sdk:getinfo:synced",
+                "sdk:getinfo:cached",
                 // …then the pre-flight quote…
                 "sdk:quote",
                 // …then the record exists, with its key, *before* anything can have been sent…
@@ -236,8 +237,8 @@ public class SparkSweepEngineTests
         await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
-        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a synced read; got [{string.Join(", ", h.Log.Entries)}]");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
+        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a balance read; got [{string.Join(", ", h.Log.Entries)}]");
         Assert.True(sync < read, "the wallet must be synced before its balance is read");
     }
 
@@ -1356,7 +1357,7 @@ public class SparkSweepEngineTests
         runtime.Clients[StoreId] = h.Sdk;
         var engine = new SparkSweepEngine(
             h.Settings, runtime, h.Records, resolver, Routes(), Oracle(),
-            new FakeSweepTransactionLabeler(), h.Time,
+            new FakeSweepTransactionLabeler(), new InMemorySparkLedgerStore(), h.Time,
             NullLogger<SparkSweepEngine>.Instance);
 
         var first = engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
@@ -1444,7 +1445,7 @@ public class SparkSweepEngineTests
         await h.Engine.PreviewAsync(StoreId, Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(sync >= 0 && read >= 0);
         Assert.True(sync < read, "a preview must sync before it reads the balance");
     }
