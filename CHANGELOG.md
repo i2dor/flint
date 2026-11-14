@@ -19,7 +19,7 @@ All notable changes to this plugin are recorded here. The format follows
 - Sweep engine: `GetInfo(ensureSynced: false)` after an explicit `SyncWallet`. `ensureSynced: true`
   applies only to the SDK's first sync in a session and was leaving the balance stale.
 
-## [1.3.1.1] - 2026-11-13
+## [1.3.1.2] - 2026-11-13
 
 ### Added
 
