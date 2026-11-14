@@ -7,18 +7,6 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- **Send payment**: send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
-- **Receive payment**: generate a BOLT11 invoice with optional amount and description; QR code shown inline.
-- **Wallet history**: paginated payment history with direction filter (All / Received / Sent), period filter
-  (All time / 7 days / 30 days), and one-click BOLT11 copy.
-
-### Fixed
-
-- Sweep engine: `GetInfo(ensureSynced: false)` after an explicit `SyncWallet`. `ensureSynced: true`
-  applies only to the SDK's first sync in a session and was leaving the balance stale.
-
 ## [1.3.1.2] - 2026-11-13
 
 ### Added
@@ -28,6 +16,33 @@ All notable changes to this plugin are recorded here. The format follows
   `opening_balance + SUM(credits) - SUM(debits) = current_SDK_balance` reconciliation.
 - **Backfill endpoint**: `POST /api/v1/stores/{storeId}/spark/ledger/backfill?dryRun=true` replays
   existing settled payments into the ledger. Dry-run is the default; each payment type is idempotent.
+
+## [1.3.1.1] - 2026-11-12
+
+### Added
+
+- **Send payment**: send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
+- **Receive payment**: generate a BOLT11 invoice with optional amount and description; QR code shown inline.
+- **Wallet history**: paginated payment history with direction filter (All / Received / Sent), period filter
+  (All time / 7 days / 30 days), and one-click BOLT11 copy.
+- **SparkPluginUpdateChecker**: the plugin checks for newer releases on GitHub and shows a dismissible
+  notice in the BTCPay admin UI. Fork-specific; not sent upstream.
+
+### Fixed
+
+- Sweep engine: `GetInfo(ensureSynced: false)` is now used after the explicit `SyncWalletAsync` calls
+  at the three sweep balance reads. `ensureSynced: true` is a no-op after any SDK sync; `SyncWalletAsync`
+  is what makes the balance current. No behaviour change — the balance was already fresh.
+- Razor view compatibility for SDK 10.0.400: moved script tags out of Razor code blocks in
+  `LNPaymentMethodSetupTabhead.cshtml`, `StablecoinCheckout.cshtml`, and `StablecoinInvoicePayments.cshtml`
+  to avoid parser errors with the stricter Razor source generator shipped in dotnet 10.0.400.
+
+### Maintenance
+
+- `btcpayserver` submodule pinned to v2.4.6 (reverted from a post-release commit that introduced a
+  `VerifyAddress.razor` incompatible with SDK 10.0.400).
+- `Directory.Build.props`: suppress cascading Razor/CS errors from both the plugin and the btcpayserver
+  submodule when building with SDK 10.0.400.
 
 ## [1.3.1] — 2026-10-14
 
