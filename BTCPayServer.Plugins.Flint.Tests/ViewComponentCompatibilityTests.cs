@@ -1,7 +1,7 @@
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.AspNetCore.Mvc.ApplicationParts;
 using Microsoft.AspNetCore.Mvc.ViewComponents;
 using Xunit;
@@ -46,22 +46,13 @@ public class ViewComponentCompatibilityTests
     /// <summary>
     /// The plugin's views, i.e. what the guard protects.
     /// </summary>
-    private static string PluginViewsDirectory => Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint", "Views");
+    private static string PluginViewsDirectory => Path.Combine(RepoPaths.Plugin, "Views");
 
     /// <summary>
     /// BTCPay's own views, used only to prove this test's tag-name arithmetic against a corpus that is known to
     /// render — see <see cref="BTCPaysOwnViewsAllResolve"/>.
     /// </summary>
-    private static string CoreViewsDirectory => Path.Combine(RepositoryRoot, "btcpayserver", "BTCPayServer");
-
-    /// <summary>
-    /// Repository root, derived from this file's compile-time path rather than from the test assembly's location:
-    /// the output directory's depth below the project is an MSBuild detail, and <c>dotnet test</c> may run the
-    /// assembly from somewhere else entirely.
-    /// </summary>
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
+    private static string CoreViewsDirectory => Path.Combine(RepoPaths.Root, "btcpayserver", "BTCPayServer");
 
     /// <summary>
     /// The BTCPay release actually compiled into <c>BTCPayServer.dll</c> here, from its assembly version.
@@ -219,10 +210,10 @@ public class ViewComponentCompatibilityTests
     private static IEnumerable<ViewNameReference> ScanForViewNameReferences()
     {
         foreach (var file in Directory.EnumerateFiles(PluginViewsDirectory, "*.cshtml", SearchOption.AllDirectories)
-                     .Concat([Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint", "SparkPlugin.cs")])
+                     .Concat([Path.Combine(RepoPaths.Plugin, "SparkPlugin.cs")])
                      .OrderBy(path => path, StringComparer.Ordinal))
         {
-            var relative = Path.GetRelativePath(RepositoryRoot, file);
+            var relative = Path.GetRelativePath(RepoPaths.Root, file);
             // Extension points name a partial from C#, and are resolved from core's UiExtensionPoint component, so
             // the referencing folder is core's Views/Shared rather than anything in this file.
             var searchFolder = file.EndsWith(".cshtml", StringComparison.Ordinal)
@@ -404,7 +395,7 @@ public class ViewComponentCompatibilityTests
     {
         foreach (var file in Directory.EnumerateFiles(directory, "*.cshtml", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal))
         {
-            var relative = Path.GetRelativePath(RepositoryRoot, file);
+            var relative = Path.GetRelativePath(RepoPaths.Root, file);
             var lines = File.ReadAllLines(file);
             for (var index = 0; index < lines.Length; index++)
             {

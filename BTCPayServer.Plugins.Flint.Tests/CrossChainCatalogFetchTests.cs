@@ -261,7 +261,7 @@ public class CrossChainCatalogFetchTests
         Assert.Equal(1, handler.Requests);
 
         release.SetResult();
-        await WaitUntil(() => catalog.IsLive);
+        await Eventually.True(() => catalog.IsLive, "the background refresh never completed");
 
         for (var i = 0; i < 1_000; i++)
             catalog.Snapshot();
@@ -394,18 +394,6 @@ public class CrossChainCatalogFetchTests
               }
             }
             """;
-    }
-
-    /// <summary>Polls a condition a background refresh will eventually satisfy, rather than sleeping blindly.</summary>
-    private static async Task WaitUntil(Func<bool> condition)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-
-        while (!condition())
-        {
-            Assert.True(DateTime.UtcNow < deadline, "the background refresh never completed");
-            await Task.Delay(10);
-        }
     }
 
     #endregion

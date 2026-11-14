@@ -311,7 +311,8 @@ public class SparkStableBalanceServiceTests
     /// <remarks>
     /// The other side of re-resolving: the handle can legitimately be absent afterwards, and the merchant needs
     /// to be told the setting was stored but not applied — which is the state the page's re-apply button exists
-    /// for.
+    /// for. A declined write leaves no wallet at all, so the handle resolved before it is disposed and must not
+    /// be what the activation goes to.
     /// </remarks>
     [Fact]
     public async Task A_wallet_that_does_not_restart_after_the_write_is_reported_and_the_setting_is_kept()
@@ -325,7 +326,9 @@ public class SparkStableBalanceServiceTests
             Ct);
 
         Assert.Equal(SparkStableBalanceStatus.Unavailable, result.Status);
+        Assert.Contains("did not come back up", result.Message);
         Assert.True(h.Settings.Settings[StoreId]!.StableBalance.Enabled);
+        Assert.Empty(h.Sdk.StableBalanceCalls);
     }
 
     /// <summary>

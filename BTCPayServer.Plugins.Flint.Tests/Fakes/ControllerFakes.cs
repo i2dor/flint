@@ -23,6 +23,47 @@ public sealed class FakeSparkStoreRuntime : ISparkStoreRuntime
 
     public Task<ISparkSdkClient?> GetSdkClientAsync(string storeId) =>
         Task.FromResult(Clients.TryGetValue(storeId, out var client) ? client : null);
+
+    /// <summary>Each running store's wallet tag; a store without one here runs <c>wallet-of-{storeId}</c>.</summary>
+    public Dictionary<string, string> WalletTags { get; } = [];
+
+    public string? GetWalletTag(string storeId, ISparkSdkClient? sdk = null) =>
+        Clients.TryGetValue(storeId, out var client) && (sdk is null || ReferenceEquals(client, sdk))
+            ? WalletTags.GetValueOrDefault(storeId, $"wallet-of-{storeId}")
+            : null;
+
+    /// <summary>What an import of the queue reports. Nothing queued, unless a test says otherwise.</summary>
+    public ExitStateImportReport NextImportReport { get; set; } = ExitStateImportReport.NothingPending;
+
+    /// <summary>Every store an import of the queue was asked for, in order.</summary>
+    public List<string> ImportRequests { get; } = [];
+
+    public Task<ExitStateImportReport> ImportPendingExitStateAsync(
+        string storeId, CancellationToken cancellationToken = default)
+    {
+        ImportRequests.Add(storeId);
+        return Task.FromResult(NextImportReport);
+    }
+
+    public async Task<ExitStateExportResult> ExportExitStateAsync(
+        string storeId, CancellationToken cancellationToken = default)
+    {
+        if (!Clients.TryGetValue(storeId, out var client))
+            return new ExitStateExportResult(null, false, "This store's Spark wallet is not running.");
+
+        try
+        {
+            // Never stored: the production rules for when an export is stored live in SparkService and are
+            // tested there.
+            var exported = await client.ExportUnilateralExitStateAsync(cancellationToken);
+            return new ExitStateExportResult(exported, false);
+        }
+        catch (Exception ex)
+        {
+            return new ExitStateExportResult(null, false,
+                "Spark could not export this wallet's exit data: " + SparkErrors.Describe(ex));
+        }
+    }
 }
 
 /// <summary>Returns a fixed hot-wallet seed answer.</summary>
@@ -59,30 +100,23 @@ public sealed class FakeSparkNetworkStatusProbe : ISparkNetworkStatusProbe
 }
 
 /// <summary>
-/// Grants or refuses every policy uniformly.
+/// Grants every policy.
 /// </summary>
 /// <remarks>
-/// Uniform on purpose. The store-scoping tests need authorisation to <em>succeed</em>, because the hole being
+/// Granting on purpose. The store-scoping tests need authorisation to <em>succeed</em>, because the hole being
 /// tested is precisely the one where authorisation succeeds against the caller's own store and the action then
 /// operates on a different one. A fake that refused would make those tests pass for the wrong reason.
 /// </remarks>
 public sealed class FakeAuthorizationService : IAuthorizationService
 {
-    private readonly bool _succeed;
-
-    public FakeAuthorizationService(bool succeed = true)
-    {
-        _succeed = succeed;
-    }
-
     public Task<AuthorizationResult> AuthorizeAsync(
         ClaimsPrincipal user,
         object? resource,
         IEnumerable<IAuthorizationRequirement> requirements) =>
-        Task.FromResult(_succeed ? AuthorizationResult.Success() : AuthorizationResult.Failed());
+        Task.FromResult(AuthorizationResult.Success());
 
     public Task<AuthorizationResult> AuthorizeAsync(ClaimsPrincipal user, object? resource, string policyName) =>
-        Task.FromResult(_succeed ? AuthorizationResult.Success() : AuthorizationResult.Failed());
+        Task.FromResult(AuthorizationResult.Success());
 }
 
 /// <summary>
@@ -147,4 +181,11 @@ public sealed class FakeCrossChainValueOracle : ICrossChainValueOracle
         Calls.Add((storeId, currencyCode));
         return Task.FromResult<decimal?>(Unavailable ? null : BtcUsd / 100_000_000m);
     }
+
+    /// <summary>The same <see cref="BtcUsd"/>: the fake has no spread, so bid and mid are one price.</summary>
+    public Task<decimal?> TryGetSatoshiMidValueAsync(
+        string storeId,
+        string currencyCode,
+        CancellationToken cancellationToken = default) =>
+        TryGetSatoshiValueAsync(storeId, currencyCode, cancellationToken);
 }

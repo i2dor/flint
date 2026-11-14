@@ -1,6 +1,6 @@
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Xml.Linq;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -48,12 +48,8 @@ public class SparkBrandingTests
     /// <summary>The mark's own colours from assets/logo.svg, none of which belongs in themed markup.</summary>
     private static readonly string[] BrandFills = ["#232B36", "#EFF2F6", "#FFB020"];
 
-    private static string RepositoryRoot => Path.GetFullPath(Path.Combine(ThisFile(), "..", ".."));
-
-    private static string ThisFile([CallerFilePath] string path = "") => path;
-
     private static string NavViewPath =>
-        Path.Combine(RepositoryRoot, "BTCPayServer.Plugins.Flint", "Views", "Shared", "Spark", "SparkNav.cshtml");
+        Path.Combine(RepoPaths.Plugin, "Views", "Shared", "Spark", "SparkNav.cshtml");
 
     private static string NavMarkup => File.ReadAllText(NavViewPath);
 

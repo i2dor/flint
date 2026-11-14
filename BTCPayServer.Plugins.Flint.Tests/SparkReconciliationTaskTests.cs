@@ -53,13 +53,8 @@ public class SparkReconciliationTaskTests
 
         // The startup pass reaches it first (the same fire-and-forget pass SparkService runs); wait for that
         // rather than race it, so the periodic call below runs against an already-settled world.
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (harness.Invoices.Records[Hash].CreditedAt is null)
-        {
-            if (DateTime.UtcNow > deadline)
-                Assert.Fail("the settlement recorded before startup was never credited");
-            await Task.Delay(10, Ct);
-        }
+        await Eventually.True(() => harness.Invoices.Records[Hash].CreditedAt is not null,
+            "the settlement recorded before startup was never credited");
 
         var task = new SparkReconciliationTask(
             harness.Service,

@@ -1,5 +1,8 @@
+using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Flint.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 
@@ -56,4 +59,70 @@ public class SparkAdvancedViewModel
     /// is what the form looks like when nothing was touched.
     /// </summary>
     public bool UseBuiltInKey { get; set; }
+
+    /// <summary>
+    /// When the stored exit-state backup was last written, or null when none is stored.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A timestamp rather than a flag, because the interesting question stopped being "is there one" and
+    /// became "how stale is it". The plugin refreshes this backup on its own after the wallet's leaves
+    /// change, so an operator reading this page is checking that the automation is working, not deciding
+    /// whether to do it by hand.
+    /// </para>
+    /// <para>
+    /// <b>The stored blob is never rendered back into this page.</b> It carries every leaf and
+    /// its transactions for the wallet, so it discloses the balance, how that balance is split and the
+    /// wallet's history — it is the one blob in the plugin that is worth more to a reader than the account it
+    /// describes. An operator who wants a copy downloads it.
+    /// </para>
+    /// </remarks>
+    [BindNever]
+    public DateTimeOffset? ExitStateBackupTakenAt { get; set; }
+
+    /// <summary>
+    /// Backups waiting to be imported into this wallet — pasted ones, and stored ones whose import failed —
+    /// oldest first. Times and sizes only.
+    /// </summary>
+    /// <remarks>
+    /// Shown because a backup in this list is one the wallet has not been shown to hold: while it is here
+    /// the operator's copy is the only proof it was ever supplied, and "is my paste in yet?" has no other
+    /// answer on the page. Each can be downloaded; none is ever replaced by the automatic backup.
+    /// </remarks>
+    [BindNever]
+    public IReadOnlyList<PendingExitStateBackup> PendingExitStateBackups { get; set; } = [];
+
+    /// <summary>
+    /// A blob to store, inbound only. The stored blob is never written into this model.
+    /// </summary>
+    /// <remarks>
+    /// Outbound it is bound but never populated; empty posted to the set action clears the stored backup,
+    /// matching the explorer override's pattern. This is typed as string rather than annotated with
+    /// <c>[DataType]</c> because it is opaque to this page by design: nothing validates its shape here, since
+    /// whether it is a usable blob is settled by the SDK when it is imported.
+    /// </remarks>
+    [Display(Name = "Exit-state backup")]
+    public string? ExitStateBackup { get; set; }
+
+    /// <summary>
+    /// The same backup as a file — what Download produced — inbound only, as the alternative to pasting.
+    /// </summary>
+    /// <remarks>
+    /// Offered because a multi-megabyte value is an awkward thing to paste into a textarea, and a file is
+    /// what the operator was told to keep. Never both: the action refuses a save that carries a paste and a
+    /// file, rather than choosing one silently.
+    /// </remarks>
+    [Display(Name = "Or choose the backup file")]
+    public IFormFile? ExitStateBackupFile { get; set; }
+
+    /// <summary>
+    /// A freshly exported blob, for one render, so the operator can copy it.
+    /// </summary>
+    /// <remarks>
+    /// Its own field beside <see cref="ExitStateBackupTakenAt"/> so a render cannot confuse "a backup exists"
+    /// with "here is that backup": only the export action sets this, and what it sets is what the SDK just
+    /// returned.
+    /// </remarks>
+    [BindNever]
+    public string? ExportedExitState { get; set; }
 }

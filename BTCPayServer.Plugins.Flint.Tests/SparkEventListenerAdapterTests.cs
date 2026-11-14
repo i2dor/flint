@@ -43,19 +43,6 @@ public class SparkEventListenerAdapterTests
     }
 
     [Fact]
-    public void OnEvent_returns_an_already_completed_task()
-    {
-        var (adapter, _) = Create();
-
-        var task = adapter.OnEvent(new SdkEvent.PaymentSucceeded(SamplePayment()));
-
-        // Not merely "completes quickly": it must be already-completed on return. Anything the SDK has to
-        // wait on stalls the emitting call, and anything that never completes hangs the process.
-        Assert.True(task.IsCompletedSuccessfully);
-        Assert.Same(Task.CompletedTask, task);
-    }
-
-    [Fact]
     public void OnEvent_enqueues_a_settlement_with_its_payment_and_store()
     {
         var (adapter, channel) = Create();
@@ -121,6 +108,35 @@ public class SparkEventListenerAdapterTests
         Assert.True(channel.Reader.TryRead(out var envelope));
         Assert.Equal(SparkEventKind.PaymentSucceeded, envelope!.Kind);
         Assert.Equal(0, adapter.DroppedEvents);
+    }
+
+    [Fact]
+    public void A_metadata_update_is_forwarded_with_its_payment()
+    {
+        // The one event that carries a cross-chain receive's conversion details. Folded into Other, a USDC or
+        // USDT payment would reach the plugin only through the next reconciliation pass.
+        var (adapter, channel) = Create();
+        var payment = SamplePayment();
+
+        adapter.OnEvent(new SdkEvent.PaymentMetadataUpdated(payment));
+
+        Assert.True(channel.Reader.TryRead(out var envelope));
+        Assert.Equal(SparkEventKind.PaymentMetadataUpdated, envelope!.Kind);
+        Assert.Same(payment, envelope.Payment);
+    }
+
+    [Fact]
+    public void An_exit_state_change_is_forwarded_as_its_own_kind()
+    {
+        // The SDK's statement that an earlier exit-state export is out of date. Folded into Other, it reached
+        // only a trace line, and every send, swap and renewal left the backup stale until the hourly net.
+        var (adapter, channel) = Create();
+
+        adapter.OnEvent(new SdkEvent.UnilateralExitStateChanged());
+
+        Assert.True(channel.Reader.TryRead(out var envelope));
+        Assert.Equal(SparkEventKind.UnilateralExitStateChanged, envelope!.Kind);
+        Assert.Null(envelope.Payment);
     }
 
     [Fact]

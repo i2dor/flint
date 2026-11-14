@@ -3,12 +3,17 @@ using System.Net.Http;
 using BTCPayServer.Abstractions.Contracts;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
+using BTCPayServer.Hosting;
 using BTCPayServer.Lightning;
+using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Plugins.Flint.Payments;
+using BTCPayServer.Plugins.Flint.Reports;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Rates;
+using BTCPayServer.Services.Reporting;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -119,12 +124,9 @@ public class SparkPlugin : BaseBTCPayServerPlugin
 
         // Cross-store enforcement. The save-time refusal lives in SparkLightningClient.Validate (which reads
         // the configured store off the request via IHttpContextAccessor below); this sweep is the backstop
-        // for configurations that predate it. Registered as itself and through a deferred Func, because it
-        // depends on SparkService (its settings store) and SparkService reaches it back through that Func.
+        // for configurations that predate it.
         services.AddSingleton<ISparkStoreSource, BTCPayStoreSource>();
         services.AddSingleton<SparkLightningConfigSweeper>();
-        services.TryAddSingleton<Func<SparkLightningConfigSweeper>>(provider =>
-            provider.GetRequiredService<SparkLightningConfigSweeper>);
 
         // The request context Validate reads to learn which store a connection string is being saved on.
         // ASP.NET does not register this by default (BTCPay does not either), so the plugin does, idempotently.
@@ -138,6 +140,21 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<ISparkClientResolver>(provider => provider.GetRequiredService<SparkService>());
         services.AddSingleton<ISparkStoreSettingsStore>(provider => provider.GetRequiredService<SparkService>());
         services.AddSingleton<ISparkStoreRuntime>(provider => provider.GetRequiredService<SparkService>());
+
+        // Automatic unilateral-exit backups: the owner-only file each store's backup lives in, the
+        // debounce/safety-net decisions, and the pass that applies them. Registered unconditionally like
+        // the rest of the exit surface — the gate is enforced inside the pass, not by whether the
+        // types exist.
+        //
+        // The file store is registered as itself only, and the seam published to callers is the
+        // tracking decorator: every write and every delete through the store has to move the
+        // scheduler's belief about what is stored with it, and a caller cannot forget the bookkeeping
+        // when the only published route to the file passes through it.
+        services.AddSingleton<FileExitStateBackupStore>();
+        services.AddSingleton<ExitStateBackupScheduler>();
+        services.AddSingleton<IExitStateBackupStore>(provider => new TrackedExitStateBackupStore(
+            provider.GetRequiredService<FileExitStateBackupStore>(),
+            provider.GetRequiredService<ExitStateBackupScheduler>()));
 
         // The setup flow's decisions, kept out of the controller so they can be tested.
         services.AddSingleton<SparkStoreProvisioner>();
@@ -231,16 +248,6 @@ public class SparkPlugin : BaseBTCPayServerPlugin
             provider.GetRequiredService<StoreRepository>);
         services.AddSingleton<ICrossChainValueOracle, BTCPayCrossChainValueOracle>();
 
-        // Webhook notifier for post-sweep notifications. Named client so the timeout applies to delivery
-        // alone and does not share the catalogue's socket pool. Failures are logged as warnings.
-        services.AddHttpClient(SparkSweepWebhookNotifier.HttpClientName, client =>
-        {
-            client.Timeout = TimeSpan.FromSeconds(10);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(
-                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
-        });
-        services.AddSingleton<SparkSweepWebhookNotifier>();
-
         // The sweep engine. One path for automatic and manual sweeps; every economic and safety guard lives here
         // rather than in the controller or the view.
         services.TryAddSingleton(TimeProvider.System);
@@ -249,6 +256,22 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // On-chain deposits: the static address, the unclaimed list, and the manual claim. Shared by the status
         // page and the Greenfield endpoint so neither can decide on its own what a safe claim ceiling is.
         services.AddSingleton<SparkDepositService>();
+
+        // Outgoing Lightning payments: BOLT11 and Lightning Address (LUD-16). Named HttpClient so socket
+        // lifetime is managed by the factory and the User-Agent identifies the plugin to LNURL endpoints.
+        // AllowAutoRedirect=false: redirect targets are not validated by the SSRF checks that run on
+        // the initial URL; a malicious LNURL server could redirect to an internal address and bypass them.
+        services.AddHttpClient(SparkSendPaymentService.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(10);
+            client.MaxResponseContentBufferSize = 65_536;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        }).ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.HttpClientHandler
+        {
+            AllowAutoRedirect = false
+        });
+        services.AddSingleton<SparkSendPaymentService>();
 
         // Stable Balance. The mainnet check is resolved once here, because the chain is fixed for the life of
         // the process and because the answer is a refusal rather than a behaviour change: the SDK accepts a
@@ -267,6 +290,58 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // settings form and the Greenfield sweep endpoints so a configuration one accepts is one the other accepts.
         services.AddSingleton<SparkSweepSettingsService>();
 
+        // Unilateral exit. Every guard on it — the store's stored disclosure acknowledgement first — lives inside
+        // the service, not in whether the type is registered.
+        //
+        // Its own named HTTP client, because discovering the CPFP funding UTXO is the one question neither the SDK
+        // nor NBXplorer can answer — the funding address is outside both key trees — so it goes to an esplora
+        // instance. Short timeout: a request thread is waiting on it while the exit page renders.
+        //
+        // Redirects are off on both: the URL is an operator setting, and a public host answering 3xx could
+        // otherwise send the server to an internal address the checks on that setting never saw. The direct
+        // client also refuses link-local, unspecified and multicast addresses at connect time, whatever the
+        // hostname resolved to; an onion explorer goes through BTCPay's SOCKS endpoint instead.
+        void ConfigureExplorerClient(HttpClient client)
+        {
+            client.Timeout = SparkExitFundingExplorer.RequestTimeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(
+                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
+        }
+
+        services.AddHttpClient(SparkExitFundingExplorer.HttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false,
+                ConnectCallback = SparkExitFundingExplorer.ConnectFilteredAsync
+            });
+        services.AddHttpClient(SparkExitFundingExplorer.OnionHttpClientName, ConfigureExplorerClient)
+            .ConfigurePrimaryHttpMessageHandler(provider =>
+            {
+                var handler = ActivatorUtilities.CreateInstance<BTCPayServer.Services.Socks5HttpClientHandler>(provider);
+                handler.AllowAutoRedirect = false;
+                return handler;
+            });
+        services.AddSingleton<SparkExitFundingExplorer>();
+        services.AddSingleton(provider =>
+        {
+            // The chain is resolved once, as for the sweep destination resolver: it decides the funding key's
+            // derivation path, the address format, and which network a destination is parsed against.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new SparkUnilateralExitService(
+                provider.GetRequiredService<ISparkStoreSettingsStore>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<IUnilateralExitRecordStore>(),
+                provider.GetRequiredService<SparkMnemonicProtector>(),
+                provider.GetRequiredService<SparkExitFundingExplorer>(),
+                provider.GetRequiredService<IExitStateBackupStore>(),
+                provider.GetRequiredService<ISparkLedgerStore>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<SparkUnilateralExitService>>());
+        });
+        services.AddSingleton<ISparkUnilateralExitService>(provider =>
+            provider.GetRequiredService<SparkUnilateralExitService>());
+
         // The Greenfield endpoints' OpenAPI fragment, merged into BTCPay's /swagger/v1/swagger.json. Depends on
         // nothing on purpose — see the class remarks, and the Func<T> note above.
         services.AddSingleton<ISwaggerProvider, SparkSwaggerProvider>();
@@ -276,6 +351,10 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IInvoiceRecordStore, EfInvoiceRecordStore>();
         services.AddSingleton<IOutgoingPaymentStore, EfOutgoingPaymentStore>();
         services.AddSingleton<ISweepRecordStore, EfSweepRecordStore>();
+        services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
+        services.AddSingleton<IUnilateralExitRecordStore, EfUnilateralExitRecordStore>();
+        services.AddSingleton<ISparkLedgerStore, EfSparkLedgerStore>();
+        services.AddSingleton<SparkLedgerBackfillService>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {
             var factory = provider.GetRequiredService<SparkPluginDbContextFactory>();
@@ -283,6 +362,9 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         });
 
         services.AddStartupTask<SparkMigrationStartupTask>();
+
+        // BTCPay's Reporting page (and, from 2.4.5, its Greenfield reports API): the store's sweeps.
+        services.AddReportProvider<FlintSweepsReportProvider>();
 
         // Settlement reconciliation. This is not a safety net, it is the settlement guarantee: the SDK drops
         // completion events, and BTCPay does not re-poll pending invoices (its one-minute timer only checks
@@ -309,14 +391,16 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         // its own. See SparkLightningConfigSweepTask.
         services.AddScheduledTask<SparkLightningConfigSweepTask>(Constants.ConfigSweepInterval);
 
-        // Daily registry check: fires a webhook when a new Flint version appears on the plugin registry.
-        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName, client =>
-        {
-            client.Timeout = TimeSpan.FromSeconds(10);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(
-                $"BTCPayServer.Plugins.Flint/{typeof(SparkPlugin).Assembly.GetName().Version}");
-        });
-        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
+        // USDC and USDT at checkout, received into the store's Spark wallet as bitcoin (or as its Stable Balance
+        // token, when it holds one). See StablecoinPaymentService for the flow and StablecoinQuoteMatcher for how an
+        // arrival is attributed to the invoice it paid.
+        AddStablecoinPayments(services);
+
+        // Automatic exit-state backups. The task is the passive half: the interesting timing lives in
+        // ExitStateBackupScheduler, and a pass whose only new work is asking ShouldTake costs one
+        // dictionary read per store. One minute matches the resolution every other pass here works at,
+        // and it is what bounds the latency of a debounced post-deposit backup.
+        services.AddScheduledTask<ExitStateBackupTask>(Constants.ExitStateBackupInterval);
 
         // UI extension points. Paths are relative to Views/Shared/ and resolved as partials.
         services.AddUIExtension("ln-payment-method-setup-tabhead", "Spark/LNPaymentMethodSetupTabhead");
@@ -328,6 +412,105 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddUIExtension("spark-setup-post-body", "Spark/SparkSweepSetupStep");
         services.AddUIExtension("spark-status-post-body", "Spark/SparkSweepStatus");
 
+        // USDC/USDT: setup step 3 (after sweeping, by registration order), the checkout body, and the merchant's
+        // view of those payments on an invoice.
+        services.AddUIExtension("spark-setup-post-body", "Spark/SparkStablecoinSetupStep");
+        services.AddUIExtension("checkout-end", "Spark/StablecoinCheckout");
+        services.AddUIExtension("store-invoices-payments", "Spark/StablecoinInvoicePayments");
+        // And, on the status page, the USDC/USDT money that is on no invoice — which otherwise only the server log knew.
+        services.AddUIExtension("spark-status-post-body", "Spark/StablecoinAttention");
+
+        // Plugin update availability check. Fires daily, queries the BTCPay plugin builder for the
+        // latest published Flint version, and POSTs a JSON webhook to the operator-configured URL
+        // when a newer version is available. The webhook URL is set in BTCPay server settings.
+        services.AddHttpClient(SparkPluginUpdateChecker.HttpClientName);
+        services.AddScheduledTask<SparkPluginUpdateChecker>(TimeSpan.FromDays(1));
+
         base.Execute(services);
+    }
+
+    /// <summary>
+    /// The two stablecoin payment methods and everything they stand on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Deferred resolution, again.</b> The handlers are built while BTCPay builds its handler dictionary, and the
+    /// service they call reaches the store runtime (<see cref="SparkService"/>), whose own graph reaches that
+    /// dictionary back. So the handlers and <see cref="SparkService"/> both take the service through a
+    /// <c>Func&lt;T&gt;</c>, and the service's BTCPay gateways take core's payment types the same way — the rule at
+    /// the top of <see cref="Execute"/>, applied uniformly.
+    /// </para>
+    /// <para>
+    /// <b>Rates.</b> A prompt is denominated in the coin, so BTCPay needs <c>USDC_X</c> and <c>USDT_X</c> for
+    /// every invoice currency. Both coins are taken at dollar parity — exactly as the SDK sizes the quote — and
+    /// crossed through bitcoin for anything else, so a store needs no rate configuration of its own: the preferred
+    /// exchange that already prices <c>BTC_X</c> prices these too. The rules are exact pairs, one per fiat currency,
+    /// because default rules are server-wide and a pattern rule would reprice other stores' <c>BTC_USDT</c>
+    /// (<see cref="StablecoinRateRules"/>). A store on custom rate scripting has to add these itself, which the docs
+    /// say.
+    /// </para>
+    /// </remarks>
+    private static void AddStablecoinPayments(IServiceCollection services)
+    {
+        services.AddSingleton<StablecoinRouteCache>();
+        services.AddSingleton<IStablecoinInvoiceGateway, BTCPayStablecoinInvoiceGateway>();
+        services.AddSingleton<IStablecoinStoreConfig, BTCPayStablecoinStoreConfig>();
+        services.AddSingleton(provider =>
+        {
+            // Mainnet only, resolved once for the reason Stable Balance's is: the chain is fixed for the life of
+            // the process, and the SDK refuses a cross-chain configuration anywhere else.
+            var networkProvider = provider.GetRequiredService<BTCPayNetworkProvider>();
+            return new StablecoinPaymentService(
+                provider.GetRequiredService<IStablecoinQuoteStore>(),
+                provider.GetRequiredService<IStablecoinInvoiceGateway>(),
+                provider.GetRequiredService<IStablecoinStoreConfig>(),
+                provider.GetRequiredService<ISparkStoreRuntime>(),
+                provider.GetRequiredService<StablecoinRouteCache>(),
+                provider.GetRequiredService<ICrossChainValueOracle>(),
+                provider.GetRequiredService<ISparkLedgerStore>(),
+                provider.GetRequiredService<TimeProvider>(),
+                SparkNetworks.ToNBitcoinNetwork(networkProvider.NetworkType) == Network.Main,
+                provider.GetRequiredService<ILogger<StablecoinPaymentService>>());
+        });
+        services.TryAddSingleton<Func<StablecoinPaymentService>>(provider =>
+            provider.GetRequiredService<StablecoinPaymentService>);
+
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            services.AddSingleton<IPaymentMethodHandler>(provider => new StablecoinPaymentMethodHandler(
+                asset,
+                provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>()));
+            services.AddSingleton<ICheckoutModelExtension>(provider => new StablecoinCheckoutModelExtension(
+                asset, provider.GetRequiredService<ILogger<StablecoinCheckoutModelExtension>>()));
+            services.AddSingleton<IPaymentLinkExtension>(provider => new StablecoinPaymentLinkExtension(
+                new StablecoinPaymentMethodHandler(
+                    asset,
+                    provider.GetRequiredService<Func<StablecoinPaymentService>>(),
+                    provider.GetRequiredService<ILogger<StablecoinPaymentMethodHandler>>())));
+            services.AddDefaultPrettyName(asset.PaymentMethodId, asset.Symbol);
+            services.AddCurrencyData(new CurrencyData
+            {
+                Code = asset.Symbol,
+                Name = asset.Name,
+                Divisibility = StablecoinPayments.Divisibility,
+                Symbol = null,
+                Crypto = true
+            });
+            // Exact pairs only, so they price these prompts and nothing else on the server: see StablecoinRateRules.
+            services.AddSingleton(StablecoinRateRules.For(asset));
+        }
+
+        // Crediting what the event stream dropped, and retrying credits that did not land. Same cadence as the
+        // Lightning reconciliation; a store with no open quote costs one indexed query per pass.
+        services.AddScheduledTask<StablecoinReconciliationTask>(Constants.ReconciliationInterval);
+
+        // BTCPay's Reporting page: these payments with their conversion details. Hidden off mainnet, where there are
+        // none. Availability is read when BTCPay lists reports, long after the container is built.
+        services.AddSingleton<IStablecoinPaymentHistory, BTCPayStablecoinPaymentHistory>();
+        services.AddSingleton<ReportProvider>(provider => new FlintStablecoinPaymentsReportProvider(
+            provider.GetRequiredService<IStablecoinPaymentHistory>(),
+            () => provider.GetRequiredService<Func<StablecoinPaymentService>>()().Available,
+            provider.GetRequiredService<ILogger<FlintStablecoinPaymentsReportProvider>>()));
     }
 }

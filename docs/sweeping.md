@@ -15,7 +15,11 @@ the swept amount") live on the **Advanced** page, because their defaults — no 
 the swept amount — are right for almost every store.
 
 **Every sweep is a cooperative exit** — the plugin asks Spark's service providers to build and broadcast a
-Bitcoin transaction. There is no unilateral-exit path in this plugin, in its UI, or anywhere in its code.
+Bitcoin transaction. Sweeping never performs a unilateral exit — the only unilateral path in the plugin is
+the manual flow linked from the Advanced page, which nothing here can reach or trigger.
+While a store has such an exit quoted or built, sweeping — automatic and manual — is refused with the reason
+`ExitInProgress` in the sweep history, because a sweep would spend the leaves the exit is pinned to; it
+resumes once the exit is completed or abandoned.
 "Take the exit fee out of the swept amount" is the SDK's `FeesIncluded` fee policy on a cooperative exit
 and nothing more.
 
@@ -53,6 +57,12 @@ times and how recently it has happened, keyed on the *kind* of refusal rather th
 wording contains live figures including a balance that drifts by a few sats, so a store parked on a
 refusal would otherwise accumulate a row every couple of minutes forever. Coalescing is bounded to a day,
 so a condition that stopped and came back reads as two episodes.
+
+For accounting, the same history is on BTCPay's **Reporting** page as **Flint Sweeps**, where it can be
+filtered, charted and exported as CSV. Each row is a sweep that moved money or may have, with what left the
+wallet, the fee, and what arrived. Refusals are left out. On BTCPay 2.4.5 and later it is also available over
+Greenfield: `POST /api/v1/stores/{storeId}/reports` with a body such as
+`{"search": "view:Flint Sweeps,daterange:last30d,timezone:UTC"}`.
 
 **Crash safety.** The SDK adopts the idempotency key given to `SendPayment` as its own `Payment.id`, verified
 on real cooperative exits. So the plugin writes a `SweepRecord` carrying a fresh UUID *before* it calls the

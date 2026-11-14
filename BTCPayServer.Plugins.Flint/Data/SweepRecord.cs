@@ -18,7 +18,8 @@ namespace BTCPayServer.Plugins.Flint.Data;
 /// behaviour is not documented by the SDK; it was verified against coop exits on a funded regtest run.
 /// </para>
 /// <para>
-/// Every sweep this records is a <b>cooperative exit</b>. There is no unilateral-exit path in this plugin.
+/// Every sweep this records is a <b>cooperative exit</b>. A unilateral exit is never recorded here — the
+/// unilateral-exit flow keeps its own records (<c>UnilateralExitRecord</c>).
 /// </para>
 /// <para>
 /// The row is also the merchant's explanation of a sweep that did <em>not</em> happen: a refusal writes a
@@ -417,7 +418,19 @@ public enum SweepRefusalCode
     /// the provider states; this one bounds the <em>rate</em> it applies, which nothing inside the quote can
     /// check — a quote offering $100 of USDT for $320 of satoshi states a 0.34% spread.
     /// </remarks>
-    CrossChainValueUnverifiable = 16
+    CrossChainValueUnverifiable = 16,
+
+    /// <summary>
+    /// The store has a unilateral exit quoted or built, and a sweep would spend the leaves it is pinned to.
+    /// </summary>
+    /// <remarks>
+    /// A pause rather than a fault: it clears the moment the exit is marked completed or abandoned. Recorded like
+    /// any other refusal, so an operator who wonders why their balance stopped moving reads the reason in the
+    /// sweep history rather than inferring it. Named without the word "unilateral" because this enum is published
+    /// in the Greenfield document, which by policy offers no unilateral exit (see <c>SparkApiContractTests</c>);
+    /// the message carries the specifics.
+    /// </remarks>
+    ExitInProgress = 17
 }
 
 /// <summary>What set a sweep in motion.</summary>

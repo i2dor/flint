@@ -72,6 +72,28 @@
   Lightning backend. The one case it is deliberately not written is a superseded BOLT11 — the prompt is
   offering the replacement by then, and its preimage is a different value.
 - **Testnet and signet are unsupported**, because the SDK only offers mainnet and regtest.
+- **USDC and USDT at checkout** ([Accepting USDC and USDT](stablecoin-payments.md)) have their own list:
+  - **Mainnet only**, and not testable anywhere else: the provider serves no other network, so the unit tests run
+    against a fake modelled on the SDK's real shapes, and the path has been exercised on mainnet up to a live quote
+    and a checkout, not yet a paid invoice.
+  - **One quote, one transaction, the exact amount.** A payment is matched to its quote by the provider's figures
+    for that quote, never by who sent it. A different amount is credited with what arrived when its quote can still
+    be told apart; one that cannot is left in the wallet and reported once in BTCPay's log for a human.
+  - **An order the provider refunds or abandons is invisible.** The SDK reports conversions that complete; one that
+    never delivers leaves its invoice unpaid, with nothing in the plugin to say why. The payer's recourse is the
+    provider.
+  - **Only networks the plugin ships an icon for are offered** — eight today. The provider serves more; adding one
+    is its icon and a line of code.
+  - **A custom rate script needs USDC and USDT rules**, or the two payment methods cannot be priced. The plugin's
+    defaults are exact pairs (`USDC_USD = 1`, `USDT_USD = 1`, and 42 major fiat currencies through bitcoin) and
+    apply only to stores on BTCPay's default rules; other fiat falls to the store's catch-all.
+  - **Replacing a store's recovery phrase strands its open quotes.** A quote's address pays the wallet that made
+    it. From 1.3.1 the checkout and the Greenfield payment link stop offering a quote the moment the store runs a
+    different wallet, and send the payer for a fresh one. But a payment already sent to an old quote does not credit
+    its invoice: whatever the provider delivers for it is the old wallet's, reachable only with the old phrase.
+    Replace a phrase when no USDC or USDT invoice is open.
+  - **Quotes are bounded**: ten per invoice and 500 still on offer per store, since each is a provider order the SDK
+    watches for a day. Only quotes a payer can still be shown count towards the store's 500.
 - **The SDK's own log cannot be turned up to `trace`, on purpose.** The plugin installs the Rust SDK's
   logging subscriber, which writes `<DataDir>/Plugins/Flint/logs/sdk.log` *and* forwards every line into
   BTCPay's log. What it emits at each level was read line by line against a throwaway regtest wallet: at
@@ -88,8 +110,7 @@
   At the shipped `info` level it is not fast-growing, but it is unbounded and it grows for as long as the
   server runs. **Treat it as a file your host is responsible for**: point `logrotate` (or your container's
   log policy) at it, with the caveat that the SDK holds the handle open, so a rotation scheme that renames
-  the file needs `copytruncate` rather than `create`. A ready-to-install `logrotate` configuration using
-  `copytruncate` is at `scripts/flint-logrotate.conf`. It is safe to delete while the server is stopped.
+  the file needs `copytruncate` rather than `create`. It is safe to delete while the server is stopped.
   Nothing in the plugin reads it back; it exists for you and for a bug report.
 - **Everything the plugin writes under the data directory is owner-only, and that is the only protection
   it has.** Each store's SDK state lives in `<DataDir>/Plugins/Flint/<storeId>/`, beside the log directory,
@@ -136,6 +157,48 @@
   the wallet on-chain](deposits.md). Closing this properly would mean the plugin doing all the claiming itself,
   which trades an overpayment risk for a worse one — a claim loop that stops means no deposit ever arrives —
   and is not something to ship without mainnet evidence behind it.
+- **The unilateral exit is manual, and narrower than the name suggests.** It is linked from every store's
+  Advanced page, refuses to quote or build until an operator has accepted its disclosure, and carries four
+  limits that do not show from the name alone. The plugin **never broadcasts**: it quotes, funds and signs, and the
+  operator pushes every transaction out by hand, package by package, through a node that supports package
+  relay — a plain `sendrawtransaction` rejects the zero-fee tree transactions. An exit is quoted and built
+  from data the SDK holds **locally**, so on the pinned SDK (0.26.0) it does not need the Spark operators to
+  be reachable — but only for leaves whose data was collected while they still were. That is why the
+  exit-state backup on the Advanced page matters: it is the copy that survives the wallet's own storage. An
+  imported out-of-date backup can make leaves spent since spendable again until the next sync, which is why Flint
+  imports its own automatic backup only when the wallet's storage is empty and imports a pasted one once; backups
+  kept aside on removal or a seed change are never deleted by the plugin. And
+  a leaf is only exitable this second way once its chain has been synced at least once so its data exists to
+  be collected. So the path now covers operators who are gone, given a backup taken in time — not a wallet
+  that was never online with them. The fees are paid from a **separate on-chain output the operator funds by
+  hand**, as a single output covering the quoted amount for the first build, on an address derived from the
+  store's seed at a documented path; once built, a rebuild (after a Redo, an unverified status, or to raise the
+  fee) hands Spark the funding already committed to follow and adds anything else sent to that address. And settlement is **not fast**: refunds carry multi-day CSV timelocks, and nothing in the
+  plugin watches the chain on the operator's behalf. That last point has a cost worth naming: about 50 blocks
+  after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose fee is
+  taken out of the leaf rather than paid by the funding UTXO — so a step left unbroadcast for more than about
+  eight hours after it became ready can end up paying for parts of itself out of the money being recovered.
+  Checking the exit page every few hours while steps mature is the mitigation; its statuses refresh only when
+  you press Check progress (which needs the store's wallet running) or build, and the page shows when they
+  were last read. Packages need Bitcoin Core 29 or later (the zero-value P2A anchors). While an exit is in
+  progress Flint pauses its own sweeps for that store, but Lightning payments, payouts, Stable Balance and
+  Spark's own leaf optimisation are not paused and can invalidate the exit — building then refuses, and the
+  exit has to be quoted again. Funding discovery also asks a block explorer (mempool.space by default on
+  mainnet) about the funding address, which discloses that address to a third party unless an own instance
+  is configured; only a server administrator can set that override. The explorer is contacted only from the
+  exit page, and only once the disclosure has been accepted: for a suggested fee rate while the quote form is
+  shown (cached for five minutes), for the funding address's balance each time the page is opened while an
+  exit awaits funding, and for its outputs when an exit is built. Opening the page to read the disclosure,
+  quoting, checking progress, the Advanced page, the exit-state backups and every background task contact no
+  explorer.
+- **Every store now has exit-state backups on disk, and sweeps check for exits.** The automatic exit-state
+  backup runs for every running store: each wallet's exit data is exported once after each wallet start, again
+  when money moves or the SDK reports the exit data changed (debounced to two minutes), and at least hourly, and
+  written to `<DataDir>/Plugins/Flint/exit-state/<storeId>.txt` (owner-only) only when it has changed. A file
+  can run to several megabytes on a busy wallet. A copy on the server's own disk does not survive that disk, so
+  download it from the Advanced page and keep it elsewhere, encrypted. Every sweep and sweep preview also looks
+  up whether the store has an exit in progress, and refuses (`ExitInProgress`, or "could not be read" if the
+  lookup fails) rather than spend leaves an exit is pinned to.
 - **Neither post-MVP feature can be tested off mainnet.** Cross-chain sending is hard-gated — the SDK throws
   at connect on any other network — and Stable Balance is *accepted* on regtest and then never converts,
   because USDB does not exist there. So the unit tests run against a fake built to model the real SDK's

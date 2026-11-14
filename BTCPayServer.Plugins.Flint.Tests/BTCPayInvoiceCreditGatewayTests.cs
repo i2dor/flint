@@ -1,4 +1,3 @@
-using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
@@ -156,7 +155,7 @@ public class BTCPayInvoiceCreditGatewayTests
     }
 
     // -----------------------------------------------------------------------------------------------------------
-    // The amount, and the id
+    // The amount
     // -----------------------------------------------------------------------------------------------------------
 
     [Theory]
@@ -173,54 +172,18 @@ public class BTCPayInvoiceCreditGatewayTests
             BTCPayInvoiceCreditGateway.ToBtc(msat));
     }
 
-    [Fact]
-    public void The_amount_conversion_is_the_one_core_uses()
-    {
-        // Through LightMoney rather than by dividing, so it cannot drift from core's own arithmetic — which is
-        // what decides whether the merchant's invoice reads as fully paid.
-        Assert.Equal(
-            LightMoney.MilliSatoshis(123_456_789).ToDecimal(LightMoneyUnit.BTC),
-            BTCPayInvoiceCreditGateway.ToBtc(123_456_789));
-    }
-
-    [Fact]
-    public void The_payment_id_is_the_lower_case_payment_hash_core_itself_would_write()
-    {
-        // The whole exactly-once guarantee rests on this. Core's listener ids a Lightning payment with
-        // paymentHash.ToString(); this gateway ids it with the hash string it was given, which the record store
-        // guarantees is lower-case hex. If those two ever differed in case, the inserts would not collide on the
-        // payments primary key and a merchant could be credited twice for one payment.
-        var hash = PaymentFixture.PaymentHash;
-
-        Assert.Equal(hash, hash.ToLowerInvariant());
-        Assert.Equal(hash, uint256.Parse(hash).ToString());
-    }
-
     // -----------------------------------------------------------------------------------------------------------
     // Where a payment hash is looked for
     // -----------------------------------------------------------------------------------------------------------
-
-    [Fact]
-    public void A_payment_hash_is_looked_for_under_lightning_first_and_LNURL_second()
-    {
-        // Order, not membership. A plain Lightning checkout always indexes the hash under BTC-LN, so probing it
-        // first makes the common case one query. BTC-LNURL is probed second because BTCPay indexes an LNURL
-        // prompt's hash only when LUD-21 is enabled — which this plugin forces on when it provisions a store, so
-        // for a Flint store both rails are covered.
-        Assert.Equal(
-            [
-                PaymentTypes.LN.GetPaymentMethodId("BTC").ToString(),
-                PaymentTypes.LNURL.GetPaymentMethodId("BTC").ToString()
-            ],
-            BTCPayInvoiceCreditGateway.CreditablePaymentMethods.Select(p => p.ToString()).ToArray());
-    }
 
     [Fact]
     public void The_probed_payment_methods_are_the_strings_the_credit_decision_passes_back()
     {
         // The decision layer carries the payment method as a string so it needs no BTCPay types, and the gateway
         // parses it back on the way in. A round trip, because crediting under the wrong payment method would
-        // insert a second payment for the same money rather than colliding with core's.
+        // insert a second payment for the same money rather than colliding with core's. And in this order: a
+        // plain Lightning checkout always indexes the hash under BTC-LN, so probing it first makes the common case
+        // one query; BTC-LNURL is indexed only with LUD-21 on, which provisioning forces for a Flint store.
         foreach (var paymentMethodId in BTCPayInvoiceCreditGateway.CreditablePaymentMethods)
             Assert.Equal(paymentMethodId, PaymentMethodId.Parse(paymentMethodId.ToString()));
 

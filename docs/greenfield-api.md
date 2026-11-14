@@ -19,16 +19,17 @@ engine with the same guards.
 | `GET` | `/api/v1/stores/{storeId}/spark/sweep` | `btcpay.store.canviewstoresettings` |
 | `PUT` | `/api/v1/stores/{storeId}/spark/sweep` | `btcpay.store.canmodifystoresettings` |
 | `POST` | `/api/v1/stores/{storeId}/spark/sweep` | `btcpay.store.canmodifystoresettings` |
-| `POST` | `/api/v1/stores/{storeId}/spark/sync` | `btcpay.store.canmodifystoresettings` |
 | `GET` | `/api/v1/stores/{storeId}/spark/deposit` | `btcpay.store.canviewstoresettings` |
 | `POST` | `/api/v1/stores/{storeId}/spark/deposit/claim` | `btcpay.store.canmodifystoresettings` |
 | `GET` | `/api/v1/stores/{storeId}/spark/stable-balance` | `btcpay.store.canviewstoresettings` |
 | `PUT` | `/api/v1/stores/{storeId}/spark/stable-balance` | `btcpay.store.canmodifystoresettings` |
+| `GET` | `/api/v1/stores/{storeId}/spark/stablecoins` | `btcpay.store.canviewstoresettings` |
+| `PUT` | `/api/v1/stores/{storeId}/spark/stablecoins` | `btcpay.store.canmodifystoresettings` |
 
 A key scoped to a single store works; `btcpay.store.canmodifystoresettings` covers the read endpoints too.
 Basic authentication is accepted wherever an API key is, as everywhere in Greenfield.
 
-Four things are worth knowing before scripting against it.
+Five things are worth knowing before scripting against it.
 
 - **A key that generates or imports a seed needs `btcpay.server.canmodifyserversettings` as well**, even
   when it belongs to an administrator. `seedSource` `generate`, `import` and `hotWallet` all create a hot
@@ -48,11 +49,12 @@ Four things are worth knowing before scripting against it.
   store whose fee ceiling sits below the current exit fee stays there indefinitely and nothing is wrong —
   so gate on `outcome`, and read `refusalCode` for the stable identity of a refusal.
 - **`balanceSats` is indicative.** It is read from the SDK's cache without forcing a sync, lags settlement
-  by around 20 seconds, and drifts by a few sats. Do not reconcile against it. Use
-  `POST .../spark/sync` when you need a current reading.
-- **`GET .../spark/sweep` includes a `warnings` array.** On mainnet, it is non-empty when the
-  balance threshold or minimum sweep amount are below the recommended defaults (which were measured on
-  regtest). Scripts should print this array at provisioning time.
+  by around 20 seconds, and drifts by a few sats. Do not reconcile against it.
+- **`PUT .../spark/stablecoins` switches USDC and USDT at checkout for new invoices, and moves no money.**
+  `{"enabled": true}` offers both on mainnet (anywhere else it is a `422`); an empty body turns them off, and
+  quotes already shown still settle. The invoices then list them as the `USDC-FLINT` and `USDT-FLINT` payment
+  methods, which BTCPay's own invoice endpoints report like any other — see
+  [Accepting USDC and USDT](stablecoin-payments.md).
 
 Setting a store up with a fresh seed and reading its state back:
 
@@ -100,40 +102,3 @@ clears the store's Lightning payment method only if it still points at this stor
 ```bash
 curl -sS -X DELETE "$BTCPAY/api/v1/stores/$STORE/spark" -H "$AUTH" -i | head -1
 ```
-
-Force a wallet sync and read a current balance (the SDK cache may lag settlement by ~20 s):
-
-```bash
-curl -sS -X POST "$BTCPAY/api/v1/stores/$STORE/spark/sync" -H "$AUTH" | jq
-# { "walletRunning": true, "balanceSats": 218432, "syncedAt": "2026-08-23T..." }
-```
-
-Configure a sweep webhook and receive a POST after each successful sweep:
-
-```bash
-# Add sweepWebhookUrl alongside the other sweep settings.
-curl -sS -X PUT "$BTCPAY/api/v1/stores/$STORE/spark/sweep" \
-  -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"balanceThresholdSats":200000,"minimumSweepSats":100000,
-       "maxFeePercent":3.0,"drainWhenSweeping":true,"destinationMode":"StoreWallet",
-       "sweepWebhookUrl":"https://your.endpoint/spark-swept"}' | jq .settings
-```
-
-The payload delivered to the webhook URL:
-
-```json
-{
-  "storeId": "...",
-  "idempotencyKey": "<uuid>",
-  "txId": "<on-chain txid>",
-  "amountSats": 215000,
-  "feeSats": 3000,
-  "destination": "bc1q...",
-  "destinationMode": "StoreWallet",
-  "trigger": "Automatic",
-  "completedAt": "2026-08-23T12:34:56.789+00:00"
-}
-```
-
-Delivery failures are logged as warnings and never retried. The sweep record in the database is the
-authoritative source of truth.

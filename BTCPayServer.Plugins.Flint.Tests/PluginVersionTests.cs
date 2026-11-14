@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -49,7 +50,7 @@ public class PluginVersionTests
     [Fact]
     public void The_changelog_documents_the_version_being_built()
     {
-        var changelog = File.ReadAllText(Path.Combine(RepoRoot(), "CHANGELOG.md"));
+        var changelog = File.ReadAllText(Path.Combine(RepoPaths.Root, "CHANGELOG.md"));
 
         // The newest entry is the first "## [x.y.z]" heading in the file. Keep-a-Changelog order is
         // newest-first, so anything else means the file has been edited in the wrong place.
@@ -67,7 +68,7 @@ public class PluginVersionTests
         // exactly the confusion this guards against: neither of those is the plugin's own version and neither
         // may be bumped in lockstep with it.
         var constants = File.ReadAllText(
-            Path.Combine(RepoRoot(), "BTCPayServer.Plugins.Flint", "Constants.cs"));
+            Path.Combine(RepoPaths.Plugin, "Constants.cs"));
 
         Assert.True(
             !constants.Contains("PluginVersion", StringComparison.Ordinal),
@@ -86,7 +87,7 @@ public class PluginVersionTests
     private static string CsprojVersion()
     {
         var csproj = File.ReadAllText(Path.Combine(
-            RepoRoot(), "BTCPayServer.Plugins.Flint", "BTCPayServer.Plugins.Flint.csproj"));
+            RepoPaths.Plugin, "BTCPayServer.Plugins.Flint.csproj"));
 
         var match = Regex.Match(csproj, @"<Version>(?<version>[^<]+)</Version>");
         Assert.True(match.Success, "BTCPayServer.Plugins.Flint.csproj has no <Version> property.");
@@ -101,14 +102,4 @@ public class PluginVersionTests
         count >= 4
             ? $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}.{Math.Max(version.Revision, 0)}"
             : $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
-
-    private static string RepoRoot()
-    {
-        var dir = AppContext.BaseDirectory;
-        // The solution file, not LICENSE: LICENSE is copied into the build output so it ships inside the
-        // .btcpay, which made it match the bin directory before it matched the repository root.
-        while (dir is not null && !File.Exists(Path.Combine(dir, "BTCPayServer.Plugins.Flint.slnx")))
-            dir = Directory.GetParent(dir)?.FullName;
-        return dir ?? throw new InvalidOperationException("repo root not found");
-    }
 }

@@ -1,5 +1,6 @@
 using System;
 using BTCPayServer.Plugins.Flint;
+using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -32,17 +33,7 @@ public class BreezApiKeyTests
         // Guards the point of the exercise: if someone pastes the raw key back into the source,
         // the scanners this protects against start finding it again.
         var source = System.IO.File.ReadAllText(
-            System.IO.Path.Combine(RepoRoot(), "BTCPayServer.Plugins.Flint", "Constants.cs"));
+            System.IO.Path.Combine(RepoPaths.Plugin, "Constants.cs"));
         Assert.DoesNotContain(Constants.BreezApiKey, source);
-    }
-
-    private static string RepoRoot()
-    {
-        var dir = System.AppContext.BaseDirectory;
-        // The solution file, not LICENSE: LICENSE is copied into the build output so it ships inside the
-        // .btcpay, which made it match the bin directory before it matched the repository root.
-        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, "BTCPayServer.Plugins.Flint.slnx")))
-            dir = System.IO.Directory.GetParent(dir)?.FullName;
-        return dir ?? throw new System.InvalidOperationException("repo root not found");
     }
 }

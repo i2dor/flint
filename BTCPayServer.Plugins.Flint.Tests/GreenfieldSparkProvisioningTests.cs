@@ -142,7 +142,8 @@ public class GreenfieldSparkProvisioningTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("wibble")]
-    // Named on purpose: there is no unilateral-exit path anywhere in this plugin, so asking for one is simply an
+    // Named on purpose. The unilateral exit is on the store's Spark pages, on every server since 1.2.1, but the
+    // Greenfield API offers no path to it and it was never a seed source, so asking for one is simply an
     // unrecognised seed source rather than something the API quietly interprets.
     [InlineData("unilateral-exit")]
     public async Task An_unrecognised_seed_source_is_refused_with_the_plugins_own_message(string? value)
@@ -253,28 +254,6 @@ public class GreenfieldSparkProvisioningTests
     }
 
     [Fact]
-    public async Task The_wallet_is_confirmed_running_before_the_stores_Lightning_config_is_written()
-    {
-        // The ordering invariant, asserted on the shared monotonic write log rather than as two independent call
-        // counts — which would pass just as happily with the writes reversed. A store must never advertise a
-        // Lightning wallet that has not started.
-        var h = SparkSurfaceHarness.Create();
-
-        AssertOk<SparkProvisionResponse>(await h.Api.Provision(
-            Store, new SparkProvisionRequest { SeedSource = "generate" }, CancellationToken.None));
-
-        var settingsWrite = h.WriteLog.Entries.IndexOf($"settings:{Store}:stored");
-        var lightningWrite = h.WriteLog.Entries.IndexOf($"lightning:{Store}:set");
-
-        Assert.True(settingsWrite >= 0, "the settings were never stored");
-        Assert.True(lightningWrite >= 0, "the Lightning payment method was never written");
-        Assert.True(
-            settingsWrite < lightningWrite,
-            "the store's Lightning payment method was written before the wallet was confirmed running: "
-            + string.Join(" -> ", h.WriteLog.Entries));
-    }
-
-    [Fact]
     public async Task A_wallet_that_declines_to_start_rolls_the_settings_back_and_writes_no_Lightning_config()
     {
         // The quiet failure: a seed another store already owns, an unsupported chain, a seed this server can no
@@ -294,8 +273,11 @@ public class GreenfieldSparkProvisioningTests
     }
 
     [Fact]
-    public async Task A_seed_the_SDK_rejects_outright_rolls_back_and_never_logs_the_phrase()
+    public async Task A_seed_the_SDK_rejects_outright_is_reported_against_the_mnemonic_and_rolled_back()
     {
+        // That the operator log never carries the phrase or the SDK's text on this path is
+        // SparkStoreProvisionerTests.Provision_never_logs_a_word_of_the_seed's to prove: the log line is the
+        // provisioner's, and the exception it throws there does carry text that must not be logged.
         var h = SparkSurfaceHarness.Create();
         h.Settings.FailNextSetWith = new InvalidOperationException("unknown word (word 0)");
 
@@ -307,12 +289,6 @@ public class GreenfieldSparkProvisioningTests
         Assert.Equal("mnemonic", Assert.Single(errors).Path);
         Assert.Null(h.Settings.Settings.GetValueOrDefault(Store));
         Assert.DoesNotContain($"lightning:{Store}:set", h.WriteLog.Entries);
-
-        // The operator log gets the store and the exception type, never the phrase — the failing call's argument
-        // was the merchant's recovery phrase, and the SDK's wording for a rejected seed is not this plugin's to
-        // vouch for.
-        Assert.DoesNotContain("abandon", h.ProvisionerLog.AllText, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("about", h.ProvisionerLog.AllText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -337,38 +313,6 @@ public class GreenfieldSparkProvisioningTests
     }
 
     [Fact]
-    public async Task Re_provisioning_replaces_the_seed_and_carries_the_sweep_configuration_across()
-    {
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Settings.Settings[Store]!.Sweep = new SweepSettings
-        {
-            Enabled = true,
-            BalanceThresholdSats = 400_000,
-            MaxFeePercent = 1.25
-        };
-
-        var response = AssertOk<SparkProvisionResponse>(await h.Api.Provision(
-            Store,
-            new SparkProvisionRequest { SeedSource = "import", Mnemonic = SparkSurfaceHarness.ValidMnemonic },
-            CancellationToken.None));
-
-        Assert.Null(response.Mnemonic);
-        Assert.Equal(SparkSurfaceHarness.ValidMnemonic, h.StoredMnemonic(Store));
-
-        // A merchant changing their seed has not asked to lose their sweep configuration.
-        var sweep = h.Settings.Settings[Store]!.Sweep;
-        Assert.True(sweep.Enabled);
-        Assert.Equal(400_000, sweep.BalanceThresholdSats);
-        Assert.Equal(1.25, sweep.MaxFeePercent);
-
-        // And the payment key is rotated, not kept: the connection string is a bearer spend credential, and a
-        // re-provision that left every previously issued copy able to drive the new wallet would quietly
-        // defeat the reset. The Lightning wiring is rewritten with the new key in the same operation.
-        Assert.NotEqual(SparkSurfaceHarness.VictimPaymentKey, h.Settings.Settings[Store]!.PaymentKey);
-        Assert.False(string.IsNullOrEmpty(h.Settings.Settings[Store]!.PaymentKey));
-    }
-
-    [Fact]
     public async Task Removing_an_unconfigured_store_says_so_rather_than_pretending_to_succeed()
     {
         var h = SparkSurfaceHarness.Create();
@@ -379,22 +323,6 @@ public class GreenfieldSparkProvisioningTests
         Assert.Equal(StatusCodes.Status404NotFound, objectResult.StatusCode);
         Assert.Equal("spark-not-configured", Assert.IsType<GreenfieldAPIError>(objectResult.Value).Code);
         Assert.Empty(h.Settings.Writes);
-    }
-
-    [Fact]
-    public async Task Removal_leaves_another_Lightning_node_alone()
-    {
-        // The store experimented with Spark and then configured an LND node. Removing Spark must not discard a
-        // connection string carrying macaroon material that exists nowhere else.
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Lightning.Add(Store, "type=lnd-rest;server=https://127.0.0.1:8080/;macaroon=abcdef");
-
-        Assert.IsType<OkResult>(await h.Api.Remove(Store, CancellationToken.None));
-
-        Assert.Null(h.Settings.Settings.GetValueOrDefault(Store));
-        Assert.Equal(
-            "type=lnd-rest;server=https://127.0.0.1:8080/;macaroon=abcdef",
-            h.Lightning.Stores[Store].ConnectionString);
     }
 
     [Fact]

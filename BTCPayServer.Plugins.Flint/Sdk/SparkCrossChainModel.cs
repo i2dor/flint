@@ -122,18 +122,6 @@ public sealed record SparkCrossChainQuote(
     /// <summary>What arrives at the EVM address, as a decimal quantity in the destination asset.</summary>
     public string DescribeEstimatedOut() =>
         $"{SparkSendAmount.FormatBaseUnits(EstimatedOut, Route.Decimals)} {Route.Asset}";
-
-    /// <summary>
-    /// The all-in cost as a percentage of what is debited, computed on the <em>sats</em> side.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not computed from <see cref="FeeAmount"/>: that figure is in destination-asset units and
-    /// <see cref="ServiceFeeAmount"/> may be in a third asset again, so adding them is meaningless. The honest
-    /// comparable number for a merchant is how much more left the wallet than the sweep asked for, which is the
-    /// overpay pad — and the provider fee is inside it.
-    /// </remarks>
-    public double OverpayPercent(long requestedSats) =>
-        requestedSats <= 0 ? 0d : (AmountInSats - requestedSats) * 100d / requestedSats;
 }
 
 /// <summary>How far a conversion or a cross-chain delivery has got.</summary>
@@ -172,6 +160,21 @@ public enum SparkConversionStatus
 /// The authoritative settled amount at the destination, in destination-asset base units. Null until the
 /// provider reports delivery — which, again, arrives through no event.
 /// </param>
+/// <param name="AssetAmountIn">
+/// On a <b>receive</b>, the provider order's <c>amountIn</c> on <paramref name="Chain"/>, in the external asset's
+/// base units (<paramref name="AssetDecimals"/>) — or, when the order omits it, the SDK's quote-time deposit,
+/// which it falls back to silently. So a value equal to the quoted deposit is not evidence of what was sent; see
+/// <c>StablecoinPaymentService</c> for how crediting reads it. On a send, the Spark amount expressed in the
+/// external asset.
+/// </param>
+/// <param name="EstimatedOut">
+/// Frozen at quote time. On a receive this is in Spark-side units (sats, or token base units) and equals the
+/// quote's <c>expectedReceivedAmount</c> — which is why it can identify the quote a receive came from.
+/// </param>
+/// <param name="ServiceFeeAmount">Frozen at quote time, in the service-fee asset's own units.</param>
+/// <param name="ExternalTxHash">
+/// The transaction on the non-Spark chain: the payer's funding deposit on a receive, the delivery on a send.
+/// </param>
 public sealed record SparkConversionState(
     SparkCrossChainProvider Provider,
     SparkConversionStatus Status,
@@ -181,7 +184,13 @@ public sealed record SparkConversionState(
     string? RecipientAddress = null,
     string? Chain = null,
     string? Asset = null,
-    uint AssetDecimals = 0)
+    uint AssetDecimals = 0,
+    string? ChainId = null,
+    string? AssetContract = null,
+    BigInteger? AssetAmountIn = null,
+    BigInteger? EstimatedOut = null,
+    BigInteger? ServiceFeeAmount = null,
+    string? ExternalTxHash = null)
 {
     /// <summary>True while the provider has neither delivered nor given up.</summary>
     public bool IsInFlight => Status is SparkConversionStatus.Pending or SparkConversionStatus.Unknown;

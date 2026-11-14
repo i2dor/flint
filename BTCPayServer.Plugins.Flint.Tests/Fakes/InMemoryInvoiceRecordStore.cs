@@ -3,11 +3,28 @@ using BTCPayServer.Plugins.Flint.Data;
 namespace BTCPayServer.Plugins.Flint.Tests.Fakes;
 
 /// <summary>
-/// In-memory <see cref="IInvoiceRecordStore"/> with the same semantics as the EF implementation, so the
-/// client's behaviour can be tested without Postgres.
+/// In-memory <see cref="IInvoiceRecordStore"/> whose transitions match the EF implementation's, so the
+/// client's behaviour can be tested without Postgres. <see cref="InvoiceRecordStoreContractTests"/> holds the
+/// two to the same contract.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Every method runs under one lock, so each compare-and-set is atomic as the EF store's conditional UPDATE is.
+/// The startup reconciliation pass and the SDK event path settle and credit the same row concurrently by
+/// design; unlocked, both could pass the same guard and both report that they made the change.
+/// </para>
+/// <para>
+/// One deliberate difference: reads hand out the <em>live</em> stored rows, where EF returns detached copies,
+/// so a record a caller holds changes under it when a later call settles or stamps that row. Tests rely on
+/// this to edit a stored row in place (see <see cref="Records"/>). It is acceptable because no caller treats a
+/// record it holds as the outcome of a transition — each acts on what the compare-and-set returns — and a
+/// concurrent double credit is stopped by BTCPay's <c>Payments</c> primary key, which the credit gateway's
+/// insert collides on, not by the record's fields.
+/// </para>
+/// </remarks>
 public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
 {
+    private readonly object _gate = new();
     private readonly Dictionary<string, InvoiceRecord> _records = [];
 
     /// <summary>Thrown by <see cref="AddAsync"/> when set, to exercise the persistence-failure path.</summary>
@@ -41,14 +58,21 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
     /// </summary>
     public List<InvoiceSettlementCursor?> ReconciliationCursors { get; } = [];
 
-    public IReadOnlyDictionary<string, InvoiceRecord> Records => _records;
+    /// <summary>A snapshot of the table, holding the live rows: a test that edits one edits the stored row.</summary>
+    public IReadOnlyDictionary<string, InvoiceRecord> Records
+    {
+        get { lock (_gate) return new Dictionary<string, InvoiceRecord>(_records); }
+    }
 
     public Task AddAsync(InvoiceRecord record, CancellationToken cancellationToken = default)
     {
         if (FailAddWith is not null)
             throw FailAddWith;
-        if (!_records.TryAdd(record.PaymentHash, record))
-            throw new InvalidOperationException($"Duplicate payment hash {record.PaymentHash}");
+        lock (_gate)
+        {
+            if (!_records.TryAdd(record.PaymentHash, record))
+                throw new InvalidOperationException($"Duplicate payment hash {record.PaymentHash}");
+        }
         return Task.CompletedTask;
     }
 
@@ -57,8 +81,11 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         string paymentHash,
         CancellationToken cancellationToken = default)
     {
-        var record = _records.GetValueOrDefault(paymentHash);
-        return Task.FromResult(record?.StoreId == storeId ? record : null);
+        lock (_gate)
+        {
+            var record = _records.GetValueOrDefault(paymentHash);
+            return Task.FromResult(record?.StoreId == storeId ? record : null);
+        }
     }
 
     public Task<IReadOnlyList<InvoiceRecord>> ListAsync(
@@ -69,11 +96,14 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
-        IEnumerable<InvoiceRecord> query = _records.Values.Where(r => r.StoreId == storeId);
-        if (pendingOnly)
-            query = query.Where(r => r.Status is InvoiceRecordStatus.Unpaid && r.ExpiresAt > now);
-        return Task.FromResult<IReadOnlyList<InvoiceRecord>>(
-            query.OrderByDescending(r => r.CreatedAt).Skip(offset).Take(limit).ToList());
+        lock (_gate)
+        {
+            IEnumerable<InvoiceRecord> query = _records.Values.Where(r => r.StoreId == storeId);
+            if (pendingOnly)
+                query = query.Where(r => r.Status is InvoiceRecordStatus.Unpaid && r.ExpiresAt > now);
+            return Task.FromResult<IReadOnlyList<InvoiceRecord>>(
+                query.OrderByDescending(r => r.CreatedAt).Skip(offset).Take(limit).ToList());
+        }
     }
 
     public Task<IReadOnlyList<InvoiceRecord>> ListForReconciliationAsync(
@@ -83,28 +113,31 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         int limit,
         CancellationToken cancellationToken = default)
     {
-        ReconciliationCursors.Add(after);
-        if (FailReconciliationListWith is not null)
-            throw FailReconciliationListWith;
-
-        IEnumerable<InvoiceRecord> query = _records.Values
-            .Where(r => r.StoreId == storeId
-                        && r.Status is not InvoiceRecordStatus.Paid
-                        && r.ExpiresAt > settleableFrom);
-
-        if (after is not null)
+        lock (_gate)
         {
-            query = query.Where(r => r.ExpiresAt > after.ExpiresAt
-                                     || (r.ExpiresAt == after.ExpiresAt
-                                         && string.Compare(r.PaymentHash, after.PaymentHash,
-                                             StringComparison.Ordinal) > 0));
-        }
+            ReconciliationCursors.Add(after);
+            if (FailReconciliationListWith is not null)
+                throw FailReconciliationListWith;
 
-        return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
-            .OrderBy(r => r.ExpiresAt)
-            .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
-            .Take(limit)
-            .ToList());
+            IEnumerable<InvoiceRecord> query = _records.Values
+                .Where(r => r.StoreId == storeId
+                            && r.Status is not InvoiceRecordStatus.Paid
+                            && r.ExpiresAt > settleableFrom);
+
+            if (after is not null)
+            {
+                query = query.Where(r => r.ExpiresAt > after.ExpiresAt
+                                         || (r.ExpiresAt == after.ExpiresAt
+                                             && string.Compare(r.PaymentHash, after.PaymentHash,
+                                                 StringComparison.Ordinal) > 0));
+            }
+
+            return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
+                .OrderBy(r => r.ExpiresAt)
+                .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
+                .Take(limit)
+                .ToList());
+        }
     }
 
     public Task<bool> TryRecordSdkPaymentIdAsync(
@@ -113,15 +146,18 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         string sdkPaymentId,
         CancellationToken cancellationToken = default)
     {
-        var record = _records.GetValueOrDefault(paymentHash);
-        if (record is null || record.StoreId != storeId ||
-            record.Status is InvoiceRecordStatus.Paid || record.SdkPaymentId is not null)
+        lock (_gate)
         {
-            return Task.FromResult(false);
-        }
+            var record = _records.GetValueOrDefault(paymentHash);
+            if (record is null || record.StoreId != storeId ||
+                record.Status is InvoiceRecordStatus.Paid || record.SdkPaymentId is not null)
+            {
+                return Task.FromResult(false);
+            }
 
-        record.SdkPaymentId = sdkPaymentId;
-        return Task.FromResult(true);
+            record.SdkPaymentId = sdkPaymentId;
+            return Task.FromResult(true);
+        }
     }
 
     public Task<InvoiceSettlementResult> SettleAsync(
@@ -133,15 +169,35 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         DateTimeOffset settledAt,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrEmpty(sdkPaymentId);
+        ArgumentOutOfRangeException.ThrowIfNegative(amountReceivedMsat);
         if (FailSettleFor.Contains(paymentHash))
             throw new InvalidOperationException($"settle failure injected for {paymentHash}");
 
-        var record = _records.GetValueOrDefault(paymentHash);
-        if (record is null || record.StoreId != storeId)
-            return Task.FromResult(new InvoiceSettlementResult(InvoiceSettlementOutcome.NotFound, null));
+        lock (_gate)
+        {
+            var record = _records.GetValueOrDefault(paymentHash);
+            if (record is null || record.StoreId != storeId)
+                return Task.FromResult(new InvoiceSettlementResult(InvoiceSettlementOutcome.NotFound, null));
 
-        var outcome = record.TrySettle(sdkPaymentId, amountReceivedMsat, preimage, settledAt);
-        return Task.FromResult(new InvoiceSettlementResult(outcome, record));
+            if (record.Status is InvoiceRecordStatus.Paid)
+            {
+                // A replay: backfill only what is missing. The amount and the settlement time belong to
+                // whoever settled it first, because that is what BTCPay has already been told.
+                record.SdkPaymentId ??= sdkPaymentId;
+                record.Preimage ??= preimage;
+                return Task.FromResult(
+                    new InvoiceSettlementResult(InvoiceSettlementOutcome.AlreadySettled, record));
+            }
+
+            // Unpaid or cancelled alike: a cancelled invoice is still payable on Spark.
+            record.Status = InvoiceRecordStatus.Paid;
+            record.SdkPaymentId = sdkPaymentId;
+            record.AmountReceivedMsat = amountReceivedMsat;
+            record.Preimage = preimage ?? record.Preimage;
+            record.SettledAt = settledAt;
+            return Task.FromResult(new InvoiceSettlementResult(InvoiceSettlementOutcome.Settled, record));
+        }
     }
 
     public Task<bool> MarkCreditedAsync(
@@ -150,10 +206,18 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         DateTimeOffset creditedAt,
         CancellationToken cancellationToken = default)
     {
-        var record = _records.GetValueOrDefault(paymentHash);
-        if (record is null || record.StoreId != storeId)
-            return Task.FromResult(false);
-        return Task.FromResult(record.TryMarkCredited(creditedAt));
+        lock (_gate)
+        {
+            var record = _records.GetValueOrDefault(paymentHash);
+            if (record is null || record.StoreId != storeId ||
+                record.Status is not InvoiceRecordStatus.Paid || record.CreditedAt is not null)
+            {
+                return Task.FromResult(false);
+            }
+
+            record.CreditedAt = creditedAt;
+            return Task.FromResult(true);
+        }
     }
 
     public Task<bool> MarkCreditAbandonedAsync(
@@ -162,23 +226,36 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         DateTimeOffset abandonedAt,
         CancellationToken cancellationToken = default)
     {
-        var record = _records.GetValueOrDefault(paymentHash);
-        if (record is null || record.StoreId != storeId)
-            return Task.FromResult(false);
-        return Task.FromResult(record.TryMarkCreditAbandoned(abandonedAt));
+        lock (_gate)
+        {
+            var record = _records.GetValueOrDefault(paymentHash);
+            if (record is null || record.StoreId != storeId || record.Status is not InvoiceRecordStatus.Paid ||
+                record.CreditedAt is not null || record.CreditAbandonedAt is not null)
+            {
+                return Task.FromResult(false);
+            }
+
+            record.CreditAbandonedAt = abandonedAt;
+            return Task.FromResult(true);
+        }
     }
 
     public Task<IReadOnlyList<string>> ListStoreIdsAwaitingCreditAsync(
         DateTimeOffset settledFrom,
         int limit,
-        CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<string>>(_records.Values
-            .Where(r => AwaitingCredit(r, settledFrom))
-            .Select(r => r.StoreId)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(storeId => storeId, StringComparer.Ordinal)
-            .Take(limit)
-            .ToList());
+        CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult<IReadOnlyList<string>>(_records.Values
+                .Where(r => AwaitingCredit(r, settledFrom))
+                .Select(r => r.StoreId)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(storeId => storeId, StringComparer.Ordinal)
+                .Take(limit)
+                .ToList());
+        }
+    }
 
     public Task<IReadOnlyList<InvoiceRecord>> ListUncreditedAsync(
         string storeId,
@@ -187,30 +264,38 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         int limit,
         CancellationToken cancellationToken = default)
     {
-        IEnumerable<InvoiceRecord> query = _records.Values
-            .Where(r => r.StoreId == storeId && AwaitingCredit(r, settledFrom));
-
-        if (after is not null)
+        lock (_gate)
         {
-            query = query.Where(r => r.CreatedAt > after.CreatedAt
-                                     || (r.CreatedAt == after.CreatedAt
-                                         && string.Compare(r.PaymentHash, after.PaymentHash,
-                                             StringComparison.Ordinal) > 0));
-        }
+            IEnumerable<InvoiceRecord> query = _records.Values
+                .Where(r => r.StoreId == storeId && AwaitingCredit(r, settledFrom));
 
-        return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
-            .OrderBy(r => r.CreatedAt)
-            .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
-            .Take(limit)
-            .ToList());
+            if (after is not null)
+            {
+                query = query.Where(r => r.CreatedAt > after.CreatedAt
+                                         || (r.CreatedAt == after.CreatedAt
+                                             && string.Compare(r.PaymentHash, after.PaymentHash,
+                                                 StringComparison.Ordinal) > 0));
+            }
+
+            return Task.FromResult<IReadOnlyList<InvoiceRecord>>(query
+                .OrderBy(r => r.CreatedAt)
+                .ThenBy(r => r.PaymentHash, StringComparer.Ordinal)
+                .Take(limit)
+                .ToList());
+        }
     }
 
     public Task<bool> CancelAsync(string storeId, string paymentHash, CancellationToken cancellationToken = default)
     {
-        var record = _records.GetValueOrDefault(paymentHash);
-        if (record is null || record.StoreId != storeId)
-            return Task.FromResult(false);
-        return Task.FromResult(record.TryCancel());
+        lock (_gate)
+        {
+            var record = _records.GetValueOrDefault(paymentHash);
+            if (record is null || record.StoreId != storeId || record.Status is not InvoiceRecordStatus.Unpaid)
+                return Task.FromResult(false);
+
+            record.Status = InvoiceRecordStatus.Expired;
+            return Task.FromResult(true);
+        }
     }
 
     /// <summary>
@@ -223,5 +308,9 @@ public sealed class InMemoryInvoiceRecordStore : IInvoiceRecordStore
         && record.CreditAbandonedAt is null
         && record.SettledAt > settledFrom;
 
-    public void Seed(InvoiceRecord record) => _records[record.PaymentHash] = record;
+    public void Seed(InvoiceRecord record)
+    {
+        lock (_gate)
+            _records[record.PaymentHash] = record;
+    }
 }

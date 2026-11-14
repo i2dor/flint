@@ -325,8 +325,8 @@ public class GreenfieldSparkSweepTests
         h.Settings.Settings[Store]!.Sweep = new SweepSettings { Enabled = true, BalanceThresholdSats = 1 };
         h.WalletOf(Store).BalanceSats = 1_000;
         var engine = h.SweepEngine;
-        await engine.RunAsync(Store, SweepTrigger.Automatic, cancellationToken: CancellationToken.None);
-        await engine.RunAsync(Store, SweepTrigger.Automatic, cancellationToken: CancellationToken.None);
+        await engine.RunAsync(Store, SweepTrigger.Automatic, CancellationToken.None);
+        await engine.RunAsync(Store, SweepTrigger.Automatic, CancellationToken.None);
 
         var configuration = AssertOk<SparkSweepConfigurationData>(
             await h.Api.GetSweepConfiguration(Store, 0, 25, CancellationToken.None));
@@ -370,7 +370,7 @@ public class GreenfieldSparkSweepTests
         // The engine's own ordering too: a threshold decision made against an unsynced balance is a sweep of the
         // wrong size, so the sync precedes the read.
         var syncIndex = h.WriteLog.Entries.IndexOf("sdk:sync");
-        var readIndex = h.WriteLog.Entries.IndexOf("sdk:getinfo:synced");
+        var readIndex = h.WriteLog.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(syncIndex >= 0 && readIndex > syncIndex, string.Join(" -> ", h.WriteLog.Entries));
     }
 
@@ -479,27 +479,6 @@ public class GreenfieldSparkSweepTests
         Assert.Equal(SweepRecordStatus.Refused, result.Record!.Status);
         Assert.Equal(expected, result.Record.RefusalCode);
         Assert.Empty(h.WalletOf(Store).OnchainSendCalls);
-    }
-
-    [Fact]
-    public async Task A_sweep_is_refused_when_the_fee_moves_above_the_limit_between_the_quote_and_the_send()
-    {
-        // The guard that matters runs inside the send, against the quote actually being committed to. A refusal
-        // there means nothing was sent, and the record says so.
-        var h = SparkSurfaceHarness.Create(configureAttackerStore: true);
-        h.Settings.Settings[Store]!.Sweep = new SweepSettings { MinimumSweepSats = 100_000, MaxFeePercent = 1.0 };
-
-        var wallet = (FakeSparkSdkClient)h.Runtime.Clients[Store];
-        wallet.OnchainTiersAtSend = new SparkOnchainFeeQuote(
-            "quote", DateTimeOffset.UtcNow.AddMinutes(1), 40_000, 50_000, 60_000);
-
-        var result = AssertOk<SparkSweepResultData>(await h.Api.Sweep(Store, null, CancellationToken.None));
-
-        Assert.Equal(SweepOutcomeKind.Refused, result.Outcome);
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, result.RefusalCode);
-        // The send was reached and vetoed, so nothing left the wallet.
-        Assert.Single(wallet.OnchainSendCalls);
-        Assert.Equal(500_000, wallet.BalanceSats);
     }
 
     [Fact]

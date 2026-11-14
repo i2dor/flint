@@ -2,6 +2,7 @@ using System.Numerics;
 using Breez.Sdk.Spark;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
+using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Xunit;
 using SdkPaymentStatus = Breez.Sdk.Spark.PaymentStatus;
@@ -132,7 +133,7 @@ public class SparkServiceEventWiringTests
 
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, LightningLeg("recv-1", PaymentType.Receive, Hash));
 
-        await WaitFor(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
             "the invoice was never settled");
         // Credited the amount actually received, not the amount invoiced — the whole point of settling from
         // the payment rather than from the invoice. 1 000 sat received against a 1 000 000 msat invoice.
@@ -170,7 +171,7 @@ public class SparkServiceEventWiringTests
 
         // The wiring's own line, naming the send by its SDK id — the positive signal that the send leg really
         // was processed and not merely still sitting in the queue.
-        await WaitFor(() => h.Log.AllText.Contains("send-1"), "the send leg was never processed");
+        await Eventually.True(() => h.Log.AllText.Contains("send-1"), "the send leg was never processed");
         Assert.Contains("Spark send send-1", h.Log.AllText);
 
         // It never reached the reconciler.
@@ -184,7 +185,7 @@ public class SparkServiceEventWiringTests
         // because the loop had quietly died.
         h.Invoices.Seed(Unpaid(StoreId, OtherHash));
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, LightningLeg("recv-2", PaymentType.Receive, OtherHash));
-        await WaitFor(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
             "the follow-up receive never settled");
     }
 
@@ -202,7 +203,7 @@ public class SparkServiceEventWiringTests
 
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-1"));
 
-        await WaitFor(() => h.Log.AllText.Contains("on-chain deposit"),
+        await Eventually.True(() => h.Log.AllText.Contains("on-chain deposit"),
             "the deposit was never reported");
         Assert.DoesNotContain("cannot be matched to a BTCPay invoice", h.Log.AllText);
         // Netted amount, not the gross deposit.
@@ -228,8 +229,140 @@ public class SparkServiceEventWiringTests
 
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, noHash);
 
-        await WaitFor(() => h.Log.AllText.Contains("cannot be matched to a BTCPay invoice"),
+        await Eventually.True(() => h.Log.AllText.Contains("cannot be matched to a BTCPay invoice"),
             "an unattributable receive was not reported");
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // USDC/USDT: a Receive with no payment hash that is not unattributable at all
+    // ---------------------------------------------------------------------------------------------------
+
+    /// <summary>An open USDC quote on Base for one invoice, as the quote endpoint would have recorded it.</summary>
+    private static void SeedStablecoinQuote(SparkServiceHarness h, string quoteId = "quote-1")
+    {
+        h.Stablecoins.Invoices.Add("usdc-invoice", StoreId, 10m, (Services.StablecoinPayments.Usdc, ["base"]));
+        h.Stablecoins.Quotes.Quotes.Add(new StablecoinQuote
+        {
+            Id = quoteId,
+            StoreId = StoreId,
+            InvoiceId = "usdc-invoice",
+            PaymentMethodId = "USDC-FLINT",
+            Chain = "base",
+            ChainId = "8453",
+            Asset = "USDC",
+            ContractAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            Decimals = 6,
+            DepositAddress = "0x00000000000000000000000000000000000000aa",
+            DepositBaseUnits = "10080000",
+            AskedBaseUnits = "10080000",
+            PaymentRequest = "0x00000000000000000000000000000000000000aa",
+            DueAmount = 10m,
+            FeeAmount = 0.08m,
+            ExpectedReceivedBaseUnits = "10000",
+            DestinationAsset = "BTC",
+            ServiceFeeBaseUnits = "80000",
+            ServiceFeeAsset = "USDC",
+            CreatedAt = DateTimeOffset.UtcNow.AddMinutes(-2),
+            ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(13)
+        });
+    }
+
+    /// <summary>The inbound transfer the provider delivers a USDC quote with, as the SDK reports it.</summary>
+    private static Payment CrossChainArrival(string id, bool withConversion = true, DateTimeOffset? at = null) =>
+        new(
+            id: id,
+            paymentType: PaymentType.Receive,
+            status: SdkPaymentStatus.Completed,
+            amount: new BigInteger(10_000),
+            fees: BigInteger.Zero,
+            timestamp: (ulong)(at ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds(),
+            method: PaymentMethod.Spark,
+            details: new PaymentDetails.Spark(
+                invoiceDetails: null!,
+                htlcDetails: null!,
+                conversionInfo: withConversion
+                    ? new ConversionInfo.Orchestra(
+                        orderId: "order-1",
+                        quoteId: "orchestra-quote-1",
+                        readToken: null!,
+                        chain: "base",
+                        chainId: "8453",
+                        asset: "USDC",
+                        recipientAddress: "spark1pgssfakewalletaddress",
+                        assetAmountIn: new BigInteger(10_080_000),
+                        estimatedOut: new BigInteger(10_000),
+                        deliveredAmount: new BigInteger(10_004),
+                        externalTxHash: "0xpayertx",
+                        status: ConversionStatus.Completed,
+                        feeAmount: new BigInteger(76_000),
+                        serviceFeeAmount: new BigInteger(80_000),
+                        serviceFeeAsset: "USDC",
+                        serviceFeeAssetDecimals: 6,
+                        assetDecimals: 6,
+                        assetContract: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+                    : null!),
+            conversionDetails: null!);
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_usdc_receive_is_credited_to_the_invoice_its_quote_was_made_for()
+    {
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        // Metadata-updated is how the provider's details usually arrive, after the transfer itself.
+        Emit(h, StoreId, SparkEventKind.PaymentMetadataUpdated, CrossChainArrival("usdc-pay-1"));
+
+        var invoice = h.Stablecoins.Invoices.Invoices["usdc-invoice"];
+        await Eventually.True(() => invoice.Payments.Count == 1, "the USDC payment was never credited");
+        Assert.Equal(10.08m, invoice.Payments[0].Value);
+        Assert.Equal(0.08m, invoice.Payments[0].Fee);
+        Assert.Equal("0xpayertx", invoice.Payments[0].Details.ExternalTxHash);
+        Assert.DoesNotContain("cannot be matched to a BTCPay invoice", h.Log.AllText);
+
+        // A duplicate of the same arrival credits nothing more.
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, CrossChainArrival("usdc-pay-1"));
+        await WaitForStable(() => invoice.Payments.Count);
+        Assert.Single(invoice.Payments);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_transfer_awaiting_its_provider_details_is_not_reported_as_unattributable()
+    {
+        // The SDK reports the inbound transfer before the provider confirms the order, with nothing in it to
+        // attribute it by. While the store has open quotes that is the expected first sighting of one of them,
+        // not money nothing can explain — the warning is reserved for that.
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, CrossChainArrival("usdc-pay-1", withConversion: false));
+        await Eventually.True(() => h.Log.AllText.Contains("waiting for the provider's details"),
+            "the detail-less transfer was not recognised as a likely USDC/USDT receive");
+        Assert.DoesNotContain("cannot be matched to a BTCPay invoice", h.Log.AllText);
+        Assert.Empty(h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments);
+
+        // Then the details arrive and it is credited.
+        Emit(h, StoreId, SparkEventKind.PaymentMetadataUpdated, CrossChainArrival("usdc-pay-1"));
+        await Eventually.True(() => h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments.Count == 1,
+            "the USDC payment was never credited once its details arrived");
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_transfer_still_without_details_an_hour_on_is_reported_rather_than_left_waiting()
+    {
+        // The case that produces one: a second deposit to a quote that already settled, delivered after the SDK
+        // closed that quote's row, so no details ever come. Left "waiting" it would sit at Debug for as long as
+        // any quote on the store is open — money on the wallet that nobody is told about.
+        using var h = await StartedAsync();
+        SeedStablecoinQuote(h);
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded,
+            CrossChainArrival("usdc-late", withConversion: false,
+                at: DateTimeOffset.UtcNow - SparkService.StablecoinDetailsGrace - TimeSpan.FromMinutes(5)));
+
+        await Eventually.True(() => h.Log.AllText.Contains("cannot be matched to a BTCPay invoice"),
+            "a detail-less transfer past the grace period was never reported");
+        Assert.DoesNotContain("waiting for the provider's details", h.Log.AllText);
+        Assert.Empty(h.Stablecoins.Invoices.Invoices["usdc-invoice"].Payments);
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -249,7 +382,7 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentPending,
             LightningLeg("pending-1", PaymentType.Receive, Hash, SdkPaymentStatus.Pending));
 
-        await WaitFor(() => h.Invoices.Records[Hash].SdkPaymentId is not null,
+        await Eventually.True(() => h.Invoices.Records[Hash].SdkPaymentId is not null,
             "the pending payment's SDK id was never recorded against the invoice");
 
         Assert.Equal("pending-1", h.Invoices.Records[Hash].SdkPaymentId);
@@ -272,7 +405,7 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentPending,
             LightningLeg("late-1", PaymentType.Receive, Hash, SdkPaymentStatus.Pending));
 
-        await WaitFor(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
             "a pending event for an already-completed payment did not settle");
     }
 
@@ -297,7 +430,7 @@ public class SparkServiceEventWiringTests
         // Both settle: the deadline gives up on the re-read and falls back to the event payload, which is the
         // documented behaviour — a wrongly optimistic status is corrected by the store's compare-and-set,
         // whereas a dropped settlement is only corrected minutes later by the reconciliation task.
-        await WaitFor(
+        await Eventually.True(
             () => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid
                   && h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
             "a hung status re-read stalled the store's event queue");
@@ -322,7 +455,7 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded,
             LightningLeg("disagree-1", PaymentType.Receive, Hash));
 
-        await WaitFor(() => h.Sdk.Clients[StoreId].GetPaymentCalls.Contains("disagree-1"),
+        await Eventually.True(() => h.Sdk.Clients[StoreId].GetPaymentCalls.Contains("disagree-1"),
             "the status was never re-read");
         // Give the consumer a moment past the re-read to do the wrong thing, if it were going to.
         await WaitForStable(() => h.Invoices.Records[Hash].Status);
@@ -350,7 +483,7 @@ public class SparkServiceEventWiringTests
         Emit(h, OtherStoreId, SparkEventKind.PaymentSucceeded,
             LightningLeg("healthy-1", PaymentType.Receive, OtherHash));
 
-        await WaitFor(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
             "a healthy store's event was starved by a broken store's");
 
         // And the broken store's own loop is still alive: a later event on it is still processed.
@@ -359,7 +492,7 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded,
             LightningLeg("recovered-1", PaymentType.Receive, PaymentFixture.KnownPaymentHashVector));
 
-        await WaitFor(
+        await Eventually.True(
             () => h.Invoices.Records[PaymentFixture.KnownPaymentHashVector].Status is InvoiceRecordStatus.Paid,
             "a store's event loop died after one of its events failed");
     }
@@ -381,7 +514,7 @@ public class SparkServiceEventWiringTests
 
         h.Invoices.Seed(Unpaid(StoreId, OtherHash));
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, LightningLeg("after-1", PaymentType.Receive, OtherHash));
-        await WaitFor(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[OtherHash].Status is InvoiceRecordStatus.Paid,
             "the follow-up receive never settled");
 
         Assert.Equal(InvoiceRecordStatus.Unpaid, h.Invoices.Records[Hash].Status);
@@ -399,24 +532,11 @@ public class SparkServiceEventWiringTests
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, payment: null);
         Emit(h, StoreId, SparkEventKind.PaymentSucceeded, LightningLeg("after-null", PaymentType.Receive, Hash));
 
-        await WaitFor(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
+        await Eventually.True(() => h.Invoices.Records[Hash].Status is InvoiceRecordStatus.Paid,
             "a null-payload event killed the store's event loop");
     }
 
     // ---------------------------------------------------------------------------------------------------
-
-    private static async Task WaitFor(Func<bool> condition, string because)
-    {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            if (condition())
-                return;
-            await Task.Delay(10, TestContext.Current.CancellationToken);
-        }
-
-        Assert.Fail(because);
-    }
 
     /// <summary>
     /// Waits until a value has stopped changing, for the negative assertions.

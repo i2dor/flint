@@ -234,7 +234,7 @@ Two things about that provisioning are worth knowing before scripting anything s
   server-settings policy — and an API key is judged on its own permissions, not on its owner's role. Without
   it the provisioning `POST` answers `403 hot-wallet-not-allowed`. See
   [`greenfield-api.md`](greenfield-api.md).
-- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.4`, matching the `btcpayserver`
+- **The image is pinned by digest** to `btcpayserver/btcpayserver:2.4.6`, matching the `btcpayserver`
   submodule tag and therefore `Constants.BuiltAgainstBTCPayServerVersion`. The official image is a Release
   build, so `DEBUG_PLUGINS` — the side-loading route [`development.md`](development.md) uses — does not
   exist in it; `up.sh` instead stages the Release build output as
@@ -272,6 +272,26 @@ Lightning payment and not a sweep on purpose — an exit on this chain costs aro
 plugin's fee guard correctly refuses any remainder much smaller than that, which is exactly the amount left
 after the sweep test. Without it the leftover is stranded in a wallet whose storage `down.sh` destroys, and
 one measured pair of runs took the SSP from 500,000 to 382,000.
+
+**`Category=LocalRegtestExit` is the exception, and it is not revenue-neutral.** That category holds the
+end-to-end unilateral exit (`SparkLocalRegtestExitTests`), which runs the whole exit against real operators:
+it quotes, derives and funds the plugin's CPFP key from `bitcoind`, builds and signs, then broadcasts the
+transactions exactly as the exit page instructs — fan-out and sweep alone, tree nodes as packages via
+`submitpackage`, mining between rounds so every CSV timelock matures — and asserts the destination address
+receives `recoverable + unspent funding − total fee`. It passes in CI in about 1m 40s.
+
+It costs the SSP a whole wallet, because an exit converts that wallet's balance to on-chain Bitcoin at a
+destination address and the return leg cannot undo that. Measured: repeated runs take a stack from 500,000
+to 0 in a handful of runs, after which fixture setup fails with `amount cannot be represented by available
+leaves without creating a child below the configured split floor`. Hence teardown does not restore it and
+`local-regtest.yml` tops the SSP up explicitly before running the category. Locally, top up with
+`cashu-regtest/docker-scripts.sh`'s `cashu-spark-fund-ssp` (500,000 per call) before each run.
+
+It is also deliberately separated in CI rather than folded into `Category=LocalRegtest`, for two measured
+reasons: it cannot share the suite's wallet (it exits the balance, and whichever ran first would decide
+whether the other tests had any money), and it cannot share the *stack* (a second wallet funded from the
+same SSP while the suite ran produced a failure in the suite's Lightning send, reported as `Error:` with an
+empty message). So it runs as its own step, after the suite and after the top-up.
 
 Observed figures from a green run, for calibration: 150,000 sats deposited, **140,100 credited** (a
 9,900-sat claim fee at ~100 sat/vB, auto-claimed by the SDK's own worker), and a sweep of 125,100 delivering

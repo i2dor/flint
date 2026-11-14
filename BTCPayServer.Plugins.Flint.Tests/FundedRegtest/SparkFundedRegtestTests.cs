@@ -93,7 +93,7 @@ public class SparkFundedRegtestTests
             // There is no BTCPay here, so no invoice to credit; an empty gateway keeps the settlement path
             // whole while leaving crediting to the tests that own it.
             new SparkInvoiceCreditor(
-                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
         var client = new SparkLightningClient(
             _wallet.StoreId,
@@ -232,7 +232,7 @@ public class SparkFundedRegtestTests
             MaxFeePercent = 25.0
         });
 
-        var run = await engine.RunAsync(_wallet.StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var run = await engine.RunAsync(_wallet.StoreId, SweepTrigger.Manual, Ct);
         Assert.True(
             run.Kind is SweepOutcomeKind.Swept,
             $"the sweep did not go out: {run.Kind} — {run.Reason}");
@@ -257,7 +257,7 @@ public class SparkFundedRegtestTests
         var confirmed = await PollAsync(
             async () =>
             {
-                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, Ct);
                 var current = await records.GetAsync(_wallet.StoreId, sent.IdempotencyKey, Ct);
                 return current?.Status is SweepRecordStatus.Confirmed ? current : null;
             },
@@ -354,7 +354,7 @@ public class SparkFundedRegtestTests
         var resolved = await PollAsync(
             async () =>
             {
-                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+                await engine.RunAsync(_wallet.StoreId, SweepTrigger.Automatic, Ct);
                 var current = await records.GetAsync(_wallet.StoreId, idempotencyKey, Ct);
                 return current?.Status is SweepRecordStatus.Sent or SweepRecordStatus.Confirmed ? current : null;
             },
@@ -413,6 +413,7 @@ public class SparkFundedRegtestTests
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             new FakeCrossChainValueOracle(),
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             TimeProvider.System,
             NullLogger<SparkSweepEngine>.Instance);
     }

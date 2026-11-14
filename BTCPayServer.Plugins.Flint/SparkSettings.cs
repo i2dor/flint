@@ -65,6 +65,31 @@ public class SparkSettings
     public StableBalanceSettings StableBalance { get; set; } = new();
 
     /// <summary>
+    /// Unilateral-exit configuration. Coalesce before use, as with <see cref="Sweep"/>.
+    /// </summary>
+    /// <remarks>
+    /// Present on every settings blob, whether or not the store has ever opened the exit page, so a store's
+    /// acknowledgement cannot silently disappear from the blob because some other form saved settings without
+    /// knowing about it. The section existing is not an exit being possible: quoting and building still refuse
+    /// until <see cref="UnilateralExitSettings.DisclosureAcknowledged"/> is set.
+    /// <para>
+    /// <b>Never null, including after a read.</b> A property initialiser covers a blob with no
+    /// <c>UnilateralExit</c> key at all, but a blob carrying an explicit <c>"UnilateralExit": null</c> — a hand
+    /// edit, a restored backup, an older serializer — has the deserializer call this setter with null, and every
+    /// reader that trusted the declared type then threw. On the exit page that was a
+    /// <see cref="NullReferenceException"/> on a GET, which BTCPay answers by disabling the plugin and restarting
+    /// the server. The setter coalesces, so the section a reader gets is always a usable default.
+    /// </para>
+    /// </remarks>
+    public UnilateralExitSettings UnilateralExit
+    {
+        get => _unilateralExit;
+        set => _unilateralExit = value ?? new UnilateralExitSettings();
+    }
+
+    private UnilateralExitSettings _unilateralExit = new();
+
+    /// <summary>
     /// An independent copy, nested settings included. Every property added to this class must be added here too.
     /// </summary>
     /// <remarks>
@@ -77,10 +102,11 @@ public class SparkSettings
     /// own.
     /// </para>
     /// <para>
-    /// Deep for the three nested objects, because a shallow copy would defeat the whole point: the edits that
-    /// matter all land on <see cref="Sweep"/>, <see cref="Deposits"/> or <see cref="StableBalance"/> rather
-    /// than on the scalars here. Each is coalesced, because an explicit <c>null</c> in a stored blob defeats
-    /// the property initialiser — the same hazard every reader of these three has to handle.
+    /// Deep for the four nested objects, because a shallow copy would defeat the whole point: the edits that
+    /// matter all land on <see cref="Sweep"/>, <see cref="Deposits"/>, <see cref="StableBalance"/> or
+    /// <see cref="UnilateralExit"/> rather than on the scalars here. Each is coalesced, because an explicit
+    /// <c>null</c> in a stored blob defeats the property initialiser — the same hazard every reader of these
+    /// four has to handle.
     /// </para>
     /// </remarks>
     public SparkSettings Clone() => new()
@@ -91,7 +117,8 @@ public class SparkSettings
         ApiKeyOverride = ApiKeyOverride,
         Sweep = (Sweep ?? new SweepSettings()).Clone(),
         Deposits = (Deposits ?? new SparkDepositSettings()).Clone(),
-        StableBalance = (StableBalance ?? new StableBalanceSettings()).Clone()
+        StableBalance = (StableBalance ?? new StableBalanceSettings()).Clone(),
+        UnilateralExit = (UnilateralExit ?? new UnilateralExitSettings()).Clone()
     };
 }
 
@@ -341,17 +368,6 @@ public class StableBalanceSettings
     public const uint MaxSlippageBpsLimit = 10_000;
 
     /// <summary>
-    /// The floor under a BTC→token conversion, in satoshi, as measured live.
-    /// </summary>
-    /// <remarks>
-    /// Informational only. The service's own minimum is authoritative and is fetched at runtime; this exists so
-    /// the settings page can warn about a threshold that can never convert before the merchant finds out by it
-    /// never converting. The SDK clamps a configured threshold <em>upward</em> to this floor, so setting less
-    /// does not do what it looks like it does.
-    /// </remarks>
-    public const long IndicativeMinimumConversionSats = 800;
-
-    /// <summary>
     /// Whether the merchant wants stable balance active.
     /// </summary>
     /// <remarks>
@@ -418,9 +434,6 @@ public class StableBalanceSettings
     public string EffectiveLabel =>
         string.IsNullOrWhiteSpace(Label) ? DefaultLabel : Label.Trim();
 
-    /// <summary>The decimals actually in force. Zero is treated as unset.</summary>
-    public uint EffectiveDecimals => Decimals > 0 ? Decimals : DefaultDecimals;
-
     /// <summary>An independent copy. Every property added to this class must be added here too.</summary>
     public StableBalanceSettings Clone() => new()
     {
@@ -431,6 +444,120 @@ public class StableBalanceSettings
         Decimals = Decimals,
         MaxSlippageBps = MaxSlippageBps,
         AutoConvertThresholdSats = AutoConvertThresholdSats
+    };
+}
+
+/// <summary>
+/// Unilateral exit: recovering the store's Spark balance on-chain without the operators cooperating on an
+/// exit transaction.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Available to every store, and still refused until acknowledged.</b> The exit page is linked from every
+/// store's Advanced page, but nothing on it quotes or builds until <see cref="DisclosureAcknowledged"/> is
+/// stored — an operator has to have read what an exit costs before one can start. Until then the section is
+/// inert: a blob that never acknowledged carries nothing that can move money.
+/// </para>
+/// <para>
+/// <b>What it is, stated plainly, because the word oversells it.</b> A cooperative exit — every sweep this
+/// plugin makes — asks the operators to build and broadcast one Bitcoin transaction, and it lands in seconds
+/// for a flat fee. A unilateral exit walks the store's own leaves out through the statechain's timelocked
+/// transaction tree: the SDK builds and signs, the plugin <em>never</em> broadcasts, and an operator has to
+/// push the transactions by hand in dependency order, waiting on confirmations and on CSV timelocks measured
+/// in days. It is a last resort for the case the exit path this plugin actually uses stops working, not a
+/// privacy or cost option, and the copy on the page says so.
+/// </para>
+/// <para>
+/// <b>Three traps that are the reason this is a last resort rather than an option.</b> First, an exit can only
+/// be built for leaves whose exit data is already on this server: since Breez.Sdk.Spark 0.25 quoting and building
+/// read each leaf's pre-signed chain from local storage, so they work with the operators unreachable — but that
+/// data is collected from the operators while they are still reachable, so a leaf never synced, or a server
+/// whose storage is lost with no exit-state backup, cannot be exited at all. Second, the tree transactions cannot pay their own fees, so the exit is funded by
+/// CPFP from an on-chain UTXO the operator has to send to a plugin-derived native-SegWit address first (see
+/// <see cref="Constants.UnilateralExitFundingAccount"/>); too little there and the build refuses. Third, the
+/// funds are not spendable when the transactions are built — they are spendable when the last timelock
+/// expires.
+/// </para>
+/// <para>
+/// Deliberately two properties. Everything else about an exit — fee rate, destination, which leaves — belongs
+/// to one attempt and lives on the exit record, not in the store's configuration: a persisted quote is a stale
+/// quote, and a persisted destination is an address nobody re-read before money moved.
+/// </para>
+/// </remarks>
+public class UnilateralExitSettings
+{
+    /// <summary>
+    /// The operator has been shown what a unilateral exit costs them in time and attention, and accepted it.
+    /// Quoting and building are refused without it.
+    /// </summary>
+    /// <remarks>
+    /// Stored rather than treated as a form-only checkbox, for the same reason
+    /// <see cref="StableBalanceSettings.DisclosureAcknowledged"/> is: a checkbox enforced in a view is enforced
+    /// nowhere. The service re-reads this before every operation, so the acknowledgement is a server-side gate
+    /// on an action that produces signed transactions spending the store's balance — and one an operator has to
+    /// have made deliberately, because the alternative is discovering the multi-day timelocks after starting.
+    /// </remarks>
+    public bool DisclosureAcknowledged { get; set; }
+
+    /// <summary>
+    /// Base URL of the esplora-compatible API used to discover the funding UTXO. Null uses the default for the
+    /// store's network.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The plugin has to see the funding UTXO before it can build anything, and it cannot ask the SDK: the
+    /// funding output is an ordinary on-chain UTXO on an address derived outside Spark's key tree, so nothing in
+    /// the wallet knows about it. BTCPay's own NBXplorer does not either, because the address is not in any of
+    /// the store's derivation schemes. That leaves a block explorer, and an override so an operator can point at
+    /// their own instance rather than a third party that learns which address is funding their exit.
+    /// </para>
+    /// <para>
+    /// <b>There is no usable default off mainnet.</b> mempool.space has no regtest, so a regtest exit without
+    /// this set is refused with a message saying to set it, rather than silently reporting no funding found —
+    /// which reads identically to "your UTXO has not confirmed yet" and would have an operator waiting on a
+    /// confirmation that already happened.
+    /// </para>
+    /// <para>
+    /// Nothing here is trusted with a decision. A wrong or hostile explorer can make the build refuse (no UTXO
+    /// found) or fail at broadcast (a UTXO that does not exist), which is why the operator sees the funding
+    /// figure the explorer reported before pressing Build; it cannot redirect money, because the destination is
+    /// in the transactions the SDK signs.
+    /// </para>
+    /// </remarks>
+    public string? EsploraApiUrl { get; set; }
+
+    /// <summary>
+    /// Deprecated. Where an exit-state backup used to live; it now lives in an owner-only file in
+    /// BTCPay's data directory (<see cref="Services.FileExitStateBackupStore"/>), and nothing new is
+    /// ever written here. Null for any store written by the current version.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It exists only so an upgrade cannot lose a backup.</b> A store provisioned by an earlier
+    /// plugin version may still hold its only copy of the blob in this slot, and if it were not
+    /// deserialized the adoption path would have nothing to read — an upgrade that silently dropped
+    /// an operator's backup is exactly the loss this field's own contents guard against. The value is
+    /// adopted, imported, moved to the file, and cleared on the first connect after an upgrade
+    /// (<c>SparkService.AdoptLegacyBackupAsync</c>).
+    /// </para>
+    /// <para>
+    /// It was moved because it is a multi-megabyte secret and the settings blob is deserialized on
+    /// every settings read. Nothing may treat a non-null value here as "a backup is stored": the file
+    /// is the only answer after a connect has run, and before it neither is complete. Nothing may
+    /// write a live value here either — the page and the automation both use the file store, and
+    /// clearing the backup from the page empties this slot with it
+    /// (<c>SparkService.ClearExitStateBackupSlot</c>), because a leftover here would be adopted back
+    /// over the cleared file on the next connect.
+    /// </para>
+    /// </remarks>
+    public string? ExitStateBackup { get; set; }
+
+    /// <summary>An independent copy. Every property added to this class must be added here too.</summary>
+    public UnilateralExitSettings Clone() => new()
+    {
+        DisclosureAcknowledged = DisclosureAcknowledged,
+        EsploraApiUrl = EsploraApiUrl,
+        ExitStateBackup = ExitStateBackup
     };
 }
 
@@ -492,8 +619,9 @@ public enum SweepDestinationMode
     /// <para>
     /// Not a Bitcoin address and not a cooperative exit: the wallet transfers to the bridge provider's Spark
     /// deposit address and the provider settles on the destination chain. It is still an ordinary Spark
-    /// transfer at the point money leaves this wallet, so the exit-path policy is untouched — there is no
-    /// unilateral exit here either.
+    /// transfer at the point money leaves this wallet, so the exit-path policy is untouched — no exit of
+    /// either kind happens here. A unilateral exit is reachable only from the manual, operator-driven flow
+    /// linked from the Advanced page (<see cref="UnilateralExitSettings"/>), never from a sweep.
     /// </para>
     /// <para>
     /// <b>Mainnet only</b>, hard-gated by the SDK: a connect that carries a cross-chain configuration on
@@ -648,7 +776,9 @@ public class SweepSettings
     /// <remarks>
     /// <b>On by default, and this is a cooperative exit either way.</b> "Drain" here means only that the fee
     /// is netted out of the amount, so the balance lands on exactly <see cref="ReserveSats"/>; it has nothing
-    /// to do with a unilateral exit, which this plugin does not implement anywhere, by owner decision. It
+    /// to do with a unilateral exit. Sweeping — automatic or manual — is cooperative, always; the only
+    /// unilateral-exit path in the plugin is the manual, disclosure-gated, hand-broadcast one linked from
+    /// the Advanced page (<see cref="UnilateralExitSettings"/>), which no sweep setting can reach. It
     /// defaults on because the default <see cref="ReserveSats"/> is zero, and with
     /// the fee charged on top a zero reserve leaves nothing to charge it against.
     /// </remarks>
@@ -662,16 +792,6 @@ public class SweepSettings
     /// against this server's Bitcoin network on save <em>and</em> again before every send.
     /// </summary>
     public string? StaticAddress { get; set; }
-
-    /// <summary>
-    /// Optional HTTP(S) URL that receives a POST with sweep details after each successful sweep.
-    /// The payload is a JSON object with <c>storeId</c>, <c>idempotencyKey</c>, <c>txId</c>,
-    /// <c>amountSats</c>, <c>feeSats</c>, <c>destination</c>, <c>destinationMode</c>,
-    /// <c>trigger</c>, and <c>completedAt</c>.
-    /// Delivery failures are logged as warnings and never retried; the sweep record is the
-    /// authoritative source of truth.
-    /// </summary>
-    public string? SweepWebhookUrl { get; set; }
 
     #region Cross-chain
 
@@ -836,7 +956,6 @@ public class SweepSettings
         EvmChain = EvmChain,
         EvmAsset = EvmAsset,
         CrossChainSlippageBps = CrossChainSlippageBps,
-        CrossChainMinimumStableUnits = CrossChainMinimumStableUnits,
-        SweepWebhookUrl = SweepWebhookUrl
+        CrossChainMinimumStableUnits = CrossChainMinimumStableUnits
     };
 }

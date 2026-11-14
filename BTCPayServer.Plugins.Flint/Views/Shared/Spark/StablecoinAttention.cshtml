@@ -1,0 +1,89 @@
+@using System.Globalization
+@using BTCPayServer
+@using BTCPayServer.Plugins.Flint.Models
+@using BTCPayServer.Plugins.Flint.Services
+@inject StablecoinPaymentService Stablecoins
+@*
+    Injected at "spark-status-post-body": USDC/USDT money in this store's wallet that is on no invoice.
+
+    Two kinds, both needing a human: an arrival that matched none of the store's quotes (or several equally), and a
+    payment that matched an invoice but could not be recorded on it. They used to reach only the server log, which on a
+    shared server the store owner never sees. Shown here, where the owner looks, and nowhere else — nothing is sent, so
+    nothing repeats (StablecoinPaymentService.GetAttentionAsync).
+
+    Renders nothing when there is nothing to say, and nothing rather than an error when anything goes wrong: a partial
+    that throws inside a layout takes the whole page down, and this one is a notice.
+*@
+@{
+    StablecoinAttention attention = StablecoinAttention.None;
+    try
+    {
+        var storeId = Model switch
+        {
+            SparkStatusViewModel status => status.StoreId,
+            string s => s,
+            _ => Context.GetCurrentStoreId()
+        };
+        if (!string.IsNullOrEmpty(storeId))
+            attention = await Stablecoins.GetAttentionAsync(storeId, Context.RequestAborted);
+    }
+    catch (Exception)
+    {
+        attention = StablecoinAttention.None;
+    }
+
+    string InvoiceLink(string invoiceId)
+    {
+        try
+        {
+            return Url.Action("Invoice", "UIInvoice", new { invoiceId }) ?? "#";
+        }
+        catch (Exception)
+        {
+            return "#";
+        }
+    }
+}
+@if (attention.Any)
+{
+    <div class="alert alert-warning mt-4" role="alert" id="SparkStablecoinAttention">
+        <h4 class="alert-heading h5">USDC and USDT payments to place by hand</h4>
+        @if (attention.Unattributed.Count > 0)
+        {
+            <p class="mb-2">
+                These arrived in this store's Spark wallet but could not be matched to an invoice. The money is in the
+                wallet; find the invoice by the payer's transaction and settle it there.
+            </p>
+            <ul class="mb-3" id="SparkStablecoinUnattributed">
+                @foreach (var arrival in attention.Unattributed)
+                {
+                    <li>
+                        @(arrival.Amount ?? "An unreported amount of") @arrival.Asset on @arrival.ChainName,
+                        @arrival.ArrivedAt.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture)
+                        — @(arrival.Candidates > 1 ? $"fits {arrival.Candidates} open quotes equally well" : "matches none of this store's quotes").
+                        <span class="text-break">Payer's transaction: <span class="font-monospace">@(arrival.ExternalTxHash ?? "not reported")</span>.</span>
+                        <span class="text-secondary">Spark payment <span class="font-monospace">@arrival.SdkPaymentId</span>.</span>
+                    </li>
+                }
+            </ul>
+        }
+        @if (attention.UncreditedCount > 0)
+        {
+            <p class="mb-2">
+                @(attention.UncreditedCount == 1 ? "This payment" : $"These {attention.UncreditedCount} payments")
+                matched an invoice but could not be recorded on it. The money is in the wallet; Flint keeps trying for a
+                week.
+            </p>
+            <ul class="mb-0" id="SparkStablecoinUncredited">
+                @foreach (var payment in attention.Uncredited)
+                {
+                    <li>
+                        @payment.Amount @payment.Asset on @payment.ChainName for invoice
+                        <a href="@InvoiceLink(payment.InvoiceId)" class="alert-link">@payment.InvoiceId</a>,
+                        @payment.SettledAt.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture).
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+}

@@ -36,6 +36,8 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
     /// <summary>Thrown by <see cref="TryResolveAsync"/> when set.</summary>
     public Exception? FailResolveWith { get; set; }
 
+    public Exception? FailReportWith { get; set; }
+
     /// <summary>
     /// Makes <see cref="TryRecordProviderQuoteAsync"/> report that it changed nothing.
     /// </summary>
@@ -96,6 +98,27 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
             .ThenByDescending(r => r.IdempotencyKey, StringComparer.Ordinal)
             .Skip(offset)
             .Take(limit)
+            .Select(Copy)
+            .ToList());
+    }
+
+    public Task<IReadOnlyList<SweepRecord>> ListForReportAsync(
+        string storeId,
+        DateTimeOffset from,
+        DateTimeOffset to,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (FailReportWith is not null)
+            throw FailReportWith;
+
+        return Task.FromResult<IReadOnlyList<SweepRecord>>(_records.Values
+            .Where(r => r.StoreId == storeId
+                        && r.CreatedAt >= from
+                        && r.CreatedAt <= to
+                        && r.Status != SweepRecordStatus.Refused)
+            .OrderBy(r => r.CreatedAt)
+            .ThenBy(r => r.IdempotencyKey, StringComparer.Ordinal)
             .Select(Copy)
             .ToList());
     }
@@ -243,8 +266,9 @@ public sealed class InMemorySweepRecordStore : ISweepRecordStore
     /// <remarks>
     /// Hand-written, and therefore able to drop a column silently — which it did: every Wave 7 field was missing
     /// here at first, so a cross-chain row round-tripped through this store as a cooperative exit and the engine
-    /// could not tell which recovery strategy it needed. <c>InMemorySweepRecordStoreTests</c> now enumerates the
-    /// properties by reflection and fails when one is missed, so it cannot happen again quietly.
+    /// could not tell which recovery strategy it needed. The store contract's
+    /// <c>A_record_round_trips_with_every_field</c> now sets every property by reflection and fails when a round
+    /// trip loses one, so it cannot happen again quietly.
     /// </remarks>
     internal static SweepRecord Copy(SweepRecord source) => new()
     {

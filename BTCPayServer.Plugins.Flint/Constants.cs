@@ -80,11 +80,12 @@ public static class Constants
     /// <remarks>
     /// Informational — nothing at runtime reads it. It exists so the update automation has a version to bump that
     /// is not the support floor, and so a reader can see at a glance which release the assembly was built against.
-    /// It is currently three patch releases ahead of <see cref="MinBTCPayServerVersion"/>: each submodule
-    /// bump (v2.4.2, then straight to v2.4.4) moved this constant and left the floor alone, which is exactly
-    /// what the two being separate constants is for — a bump here must never silently drop every host below it.
+    /// It is currently five patch releases ahead of <see cref="MinBTCPayServerVersion"/>: each submodule
+    /// bump (v2.4.2, then straight to v2.4.4, then v2.4.5, then v2.4.6) moved this constant and left the floor
+    /// alone, which is exactly what the two being separate constants is for — a bump here must never silently drop
+    /// every host below it.
     /// </remarks>
-    public const string BuiltAgainstBTCPayServerVersion = "2.4.4";
+    public const string BuiltAgainstBTCPayServerVersion = "2.4.6";
 
     /// <summary>
     /// The <c>type=</c> discriminator of our Lightning connection string.
@@ -173,6 +174,52 @@ public static class Constants
     /// <summary>Rows per page on the sweep history table.</summary>
     public const int SweepHistoryPageSize = 25;
 
+    #region Unilateral exit
+
+    // There is no switch for the flow itself. Earlier releases put it behind FLINT_EXPERIMENTAL_UNILATERAL_EXIT;
+    // that variable is no longer read, and what stands between a store and an exit is the stored disclosure
+    // acknowledgement (UnilateralExitSettings.DisclosureAcknowledged), which the service re-reads before every
+    // quote and build.
+
+    /// <summary>
+    /// BIP32 hardened account index for the on-chain key that funds a unilateral exit —
+    /// <c>m/84'/{coin}'/4607060'/0/{index}</c>, with <c>coin</c> 0 on mainnet and 1 on regtest, and
+    /// <c>index</c> allocated per exit (see <see cref="Data.UnilateralExitRecord.FundingKeyIndex"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 4,607,060 is <c>0x464C54</c>, the ASCII bytes of <c>FLT</c>. The number is not the point; being nowhere
+    /// near anybody else's account index is.
+    /// </para>
+    /// <para>
+    /// <b>Why an odd account at all.</b> The exit's tree transactions cannot pay their own fees, so they are
+    /// bumped by CPFP from an ordinary on-chain UTXO, and the plugin has to hold the key to that UTXO to sign
+    /// the child. The only seed it has is the store's Spark mnemonic — which, for a store set up with
+    /// <see cref="SeedSource.HotWallet"/>, is <em>also</em> BTCPay's own hot-wallet seed. Deriving the funding
+    /// key at BIP84 account 0 there would put the plugin's addresses inside the store's own wallet: NBXplorer
+    /// would track them, an operator's coin selection could spend the funding UTXO out from under a
+    /// half-broadcast exit, and a plugin-generated change output could appear in the merchant's balance from a
+    /// wallet they never told about it. A hardened account index no wallet software generates on its own makes
+    /// that collision impossible rather than unlikely.
+    /// </para>
+    /// <para>
+    /// <b>BIP84 purpose (<c>84'</c>) rather than something exotic</b>, because the funding output has to be
+    /// native SegWit: Phase 0 supports exactly one CPFP funding kind, P2WPKH, so a Taproot or legacy funding
+    /// address is not a stylistic difference, it is an exit that cannot be built. Depth and layout follow BIP84
+    /// so the path is recoverable in any standard wallet — an operator who needs to reclaim leftover funding
+    /// sats after an exit, or after abandoning one, can import the mnemonic elsewhere and find them at a path
+    /// they can read off this comment.
+    /// </para>
+    /// <para>
+    /// Fixed forever, like every other derivation constant: change it and the funding UTXOs of every exit
+    /// already in flight are at an address the plugin no longer looks at. Spark's own keys are unaffected
+    /// either way — the SDK derives at a hardened <c>m/8797555'/…</c>, disjoint from this and from BIP84/86.
+    /// </para>
+    /// </remarks>
+    public const uint UnilateralExitFundingAccount = 4607060;
+
+    #endregion
+
     /// <summary>
     /// Default ceiling on a Lightning send fee, as a percentage of the amount, when the caller sets none.
     /// </summary>
@@ -224,6 +271,17 @@ public static class Constants
     /// outside HTTP, and its cost is a whole store-table load per pass. See <c>SparkLightningConfigSweepTask</c>.
     /// </remarks>
     public static readonly TimeSpan ConfigSweepInterval = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// How often <c>ExitStateBackupTask</c> runs, measured from the end of the previous pass.
+    /// </summary>
+    /// <remarks>
+    /// The task is a passive walker: it asks <c>ExitStateBackupScheduler.ShouldTake</c> per store, and the
+    /// debounce and safety-net intervals there do the actual deciding. One minute matches the resolution
+    /// merchants already expect from Lightning checkout elsewhere in this plugin; the export itself costs a
+    /// live SDK call plus a multi-megabyte write per store that is actually due.
+    /// </remarks>
+    public static readonly TimeSpan ExitStateBackupInterval = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// Wall clock a single reconciliation pass may spend before it stops starting new stores.

@@ -1,4 +1,3 @@
-using System.Reflection;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -6,62 +5,12 @@ namespace BTCPayServer.Plugins.Flint.Tests;
 /// <summary>
 /// The sweep settings' defaults and their <see cref="SweepSettings.Clone"/> contract.
 /// </summary>
+/// <remarks>
+/// That <c>Clone</c> carries every property is checked by reflection in
+/// <see cref="SparkSettingsCacheTests.Clone_copies_every_property"/>, which recurses into the sweep section.
+/// </remarks>
 public class SweepSettingsTests
 {
-    [Fact]
-    public void Clone_copies_every_property()
-    {
-        // The hazard this pins is real and silent: SparkStoreProvisioner carries a store's sweep settings across a
-        // seed change by cloning them, so a property missing from Clone() is a setting that quietly reverts to its
-        // default the next time a merchant replaces their seed. Written by reflection rather than field by field
-        // precisely so that adding a property without extending Clone() fails here — a hand-written assertion list
-        // would have to be remembered too, which is the thing that was already forgotten once.
-        // Every readable instance property, not only the settable ones. Filtering on CanWrite would silently skip a
-        // property added later as init-only or with a private setter — which Clone() would then also fail to copy,
-        // and this test would report success. Computed properties are excluded by name because they have nothing to
-        // copy, and each exclusion has to be justified here rather than by an accident of the filter.
-        //
-        // Each of the Effective* properties below reads one of the stored properties above and substitutes a
-        // default when it is unset. They have nothing of their own to copy — and, more to the point, if Clone()
-        // dropped the property one of them reads, the reflection check on that stored property is what catches
-        // it. Excluding a stored property here would be the dangerous edit; excluding these is not.
-        string[] computed =
-        [
-            nameof(SweepSettings.EffectiveBalanceThresholdSats),
-            nameof(SweepSettings.EffectiveCrossChainChain),
-            nameof(SweepSettings.EffectiveCrossChainAsset),
-            nameof(SweepSettings.EffectiveCrossChainSlippageBps),
-            nameof(SweepSettings.EffectiveCrossChainMinimumStableUnits),
-            nameof(SweepSettings.EffectiveMinimumSweepSats)
-        ];
-
-        var all = typeof(SweepSettings)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanRead)
-            .ToList();
-
-        var properties = all.Where(p => !computed.Contains(p.Name)).ToList();
-
-        Assert.NotEmpty(properties);
-        Assert.All(properties, p => Assert.True(
-            p.CanWrite,
-            $"SweepSettings.{p.Name} has no setter this test can vary. Either give it one, or add it to the "
-            + "`computed` list above with a reason — silently skipping it would let Clone() drop it unnoticed."));
-
-        var source = new SweepSettings();
-        foreach (var property in properties)
-            property.SetValue(source, DistinctValueFor(property));
-
-        var clone = source.Clone();
-
-        foreach (var property in properties)
-        {
-            Assert.Equal(
-                property.GetValue(source),
-                property.GetValue(clone));
-        }
-    }
-
     [Fact]
     public void Clone_is_independent_of_its_source()
     {
@@ -144,38 +93,5 @@ public class SweepSettingsTests
         // touches the setting must not be buying the most expensive tier because zero happened to mean "fast".
         Assert.Equal(SweepConfirmationSpeed.Medium, new SweepSettings().ConfirmationSpeed);
         Assert.NotEqual(SweepConfirmationSpeed.Fast, default(SweepConfirmationSpeed));
-    }
-
-    /// <summary>
-    /// A value distinguishable from the property's default, so a missed copy in <c>Clone</c> shows up.
-    /// </summary>
-    private static object DistinctValueFor(PropertyInfo property)
-    {
-        var type = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
-
-        if (type == typeof(bool))
-            // Inverted rather than set true: DrainWhenSweeping already defaults to true, and a clone that dropped
-            // it would still compare equal against a hard-coded true.
-            return !(bool)(property.GetValue(new SweepSettings()) ?? false);
-        if (type == typeof(long))
-            return 1_234_567L;
-        if (type == typeof(double))
-            return 7.25d;
-        if (type == typeof(uint))
-            // Inside the 10–500 range the cross-chain slippage field accepts and different from its default,
-            // so the value is one Clone() could plausibly be asked to carry rather than an obvious sentinel.
-            return 137u;
-        if (type == typeof(string))
-            return "distinct-value";
-        if (type.IsEnum)
-        {
-            // The last member, so it differs from every default (all of which are the first or second).
-            var values = Enum.GetValues(type);
-            return values.GetValue(values.Length - 1)!;
-        }
-
-        throw new NotSupportedException(
-            $"SweepSettings.{property.Name} is a {type.Name}, which this test does not know how to vary. Add a "
-            + "case above so Clone() stays covered.");
     }
 }

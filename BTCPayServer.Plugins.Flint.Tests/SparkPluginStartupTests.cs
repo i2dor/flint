@@ -172,10 +172,13 @@ public class SparkPluginStartupTests
                      typeof(SparkSweepSettingsService),
                      typeof(SweepDestinationResolver),
                      typeof(ISweepAddressSource),
-                     // Reaches core's graph for IHttpClientFactory, and is the only thing in the plugin that
-                     // does. It is registered alongside its own named client, so this fails if that registration
+                     // Reaches core's graph for IHttpClientFactory (as does SparkExitFundingExplorer below).
+                     // It is registered alongside its own named client, so this fails if that registration
                      // is ever dropped in favour of assuming core made one.
                      typeof(CrossChainCatalog),
+                     typeof(IUnilateralExitRecordStore),
+                     typeof(SparkExitFundingExplorer),
+                     typeof(ISparkUnilateralExitService),
                      typeof(SparkReconciliationTask),
                      typeof(SweepTask),
                      // Reaches core's InvoiceRepository directly and its PaymentService through a Func, because
@@ -197,7 +200,15 @@ public class SparkPluginStartupTests
                      typeof(ISweepRecordStore),
                      typeof(SparkPluginDbContextFactory),
                      typeof(IInvoicePaymentHashIndex),
-                     typeof(SparkInvoicePaymentHashIndexer)
+                     typeof(SparkInvoicePaymentHashIndexer),
+                     // The USDC/USDT path reaches the store runtime (SparkService), core's invoice repository, and
+                     // core's payment types through Funcs — the same graph the handlers below are built inside.
+                     typeof(StablecoinPaymentService),
+                     typeof(IStablecoinQuoteStore),
+                     typeof(IStablecoinInvoiceGateway),
+                     typeof(IStablecoinStoreConfig),
+                     typeof(StablecoinRouteCache),
+                     typeof(StablecoinReconciliationTask)
                  })
         {
             var resolved = host.Resolve(type.Name, provider => provider.GetRequiredService(type));
@@ -241,6 +252,71 @@ public class SparkPluginStartupTests
         // moved Lightning out from under BTC-LN would fail here rather than making every credit unrecordable.
         foreach (var paymentMethodId in BTCPayInvoiceCreditGateway.CreditablePaymentMethods)
             Assert.True(handlers.TryGetValue(paymentMethodId, out _), $"no handler for {paymentMethodId}");
+    }
+
+    /// <summary>
+    /// BTCPay holds both stablecoin payment methods, their checkout and link extensions, their rates and their
+    /// currency data — the pieces a merchant never sees until one is missing.
+    /// </summary>
+    /// <remarks>
+    /// The handlers are built inside the construction of <see cref="PaymentMethodHandlerDictionary"/>, which is the
+    /// graph that deadlocked BTCPay's startup once already; resolving the dictionary with them in it, bounded like
+    /// every resolution here, is what shows their deferred service keeps it acyclic.
+    /// </remarks>
+    [Fact]
+    public void The_stablecoin_payment_methods_are_registered_with_BTCPay()
+    {
+        using var host = SparkTestHost.Create(_output);
+
+        var handlers = host.Resolve(
+            "PaymentMethodHandlerDictionary (with the stablecoin handlers)",
+            provider => provider.GetRequiredService<PaymentMethodHandlerDictionary>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            Assert.True(handlers.TryGetValue(asset.PaymentMethodId, out var handler), $"no handler for {asset.PaymentMethodId}");
+            Assert.IsType<BTCPayServer.Plugins.Flint.Payments.StablecoinPaymentMethodHandler>(handler);
+        }
+
+        var checkout = host.Resolve(
+            "Dictionary<PaymentMethodId, ICheckoutModelExtension>",
+            provider => provider.GetRequiredService<Dictionary<BTCPayServer.Payments.PaymentMethodId, BTCPayServer.Payments.ICheckoutModelExtension>>());
+        var links = host.Resolve(
+            "Dictionary<PaymentMethodId, IPaymentLinkExtension>",
+            provider => provider.GetRequiredService<Dictionary<BTCPayServer.Payments.PaymentMethodId, BTCPayServer.Payments.IPaymentLinkExtension>>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            Assert.True(checkout.ContainsKey(asset.PaymentMethodId));
+            Assert.True(links.ContainsKey(asset.PaymentMethodId));
+        }
+
+        // Priced with no store configuration at all: the default rules carry both coins.
+        var rules = host.Resolve(
+            "DefaultRulesCollection",
+            provider => provider.GetRequiredService<DefaultRulesCollection>());
+        foreach (var asset in StablecoinPayments.Assets)
+        {
+            var rule = rules.WithPreferredExchange("kraken").GetRuleFor(new BTCPayServer.Rating.CurrencyPair(asset.Symbol, "USD"));
+            Assert.True(rule.Reevaluate());
+            Assert.Equal(1m, rule.BidAsk!.Bid);
+        }
+
+        // The checkout's quote endpoint activates the way MVC activates it, from a request scope.
+        var controller = host.Resolve(
+            "UIStablecoinCheckoutController (activated as MVC would)",
+            provider =>
+            {
+                using var scope = provider.CreateScope();
+                return ActivatorUtilities.CreateInstance<UIStablecoinCheckoutController>(scope.ServiceProvider);
+            });
+        Assert.NotNull(controller);
+
+        // Formatted at six decimals rather than falling back to the dollar's two.
+        var currencies = host.Resolve(
+            "CurrencyNameTable",
+            provider => provider.GetRequiredService<BTCPayServer.Services.Rates.CurrencyNameTable>());
+        currencies.ReloadCurrencyData(CancellationToken.None).GetAwaiter().GetResult();
+        foreach (var asset in StablecoinPayments.Assets)
+            Assert.Equal(6, currencies.GetCurrencyData(asset.Symbol, useFallback: false)?.Divisibility);
     }
 
     /// <summary>
@@ -353,6 +429,123 @@ public class SparkPluginStartupTests
             Assert.NotNull(resolved);
         }
     }
+
+    /// <summary>
+    /// The cross-store Lightning configuration sweep is on BTCPay's scheduler, at its own interval.
+    /// </summary>
+    /// <remarks>
+    /// The sweep is the backstop for a cross-store configuration written outside HTTP, and BTCPay's launcher is
+    /// the only thing that runs it — its first pass at startup included, so <c>SparkService</c> does not. An
+    /// unregistered task fails nothing and leaves such a configuration live indefinitely. Read the way the
+    /// launcher reads it: every <see cref="BTCPayServer.HostedServices.ScheduledTask"/>, then the task type
+    /// resolved from the container.
+    /// </remarks>
+    [Fact]
+    public void The_cross_store_Lightning_configuration_sweep_is_scheduled()
+    {
+        using var host = SparkTestHost.Create(_output);
+
+        var scheduled = host.Resolve(
+            "IEnumerable<ScheduledTask> (what PeriodicTaskLauncherHostedService starts)",
+            provider => provider.GetServices<BTCPayServer.HostedServices.ScheduledTask>().ToList());
+
+        var sweep = Assert.Single(scheduled, task => task.PeriodicTaskType == typeof(SparkLightningConfigSweepTask));
+        Assert.Equal(Constants.ConfigSweepInterval, sweep.Every);
+        Assert.IsType<SparkLightningConfigSweepTask>(host.Resolve(
+            nameof(SparkLightningConfigSweepTask), provider => provider.GetService(sweep.PeriodicTaskType)));
+    }
+
+    /// <summary>
+    /// The exit explorer's direct client, as the factory builds it, refuses to dial an address that is never an
+    /// explorer — whatever the URL said.
+    /// </summary>
+    /// <remarks>
+    /// The explorer URL is an operator setting and the exit page asks it on every view, so this client is the
+    /// one outbound request an admin can aim anywhere. Resolved from the real container rather than from a
+    /// hand-built <c>SocketsHttpHandler</c>: a copy of the handler would stay green if the registration in
+    /// <c>SparkPlugin</c> lost its connect filter, which is the only place the filter does anything.
+    /// </remarks>
+    [Theory]
+    [InlineData("169.254.169.254")] // the cloud metadata service, the target that matters
+    [InlineData("224.0.0.1")]
+    public async Task The_exit_explorer_client_refuses_to_dial_an_address_that_is_never_an_explorer(string host)
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.GetAsync($"http://{host}:80/api", TestContext.Current.CancellationToken));
+        Assert.Contains("never a block explorer", ex.ToString());
+    }
+
+    /// <summary>
+    /// The same client still reaches loopback, where a self-hosted esplora lives, and hands a redirect back
+    /// rather than following it.
+    /// </summary>
+    /// <remarks>
+    /// Both halves matter. The filter must not grow to refuse loopback and private ranges — a local esplora is
+    /// the privacy-preserving choice the override exists for — and a 3xx must stay a response: followed, it
+    /// would let a public host send the server somewhere the checks on the setting never saw.
+    /// </remarks>
+    [Fact]
+    public async Task The_exit_explorer_client_reaches_loopback_and_does_not_follow_a_redirect()
+    {
+        using var container = SparkTestHost.Create(_output);
+        using var client = ExitExplorerClient(container);
+
+        // Bound to port 0 and kept open, so no other test can take the port between choosing it and listening.
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serve = ServeRedirectAsync(listener, port, stop.Token);
+
+        try
+        {
+            using var response = await client.GetAsync(
+                $"http://127.0.0.1:{port}/", TestContext.Current.CancellationToken);
+            Assert.Equal(System.Net.HttpStatusCode.Redirect, response.StatusCode);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            listener.Stop();
+            // Observed, but never allowed to replace the assertion's own failure.
+            await serve.ContinueWith(_ => { }, TaskScheduler.Default);
+        }
+    }
+
+    /// <summary>
+    /// Answers every connection: <c>/</c> with a 302 to <c>/followed</c>, anything else with a 200, so a client
+    /// that follows the redirect fails the status assertion rather than hanging.
+    /// </summary>
+    private static async Task ServeRedirectAsync(
+        System.Net.Sockets.TcpListener listener, int port, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var connection = await listener.AcceptTcpClientAsync(cancellationToken);
+            var stream = connection.GetStream();
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync(cancellationToken) ?? "";
+            while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellationToken)))
+            {
+                // Headers: nothing here needs them.
+            }
+
+            var response = requestLine.StartsWith("GET / ", StringComparison.Ordinal)
+                ? $"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/followed\r\n"
+                : "HTTP/1.1 200 OK\r\n";
+            var bytes = System.Text.Encoding.ASCII.GetBytes(response + "Content-Length: 0\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(bytes, cancellationToken);
+        }
+    }
+
+    private static HttpClient ExitExplorerClient(SparkTestHost host) =>
+        host.Resolve(
+            $"IHttpClientFactory.CreateClient({SparkExitFundingExplorer.HttpClientName})",
+            provider => provider.GetRequiredService<IHttpClientFactory>()
+                .CreateClient(SparkExitFundingExplorer.HttpClientName));
 
     /// <summary>
     /// BTCPay's own services plus the plugin's, in one container, with a hard timeout on every resolution.

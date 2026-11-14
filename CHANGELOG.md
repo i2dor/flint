@@ -4,90 +4,228 @@ All notable changes to this plugin are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.8.0] - 2026-08-24
-
-### Added
-
-- **Plugin update webhook.** A new server-level setting (`PUT /api/v1/server/spark`) accepts an
-  `updateWebhookUrl`. Once set, Flint checks the BTCPay plugin registry daily and POSTs a
-  `plugin.update-available` event payload when a newer version is found. The payload includes
-  `pluginIdentifier`, `installedVersion`, and `availableVersion`. Each available version is
-  notified at most once. Read the current setting with `GET /api/v1/server/spark`. Both endpoints
-  require `canModifyServerSettings`.
-
-
-## [0.1.7.0] - 2026-08-24
-
-### Added
-
-- **GET sweep record by idempotency key.** New endpoint
-  `GET /api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}` returns the full sweep record for a
-  given key. Requires `canViewStoreSettings`. Returns 404 with code `sweep-record-not-found` when no
-  record matches.
-
-- **Destination address override in POST sweep.** The `POST .../spark/sweep` request body now accepts
-  an optional `destinationAddress` field. When supplied, the sweep sends to that Bitcoin address
-  instead of the store's configured sweep destination. The address is validated against the server's
-  chain before the engine runs. Not supported for EVM cross-chain sweep mode (returns 422).
-
-- **Force flag in POST sweep.** The request body now accepts an optional `force` boolean (default
-  false). When true, the sweep proceeds even if the Spark balance is below the store's configured
-  minimum sweep amount. The absolute on-chain protocol minimum (`Constants.MinimumOnchainSendSats`)
-  still applies and cannot be bypassed.
-
-
-## [0.1.6.2] - 2026-08-24
-
-### Added
-
-- **Sweep webhook fires on failed sweeps.** When a sweep is attempted and fails (Spark rejects it or
-  reports it as failed), Flint now POSTs an `event: "sweep.failed"` notification to the configured
-  webhook URL. The payload includes `storeId`, `trigger`, `reason`, and — when a sweep record was
-  created before the failure — `idempotencyKey`, `amountSats`, `destination`, and `destinationMode`.
-  Same retry logic as the success notification (3 retries with exponential backoff).
-
-### Changed
-
-- **Success webhook payload includes `event: "sweep.swept"`.** Added to let receivers distinguish
-  success from failure notifications on the same endpoint without inspecting other fields.
-
-
-## [0.1.6.1] - 2026-08-24
-
-### Changed
-
-- **Sweep webhook delivery retries on transient failures.** Flint now retries a failed webhook POST up
-  to three times with exponential backoff (2 s, 4 s, 8 s) before giving up. 5xx responses and network
-  errors are retried; 4xx responses are not (they indicate a permanent client-side rejection and will not
-  resolve on their own).
-
-## [0.1.6.0] - 2026-08-23
-
-### Added
-
-- **`POST /api/v1/stores/{storeId}/spark/sync` forces a wallet sync and returns the current balance.**
-  The balance returned by other endpoints is read from the SDK cache without forcing a sync and may lag
-  settlement by up to 20 seconds. The new endpoint forces an explicit sync before reading, so the
-  returned `balanceSats` is current at call time. Requires `btcpay.store.canmodifystoresettings`.
-  Response: `{ "walletRunning": bool, "balanceSats": long, "syncedAt": timestamp }`.
-- **Sweep webhook.** Setting `sweepWebhookUrl` in the sweep configuration causes Flint to POST a JSON
-  payload to that URL after each successful sweep. The payload includes `storeId`, `idempotencyKey`,
-  `txId`, `amountSats`, `feeSats`, `destination`, `destinationMode`, `trigger`, and `completedAt`.
-  Delivery failures are logged as warnings; the sweep record is the authoritative source. The field is
-  included in `SweepSettings.Clone()` so it survives a seed change.
-- **Sweep configuration warnings.** `GET /api/v1/stores/{storeId}/spark/sweep` now includes a `warnings`
-  array. On mainnet, entries appear when the balance threshold or minimum sweep amount are below the
-  recommended defaults (which were measured on regtest and may not hold on mainnet).
-- **`scripts/setup-stores.sh`** - bash script for headless provisioning of one or more stores via the
-  Greenfield API. Saves each store's recovery phrase (optionally GPG-encrypted) immediately on
-  provisioning, since the API returns it exactly once.
-- **`scripts/flint-logrotate.conf`** - logrotate configuration for `sdk.log`. Uses `copytruncate`
-  because the Rust SDK holds the file handle open; a rename-based rotation leaves the SDK writing to
-  the renamed file.
-- **`docs/railway.md`** - deployment guide for Railway: persistent volume requirements, environment
-  variables, log rotation options, and a post-deploy verification script.
 
 ## [Unreleased]
+
+## [1.3.1.2] - 2026-11-13
+
+### Added
+
+- **SparkLedger**: append-only ledger recording every Lightning receive, stablecoin receive, send, sweep,
+  and unilateral exit with amount, fee, timestamp, and SDK payment reference. Enables
+  `opening_balance + SUM(credits) - SUM(debits) = current_SDK_balance` reconciliation.
+- **Backfill endpoint**: `POST /api/v1/stores/{storeId}/spark/ledger/backfill?dryRun=true` replays
+  existing settled payments into the ledger. Dry-run is the default; each payment type is idempotent.
+
+## [1.3.1.1] - 2026-11-12
+
+### Added
+
+- **Send payment**: send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
+- **Receive payment**: generate a BOLT11 invoice with optional amount and description; QR code shown inline.
+- **Wallet history**: paginated payment history with direction filter (All / Received / Sent), period filter
+  (All time / 7 days / 30 days), and one-click BOLT11 copy.
+- **SparkPluginUpdateChecker**: the plugin checks for newer releases on GitHub and shows a dismissible
+  notice in the BTCPay admin UI. Fork-specific; not sent upstream.
+
+### Fixed
+
+- Sweep engine: `GetInfo(ensureSynced: false)` is now used after the explicit `SyncWalletAsync` calls
+  at the three sweep balance reads. `ensureSynced: true` is a no-op after any SDK sync; `SyncWalletAsync`
+  is what makes the balance current. No behaviour change — the balance was already fresh.
+- Razor view compatibility for SDK 10.0.400: moved script tags out of Razor code blocks in
+  `LNPaymentMethodSetupTabhead.cshtml`, `StablecoinCheckout.cshtml`, and `StablecoinInvoicePayments.cshtml`
+  to avoid parser errors with the stricter Razor source generator shipped in dotnet 10.0.400.
+
+### Maintenance
+
+- `btcpayserver` submodule pinned to v2.4.6 (reverted from a post-release commit that introduced a
+  `VerifyAddress.razor` incompatible with SDK 10.0.400).
+- `Directory.Build.props`: suppress cascading Razor/CS errors from both the plugin and the btcpayserver
+  submodule when building with SDK 10.0.400.
+
+## [1.3.1] — 2026-10-14
+
+Two fixes to USDC/USDT payments from the 1.3.1 security review, Breez Spark SDK 0.26.1, and a README without its
+"still in development" warning.
+
+Validated before shipping:
+- The unit suite (1,982 tests) passes, and so do CI's store, live regtest, funded regtest and local Spark stack
+  suites on SDK 0.26.1.
+- The packaged release candidate ran on both mainnet test hosts. Every wallet started and synced with its balance
+  unchanged, including a USDB Stable Balance, with no errors logged and no warnings beyond the SDK's usual one at
+  shutdown. Invoices got Spark
+  BOLT11 and LNURL prompts and rendered checkout, and a $20 invoice listed the USDC and USDT networks. A live USDC
+  quote on Base recorded the running wallet's tag, rendered at checkout, and stayed payable through checkout and
+  the Greenfield payment link, including across a server restart.
+
+This release adds no database migration, and SDK 0.26.1 adds no storage migration over 0.26.0, so it can be rolled
+back to 1.3.0 or 1.2.x. A rollback brings both defects below back.
+
+### Security
+
+- **An under-paid USDC/USDT deposit could settle its invoice in full.** When the provider does not report how much
+  was deposited, the plugin judges the payment by what reached the wallet. A bitcoin delivery up to 10% short of the
+  quote's estimate was read as a price move and credited as the full ask, so a payer could send up to a tenth less
+  and settle the invoice. A delivery more than the quote's 1% slippage short is now valued at the store's own live
+  BTC rate (the mid-market rate, so the store's spread setting doesn't count against the payer). If it is worth the
+  quote's due (within 2%), it was a late deposit the provider repriced and is credited in full; if it is worth less,
+  it is credited in proportion. With no live rate, the credit waits for one and is retried each reconciliation pass
+  for up to a day. After that it is credited in proportion to the quote's estimate, so a late payer the price moved
+  against reads as part-paid for the merchant to settle, never a short payer as paid. A repriced deposit now credits in full however far the price moved, where before a move of
+  more than 10% left it part-paid. Deposits the provider measures are credited as measured, as before.
+- **A quote from a replaced wallet stayed payable at checkout.** Replacing a store's recovery phrase stopped the
+  plugin reusing the old wallet's quotes, but the checkout, its status poll and the Greenfield payment link went on
+  offering a quote already on show, for up to an hour. A payer could then send money to the old wallet, whose
+  phrase may have been replaced because someone else holds it. A shown quote now records which wallet it pays, and
+  any quote that does not pay the wallet the store runs now is withdrawn: the checkout says the address is no
+  longer offered and sends the payer for a fresh one. That includes quotes shown before this release, once, at the
+  upgrade, and every quote while the store's wallet is stopped or restarting. The same wallet's quotes come back
+  once it is running again. A payment already sent to an old quote still goes to the old wallet (see
+  [Known limitations](docs/limitations.md)).
+
+### Changed
+
+- **Breez Spark SDK 0.26.1**, up from 0.26.0. Upstream, this release only makes the native library smaller: it
+  is now built with link-time optimisation and with a bundled SQLite that leaves out extensions the SDK never
+  used. The C# bindings are unchanged, and the release package is about 4.5 MB (10%) smaller. The SDK now
+  parses its log filter with its own parser instead of `tracing`'s `EnvFilter`. Flint passes a bare `info`,
+  which both read the same way.
+- **The README no longer opens with a warning** that Flint is still in development and thinly proven in
+  production. The [trust model](docs/trust-model.md), [known limitations](docs/limitations.md) and the advice
+  to start with amounts you can afford to lose are unchanged.
+
+### Documentation
+
+- [Accepting USDC and USDT](docs/stablecoin-payments.md) says how a payment is credited when the provider does not
+  report the deposit, and [Known limitations](docs/limitations.md) what replacing a phrase still strands.
+
+### Maintenance
+
+- The weekly Breez SDK bump workflow now regenerates `packages.lock.json`. The 0.26.1 bump PR failed CI's
+  locked-mode restore without it.
+- Test and CI dependencies: xunit.v3 4.0.2 and actions/upload-artifact 7.0.2.
+
+## [1.3.0] — 2026-10-06
+
+Two reports on BTCPay's **Reporting** page, and a build against BTCPay Server 2.4.5. Merchants get their
+sweeps and their USDC/USDT conversions in the place they already filter, chart and export CSV. On BTCPay 2.4.5
+the same reports are also readable over Greenfield. The supported range is unchanged: BTCPay 2.4.1 or newer.
+
+Validated before shipping:
+- The unit suite (1,971 tests) passes.
+- The released 1.2.1 build ran unchanged on a mainnet test host upgraded to BTCPay 2.4.5. It loaded, created
+  invoices with all six payment methods, minted LNURL invoices and rendered checkout.
+- This release's code ran on the same host. Both reports were listed on every store, and the stablecoin report
+  returned the host's real USDC payments.
+
+This release adds no database migration and keeps Breez Spark SDK 0.26, so it can be rolled back to 1.2.1.
+
+### Added
+
+- **Flint Sweeps report.** Lists every sweep that moved money or may have (unresolved, sent, confirmed or
+  failed, in the sweep history's own words), with:
+  - what left the wallet;
+  - the fee;
+  - what arrived: bitcoin for a sweep to an address, and for a sweep to a stablecoin on another chain, the
+    delivered (or still estimated) amount;
+  - the destination and its transaction, linked to the block explorer for a sweep to a bitcoin address.
+
+  Refusals are left out: a store under its fee ceiling records one every pass, and the sweep page already
+  shows them.
+- **Flint Stablecoin Payments report** (mainnet). Lists every USDC and USDT payment with:
+  - the payer's network and transaction;
+  - the coin paid;
+  - what reached the wallet (bitcoin or USDB);
+  - the invoice-currency value.
+
+  BTCPay's own Payments report shows none of the conversion. It reads BTCPay's invoices rather than the
+  plugin's quote records, which are deleted a month after crediting, so it covers every payment ever taken.
+- On BTCPay 2.4.5 and later, both reports are available over Greenfield through `POST
+  /api/v1/stores/{storeId}/reports`, for example with `{"search": "view:Flint Sweeps,daterange:last30d,timezone:UTC"}`.
+
+### Changed
+
+- **Built against BTCPay Server 2.4.5**, up from 2.4.4. The support floor stays at 2.4.1. On a 2.4.5 host:
+  - Invoices are created a little faster. Core no longer asks the Lightning client for node details on every
+    invoice, a question Flint, being nodeless, always declined.
+  - A store owner who is not a server admin can no longer paste a `type=flint` connection string into core's
+    own Lightning setup page or Greenfield's payment-method `PUT`. Core 2.4.5 now reserves strings without
+    `server=` for admins. Flint's setup and repair write the configuration themselves, so nothing a merchant
+    does through Flint changes.
+
+### Documentation
+
+- [Trust model](docs/trust-model.md) describes the barrier BTCPay 2.4.5 adds in front of the plugin's
+  cross-store protections, and why those protections stay.
+- [Sweeping](docs/sweeping.md) and [Accepting USDC and USDT](docs/stablecoin-payments.md) point at the new
+  reports.
+
+## [1.2.1] — 2026-09-28
+
+The unilateral exit stops being an experiment behind a server switch and becomes a supported feature on every
+server. Nothing about what it is changes — it is still a manual last resort that the plugin never broadcasts —
+but every store can now reach it, and the machinery that makes it work when Spark's operators are gone (the
+automatic exit-state backup and its import) now runs on every host, not only on those that opted in.
+
+### Changed
+
+- **The unilateral exit is available on every server, without an environment variable.**
+  `FLINT_EXPERIMENTAL_UNILATERAL_EXIT` is no longer read: setting it does nothing, and it can be removed from
+  BTCPay's environment. The exit page is linked from every store's Advanced page, and quoting and building are
+  still refused until someone with store-settings rights has read and accepted what an exit costs. On a host
+  that never set the variable, this newly means:
+  - **Automatic exit-state backups are written for every running store**, under
+    `<DataDir>/Plugins/Flint/exit-state/<storeId>.txt`, owner-only: once after each wallet start, when money
+    moves or the SDK reports its exit data changed (debounced to two minutes), and at least hourly, rewritten
+    only when the content changed. A file can run to several megabytes. It discloses the wallet's balance, how
+    it is split and its history, and a copy on the server's own disk does not survive that disk — download it
+    from the Advanced page and keep it off the server, encrypted. A wallet that starts with empty storage
+    imports its stored backup back, and a pasted backup is imported at once or queued until it can be.
+  - **Flint's own sweeps pause while a store has an exit quoted or built**, refused with `ExitInProgress` in
+    the sweep history until the exit is completed or abandoned. Every sweep and preview makes one indexed
+    lookup for this; if the lookup fails the sweep is refused and retried rather than run blind.
+  - **The block explorer (mempool.space by default on mainnet) is contacted only from the exit page, and only
+    once the disclosure has been accepted**: for a suggested fee rate while the quote form is shown, for the
+    funding address's balance each time the page is opened while an exit awaits funding, and for its outputs
+    when an exit is built. Opening the page only to read the disclosure contacts no explorer — in 1.2.0 it
+    fetched a fee rate even then — and neither do quoting, checking progress, the Advanced page, the backups or
+    any background task. The last two lookups disclose the funding address; a server administrator can point
+    the page at an own esplora instance instead.
+
+  Every limit the exit carried is unchanged: the plugin never broadcasts; packages go out by hand through
+  Bitcoin Core 29 or later; the fees come from an on-chain output the operator funds first; settlement waits
+  on multi-day CSV timelocks, with about eight hours after each step becomes ready before Spark's watchtowers
+  can broadcast their own version at the leaf's expense; and only leaves whose exit data was collected while
+  the operators were reachable, or restored from a backup, can be exited. See
+  [Known limitations](docs/limitations.md) and [Trust model](docs/trust-model.md).
+
+## [1.2.0] — 2026-09-28
+
+The first feature release since 1.0. Customers can pay in **USDC or USDT** from eight networks while the store
+receives and keeps bitcoin; the Breez Spark SDK moves from 0.23 to 0.26; and an **experimental unilateral exit**,
+absent unless the server sets `FLINT_EXPERIMENTAL_UNILATERAL_EXIT`, gives an operator a way to take a store's
+balance on chain without Spark's operators. **Read "Upgrading" first: this release cannot be rolled back to
+1.1.0.** Validated before shipping: the unit suite (1,797 tests) and the Postgres store contract (128 tests)
+green, the funded, live-regtest and local Spark stack suites green in CI, and a mainnet test host running this
+build on BTCPay Server 2.4.4 with every store's balance unchanged across each deploy and two real USDC payments
+settled on their invoices — one of them paid with a rounded amount.
+
+### Upgrading — read before installing
+
+- **This release cannot be rolled back to 1.1.0 or earlier.** Breez Spark SDK 0.26 migrates every wallet's
+  local storage forward (four new storage migrations), and the SDK inside 1.1.0 refuses storage that is ahead
+  of it: after such a downgrade every store's wallet fails to start with `DatabaseTooFarAhead` and Lightning
+  is unavailable server-wide until this version or newer is installed again. Funds are not affected — they
+  are on Spark, and reinstalling this version brings every wallet back. This was seen on a test host, not
+  predicted: an automatic job reinstalled 1.1.0 over a 0.26 build and every store stayed down for three days.
+  If you want a real rollback path, snapshot `<DataDir>/Plugins/Flint` (the per-store SDK storage) before
+  upgrading; putting back an older plugin without that snapshot does not work.
+- **Disabling the plugin now affects more than Lightning on open invoices.** An invoice created while USDC and
+  USDT were switched on carries those two payment methods, and BTCPay cannot render the checkout of an invoice
+  whose payment method has no handler — so while Flint is disabled, removed or rolled back, those invoices'
+  checkout pages fail entirely, Lightning included, until it is back. BTCPay disables a plugin on its own after
+  an unhandled error, so this is worth knowing even if you never disable it by hand.
 
 ### Security
 
@@ -103,6 +241,92 @@ All notable changes to this plugin are recorded here. The format follows
   secret the old pipeline caught. Appended, it can only hide more — over the same million inputs it never
   showed a secret the old pipeline hid, and text without a line feed scrubs exactly as before. Found while
   fixing the timeout flake below.
+
+### Added
+
+- **Accept USDC and USDT at checkout, received as bitcoin.** One switch on the Flint page (or optional step 3 of
+  setup) adds USDC and USDT beside Lightning on every new invoice. The customer picks the coin and the network they
+  hold it on — Ethereum, Solana, Tron, Base, Arbitrum, Polygon, BNB Chain or Avalanche, wherever the provider serves
+  that coin — and sends it to the quote's deposit address; the provider converts it on the way in, so **the store's
+  Spark wallet receives and keeps bitcoin and never holds the stablecoin** (or USDB, for a store holding its balance
+  in dollars through Stable Balance). The network's cost is shown as the invoice's network cost and paid by the
+  customer, so an exactly paid invoice settles exactly. Each network is shown with its icon — on its button, in the
+  middle of the QR code and on the address line — as the payer's check that they are on the right network; only
+  networks the plugin has an icon for are offered. Mainnet only; built on Breez Spark SDK 0.26's cross-chain
+  receive through Orchestra. Payments are matched to invoices by the figures the provider fixed for each quote,
+  and no two open quotes on a network are allowed to share them — so a payer or exchange rounding the amount still
+  credits the right invoice, and anything that cannot be told apart is left for a person rather than guessed. On EVM
+  networks the QR code is a token-transfer (EIP-681) link, so a scanning wallet fills in the amount, but clicking it
+  copies only the bare deposit address — the link names the token contract first, and pasted where only an address
+  is read, the contract would become the recipient. After a partial payment
+  the checkout stops offering the old address and asks for a new one for the rest. Payments are credited exactly
+  once through the same reconciliation discipline as Lightning, and money that reaches the wallet but lands on no
+  invoice is listed on the store's Flint page. The plugin's default USDC/USDT rate rules cover exact pairs only,
+  so they never reprice another store's `BTC_USDT`. See
+  [Accepting USDC and USDT](docs/stablecoin-payments.md), and the new provider in the
+  [trust model](docs/trust-model.md).
+- **`GET`/`PUT /api/v1/stores/{storeId}/spark/stablecoins`**, the same switch through the Greenfield API.
+- **Experimental: a unilateral exit, behind `FLINT_EXPERIMENTAL_UNILATERAL_EXIT`.** With the environment
+  variable set to `1`, the Advanced page gains a way to take a store's balance on chain *without* Spark's
+  operators — the recovery path for operators that refuse or are gone. It is built on the SDK's exit API: an
+  exit is quoted and built from data the SDK holds locally, so it works without the operators, but only for
+  leaves whose data was collected while they were still reachable (which is what the exit-state backup below
+  is for). The plugin quotes, funds and signs; it **never broadcasts** — the operator pushes every
+  transaction by hand through a node with package relay. Fees are paid from a separate on-chain output the
+  operator funds, on an address derived from the store's seed at `m/84'/{coin}'/4607060'/0/{index}` (a
+  hardened account no wallet uses, so it cannot collide with BTCPay's own hot wallet). Funding discovery and
+  the default fee rate come from a block explorer (mempool.space on mainnet unless a server administrator sets
+  another), which learns the funding address. While an exit is in progress Flint refuses its own sweeps for that
+  store (`ExitInProgress` in the sweep history), and a build refuses rather than silently shrinking when the
+  leaves it was quoted for have moved. Packages need Bitcoin Core 29 or later. With the variable unset nothing of this runs, and every exit route answers 404. See
+  [Known limitations](docs/limitations.md).
+- **An exit-state backup, on the Advanced page** (with the exit enabled). The SDK can now export the wallet's unilateral-exit data
+  and import it back, and an exit built from an exported copy is the only kind that survives the loss of the
+  wallet's own storage while the operators are gone. Flint keeps an automatic copy per store, refreshed when the
+  SDK reports the wallet's exit data changed, and the page downloads it. A pasted or uploaded backup (several
+  megabytes is normal) is imported into the running wallet at once, with the result shown; one that has not
+  imported yet waits in its own slot, is retried at every start, and is never overwritten by the automatic copy.
+  The automatic copy is imported back only when a wallet starts with empty storage, since importing an
+  out-of-date one makes spent leaves look spendable until the next sync. Backups are set aside, not deleted, when
+  a store is removed or moves to a new phrase. The blob is sensitive — it discloses the balance, how it is split
+  and the history — so it is never logged or rendered on the page.
+- **A "Check progress" control on the exit page.** Asks the chain how far a built exit has got and refreshes
+  every transaction's status. It reports whether the set is on track, finished (with a pointer to marking it
+  completed), or can no longer finish — in which case it says plainly that the money is not lost and that the
+  fix is to build again from the same leaves. It broadcasts and signs nothing; it needs the store's wallet
+  running, and the page shows when statuses were last read. Marking an exit completed follows Spark's own "done"
+  verdict, unless the operator explicitly confirms the sweep themselves. Building again hands Spark the funding
+  earlier builds committed (so a retry never needs a second full funding) and may raise the fee rate, which is
+  how a stalled exit is sped up.
+- **A "send these now" list above the transaction table**, naming exactly which transactions can be
+  broadcast at this moment and the command to run for each, so an operator opening the page a day later does
+  not have to read the whole set to find the actionable row.
+
+- **The exit page now warns that leaving a step unbroadcast costs money.** About 50 blocks (~8 hours) after
+  a step becomes valid, Spark's watchtowers can broadcast their own version of that step; its fee is taken
+  out of the leaf rather than paid by the funding UTXO, so a step left unsent for more than those ~8 hours pays part of
+  its own cost out of the money being recovered. Each transaction row still reports its CSV timelock, but the
+  page now also reports readiness directly — "broadcast it now", "valid from block N", or "confirmed" — and
+  tells the operator that following the Status column is what matters, since broadcasting an already-sent
+  transaction is harmless.
+
+### Changed
+
+- **Breez Spark SDK 0.26.0**, up from 0.23.0 (0.24.x were tag-only; this supersedes the automated
+  0.25.0 bump). The API changes the plugin meets are absorbed at the SDK seam: a manual deposit
+  claim now reports one of three outcomes — settled, submitted (settles asynchronously) or deferred,
+  which is reported as a failure with its reason — the network-status probe takes a request, and a
+  cross-chain route describes its Spark side as accepted assets carrying amount limits. The new
+  `PaymentMetadataUpdated` event is consumed rather than dropped.
+- **An on-chain deposit can be credited before its third confirmation.** SDK 0.26 unifies early and
+  mature claiming under the one claim ceiling the plugin already configures: when the service
+  provider's spread for crediting a deposit early fits that ceiling, the SDK takes it. It never costs
+  more than an ordinary claim would be allowed to. A deposit credited early stays in the SDK's
+  unclaimed list until the provider spends its output; the plugin no longer shows it as unclaimed,
+  so it cannot read as stuck and invite a second claim.
+- **A wallet whose storage a newer plugin already migrated is reported as that.** The start failure used to say
+  the store's configuration needed correcting; it now says the wallet's storage was written by a newer version,
+  that installing that version or newer fixes it, and that the funds are not affected.
 
 ### Fixed
 
@@ -354,7 +578,6 @@ lives in the automation that keeps the plugin watching upstream for the right ch
   scrubber's five regex passes run only on lines that will actually be emitted. Lines that are
   emitted scrub exactly as before.
 
-
 ## [1.0.1] — 2026-08-26
 
 ### Changed
@@ -368,7 +591,6 @@ lives in the automation that keeps the plugin watching upstream for the right ch
   stronger warning for a store manager who is not a server admin. The same disclosure is on the
   Greenfield provisioning endpoint and in SECURITY.md, the README trust model and the trust-model
   document.
-
 
 ## [1.0.0] — 2026-08-26
 
@@ -393,7 +615,6 @@ lives in the automation that keeps the plugin watching upstream for the right ch
   the new `DepositInfo` fields are default-off / ignored. Verified on mainnet against a live
   Lightspark service provider on the test servers; the SDK's own storage schema migrates to
   version 40 on startup.
-
 
 ## [0.1.5.5] — 2026-08-25
 
@@ -447,7 +668,7 @@ lives in the automation that keeps the plugin watching upstream for the right ch
   configuration (with the victim's payment key rotated, so previously leaked copies of the victim's
   string stop resolving).
 
-## [0.1.5.2] - 2026-08-22
+## [0.1.5.2] — 2026-08-22
 
 ### Changed
 
@@ -966,3 +1187,7 @@ signet), the unrotated `sdk.log`, and the one SDK error classification with no a
 [1.0.3]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.3
 [1.0.4]: https://github.com/sethforprivacy/flint/releases/tag/v1.0.4
 [1.1.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.1.0
+[1.2.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.2.0
+[1.2.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.2.1
+[1.3.0]: https://github.com/sethforprivacy/flint/releases/tag/v1.3.0
+[1.3.1]: https://github.com/sethforprivacy/flint/releases/tag/v1.3.1

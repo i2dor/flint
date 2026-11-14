@@ -91,8 +91,9 @@ public sealed record SweepPreview(
 /// <remarks>
 /// <para>
 /// <b>Every sweep here is a cooperative exit</b> — <c>PrepareSendPayment</c>/<c>SendPayment</c> to a Bitcoin
-/// address through the service provider. There is no unilateral-exit path in this class, in this plugin, or in
-/// its UI, by owner decision. "Drain" means the SDK's
+/// address through the service provider. There is no unilateral-exit path in this class or anywhere sweeping
+/// can reach; the plugin's only unilateral path is the manual, operator-driven flow reached from the Advanced page,
+/// entirely separate from this engine. "Drain" means the SDK's
 /// <c>FeePolicy.FeesIncluded</c> and nothing else.
 /// </para>
 /// <para>
@@ -220,8 +221,14 @@ public sealed class SparkSweepEngine
     private readonly ICrossChainValueOracle _valueOracle;
     private readonly TimeProvider _timeProvider;
     private readonly ISweepTransactionLabeler _transactionLabeler;
-    private readonly SparkSweepWebhookNotifier? _webhookNotifier;
+    private readonly ISparkLedgerStore _ledger;
     private readonly ILogger<SparkSweepEngine> _logger;
+
+    /// <summary>
+    /// The store's unilateral exits, read only to ask whether one is in progress. Null where no store is wired —
+    /// the unit harnesses that predate the pause — which reads as "none".
+    /// </summary>
+    private readonly IUnilateralExitRecordStore? _unilateralExits;
 
     /// <summary>
     /// Stores with a pass in progress. Membership is the lock; there is deliberately no queueing, because a pass
@@ -237,10 +244,12 @@ public sealed class SparkSweepEngine
         CrossChainRouteResolver routes,
         ICrossChainValueOracle valueOracle,
         ISweepTransactionLabeler transactionLabeler,
+        ISparkLedgerStore ledger,
         TimeProvider timeProvider,
         ILogger<SparkSweepEngine> logger,
-        SparkSweepWebhookNotifier? webhookNotifier = null)
+        IUnilateralExitRecordStore? unilateralExits = null)
     {
+        _unilateralExits = unilateralExits;
         _settingsStore = settingsStore;
         _runtime = runtime;
         _records = records;
@@ -248,8 +257,8 @@ public sealed class SparkSweepEngine
         _routes = routes;
         _valueOracle = valueOracle;
         _transactionLabeler = transactionLabeler;
+        _ledger = ledger;
         _timeProvider = timeProvider;
-        _webhookNotifier = webhookNotifier;
         _logger = logger;
     }
 
@@ -259,8 +268,6 @@ public sealed class SparkSweepEngine
     public async Task<SweepRunResult> RunAsync(
         string storeId,
         SweepTrigger trigger,
-        bool force = false,
-        string? destinationOverride = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(storeId);
@@ -275,25 +282,7 @@ public sealed class SparkSweepEngine
 
         try
         {
-            var result = await RunGuardedAsync(storeId, trigger, force, destinationOverride, cancellationToken).ConfigureAwait(false);
-
-            if (_webhookNotifier is { } notifier)
-            {
-                var stored = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
-                var webhookUrl = stored?.Sweep?.SweepWebhookUrl;
-                if (!string.IsNullOrWhiteSpace(webhookUrl))
-                {
-                    if (result.Kind is SweepOutcomeKind.Swept && result.Record is { } record)
-                        await notifier.NotifyAsync(webhookUrl, storeId, record, cancellationToken)
-                            .ConfigureAwait(false);
-                    else if (result.Kind is SweepOutcomeKind.Failed)
-                        await notifier.NotifyFailureAsync(
-                                webhookUrl, storeId, trigger, result.Reason, result.Record, cancellationToken)
-                            .ConfigureAwait(false);
-                }
-            }
-
-            return result;
+            return await RunGuardedAsync(storeId, trigger, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -320,6 +309,11 @@ public sealed class SparkSweepEngine
         if (sdk is null)
             return new SweepPreview(WalletNotRunning, null, 0, 0, null, settings);
 
+        // Before the balance read, so the confirmation page says why the run would refuse without syncing a
+        // wallet for a sweep that is not going to happen.
+        if (await DescribeActiveExitAsync(storeId, cancellationToken).ConfigureAwait(false) is { } exitPause)
+            return new SweepPreview(exitPause, null, 0, 0, null, settings);
+
         long balance;
         SparkNodeInfo info;
         try
@@ -327,7 +321,7 @@ public sealed class SparkSweepEngine
             // Synced here too. A preview that showed a stale balance would offer a sweep of the wrong size, and
             // the merchant would have no way to know.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -454,8 +448,6 @@ public sealed class SparkSweepEngine
     private async Task<SweepRunResult> RunGuardedAsync(
         string storeId,
         SweepTrigger trigger,
-        bool force,
-        string? destinationOverride,
         CancellationToken cancellationToken)
     {
         var settings = await _settingsStore.GetAsync(storeId).ConfigureAwait(false);
@@ -503,13 +495,26 @@ public sealed class SparkSweepEngine
                 SweepOutcomeKind.Skipped, "Automatic sweeping is switched off for this store.");
         }
 
+        // A unilateral exit in progress pauses sweeping, automatic and manual alike. The exit is pinned to named
+        // leaves and funded against them; a cooperative sweep spends those same leaves, and the next build of the
+        // exit then finds them gone — its funding committed to an exit that can no longer be built or finished.
+        // After the automatic-off skip, so a store that has switched sweeping off files no refusal every pass.
+        if (await DescribeActiveExitAsync(storeId, cancellationToken).ConfigureAwait(false) is { } exitPause)
+        {
+            return await RefuseAsync(
+                    storeId, trigger, sweep,
+                    new SweepRefusal(SweepRefusalCode.ExitInProgress, exitPause),
+                    null, 0, 0, 0, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         long balance;
         SparkNodeInfo info;
         try
         {
             // Step 3. The sync is what makes the number current; see the class remarks.
             await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-            info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
+            info = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken).ConfigureAwait(false);
             balance = info.BalanceSats;
         }
         catch (Exception ex)
@@ -530,23 +535,11 @@ public sealed class SparkSweepEngine
         // decides which rail the sweep runs on and therefore which unit everything below is in.
         var stableToken = ResolveStableToken(settings, info);
 
-        if (destinationOverride is not null && sweep.DestinationMode is SweepDestinationMode.EvmAddress)
-        {
-            return await RefuseAsync(
-                    storeId, trigger, sweep,
-                    new SweepRefusal(
-                        SweepRefusalCode.NoDestination,
-                        "A destination address override is not supported for EVM cross-chain sweeps. "
-                        + "Change the store's sweep destination mode to Bitcoin first."),
-                    null, balance, 0, 0, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
         if (sweep.DestinationMode is SweepDestinationMode.EvmAddress)
         {
             // A different rail with different arithmetic and, when funded from a token, a different unit and no
             // idempotency key. Branched before the sats plan is made rather than after, because a sats plan is
-            // not merely unnecessary on that path - it is denominated in the wrong thing.
+            // not merely unnecessary on that path — it is denominated in the wrong thing.
             return await RunCrossChainAsync(
                     storeId, sdk, trigger, sweep, balance, stableToken, cancellationToken)
                 .ConfigureAwait(false);
@@ -567,17 +560,6 @@ public sealed class SparkSweepEngine
 
         // Step 4.
         var plan = PlanSweep(sweep, balance);
-
-        if (force
-            && plan.Refusal?.Code is SweepRefusalCode.BelowMinimumSweep
-            && plan.SweepableSats >= Constants.MinimumOnchainSendSats)
-        {
-            _logger.LogInformation(
-                "Store {StoreId}: force flag set; sweeping {AmountSats} sat below the configured minimum",
-                storeId, plan.SweepableSats);
-            plan = SweepPlan.Sweep(plan.SweepableSats);
-        }
-
         if (plan.Refusal is { } planRefusal)
         {
             // The one interaction between the two post-MVP features that would otherwise look like a bug. With
@@ -601,32 +583,19 @@ public sealed class SparkSweepEngine
                 .ConfigureAwait(false);
         }
 
-        SweepDestination destination;
-        if (destinationOverride is not null)
+        // reserve: true — this is a real sweep, so the address is reserved and labelled, and therefore rotated.
+        var resolution = await _destinations
+            .ResolveAsync(storeId, sweep, reserve: true, cancellationToken)
+            .ConfigureAwait(false);
+        if (resolution.Destination is not { } destination)
         {
-            destination = new SweepDestination(
-                destinationOverride,
-                SweepDestinationMode.StaticAddress,
-                SweepDestinationKind.BitcoinAddress,
-                Rotates: false);
-        }
-        else
-        {
-            // reserve: true - this is a real sweep, so the address is reserved and labelled, and therefore rotated.
-            var resolution = await _destinations
-                .ResolveAsync(storeId, sweep, reserve: true, cancellationToken)
+            return await RefuseAsync(
+                    storeId, trigger, sweep,
+                    new SweepRefusal(
+                        SweepRefusalCode.NoDestination,
+                        resolution.RefusalReason ?? "This store has no usable sweep destination."),
+                    null, balance, plan.AmountSats, 0, cancellationToken)
                 .ConfigureAwait(false);
-            if (resolution.Destination is not { } resolved)
-            {
-                return await RefuseAsync(
-                        storeId, trigger, sweep,
-                        new SweepRefusal(
-                            SweepRefusalCode.NoDestination,
-                            resolution.RefusalReason ?? "This store has no usable sweep destination."),
-                        null, balance, plan.AmountSats, 0, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            destination = resolved;
         }
 
         // Step 5. A pre-flight quote, so an economic or dust refusal is decided before a record exists — which is
@@ -1752,7 +1721,7 @@ public sealed class SparkSweepEngine
                     try
                     {
                         await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken)
+                        syncedInfo = await sdk.GetInfoAsync(ensureSynced: false, cancellationToken)
                             .ConfigureAwait(false);
                     }
                     catch (Exception ex)
@@ -2172,6 +2141,33 @@ public sealed class SparkSweepEngine
                 + "(fee {FeeSats} sat, txid {TxId})",
                 storeId, record.IdempotencyKey, status, payment.FeeSats, payment.TxId ?? "unknown");
 
+            // Write ledger entry when the debit becomes irrevocable (Sent = tx broadcast).
+            if (status is SweepRecordStatus.Sent)
+            {
+                try
+                {
+                    await _ledger.AppendAsync(new SparkLedgerEntry
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        StoreId = storeId,
+                        EntryType = SparkLedgerEntryType.Sweep,
+                        AmountMsat = record.AmountSats * 1000L,
+                        FeeMsat = payment.FeeSats * 1000L,
+                        OccurredAt = payment.Timestamp,
+                        RecordedAt = now,
+                        SdkPaymentId = payment.SdkPaymentId,
+                        PaymentHash = payment.PaymentHash,
+                        IsBackfill = false,
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex,
+                        "Store {StoreId}: sweep {IdempotencyKey} sent but ledger append failed",
+                        storeId, record.IdempotencyKey);
+                }
+            }
+
             // The reconciliation path learns the txid from the SDK's payment rather than from the row, so this
             // covers a sweep whose send raced a crash — the label lands when the fate is finally known. The
             // write is idempotent, so a Sent row later promoted to Confirmed labels once.
@@ -2537,6 +2533,51 @@ public sealed class SparkSweepEngine
 
     private const string WalletNotRunning =
         "This store's Spark wallet is not running, so nothing can be swept. Check the Flint status page.";
+
+    internal const string UnilateralExitInProgress =
+        "This store has a unilateral exit in progress, and a sweep would spend the very leaves that exit is "
+        + "pinned to — leaving its funding committed to an exit that can no longer be built or finished. Sweeping "
+        + "is paused until the exit is marked completed or abandoned on the unilateral-exit page.";
+
+    internal const string UnilateralExitUnknown =
+        "Whether this store has a unilateral exit in progress could not be read, and sweeping while one is would "
+        + "spend the leaves it is pinned to, so this sweep did not go ahead. It will be tried again.";
+
+    /// <summary>
+    /// Why sweeping is paused for a unilateral exit, or null when it is not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Asked on every sweep and preview, for every store, whether or not that store has ever opened the exit
+    /// page. That is one indexed lookup — on the <c>(StoreId, Status)</c> index in <c>SparkPluginDbContext</c> —
+    /// which on a store with no exit finds nothing, and the pause it can impose
+    /// is always liftable: the exit page, where the record is completed or abandoned, is reachable from every
+    /// store.
+    /// </para>
+    /// <para>
+    /// A read that fails is a refusal, not a pass: the whole point is not to spend pinned leaves, and "could not
+    /// tell" is not "none". A store whose database is failing is not going to record a sweep either.
+    /// </para>
+    /// </remarks>
+    private async Task<string?> DescribeActiveExitAsync(string storeId, CancellationToken cancellationToken)
+    {
+        if (_unilateralExits is null)
+            return null;
+
+        try
+        {
+            var active = await _unilateralExits
+                .GetActiveForStoreAsync(storeId, cancellationToken)
+                .ConfigureAwait(false);
+            return active is null ? null : UnilateralExitInProgress;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: could not read whether a unilateral exit is in progress; not sweeping", storeId);
+            return UnilateralExitUnknown;
+        }
+    }
 }
 
 /// <param name="AmountSats">Amount to ask the SDK for. Zero when there is nothing to sweep.</param>

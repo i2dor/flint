@@ -210,30 +210,6 @@ public class SparkSweepConfigurationData
 
     /// <summary>The requested page of sweep history, newest first.</summary>
     public IReadOnlyList<SparkSweepRecordData> History { get; set; } = [];
-
-    /// <summary>
-    /// Advisory warnings about the current sweep configuration.
-    /// Empty when there is nothing worth flagging. On mainnet, low thresholds or fee ceilings
-    /// produce entries here; the defaults were measured on regtest and may need adjustment.
-    /// </summary>
-    public IReadOnlyList<string> Warnings { get; set; } = [];
-}
-
-/// <summary>
-/// Response to <c>POST /api/v1/stores/{storeId}/spark/sync</c>: the balance after a forced wallet sync.
-/// </summary>
-public class SparkBalanceSyncData
-{
-    /// <summary>
-    /// Spark balance in satoshi after forcing a wallet sync. Zero when the wallet is not running.
-    /// </summary>
-    public long BalanceSats { get; set; }
-
-    /// <summary>Whether a Spark wallet is live for this store.</summary>
-    public bool WalletRunning { get; set; }
-
-    /// <summary>When the sync was performed, UTC.</summary>
-    public DateTimeOffset SyncedAt { get; set; }
 }
 
 /// <summary>
@@ -459,20 +435,6 @@ public class SparkSweepRequest
     /// re-checks the fee ceiling against the number it actually commits to.
     /// </remarks>
     public bool Preview { get; set; }
-
-    /// <summary>
-    /// When true, sweeps whatever is above the reserve even if it is below the configured minimum sweep amount.
-    /// The absolute protocol minimum (<c>Constants.MinimumOnchainSendSats</c>) is still enforced.
-    /// Ignored when <see cref="Preview"/> is true.
-    /// </summary>
-    public bool Force { get; set; }
-
-    /// <summary>
-    /// A Bitcoin address to sweep to instead of the store's configured destination.
-    /// Validated against the current network. Ignored when <see cref="Preview"/> is true.
-    /// Not compatible with stores configured for EVM cross-chain sweeps.
-    /// </summary>
-    public string? DestinationAddress { get; set; }
 }
 
 /// <summary>
@@ -870,6 +832,44 @@ public sealed record SparkTokenBalanceData(
 
 #endregion
 
+#region USDC and USDT at checkout
+
+/// <summary>
+/// Response to the USDC and USDT endpoints: whether the store's checkout takes them, received into its Spark wallet
+/// as bitcoin.
+/// </summary>
+public class SparkStablecoinsData
+{
+    /// <summary>Whether this server can offer them at all. Mainnet only; false everywhere else.</summary>
+    public bool Available { get; set; }
+
+    /// <summary>
+    /// Whether new invoices offer them: true while either payment method is configured and not switched off in
+    /// BTCPay's own checkout settings, which the plugin respects rather than overrides.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// The BTCPay payment method ids they are offered as — the ids an invoice's payment-methods endpoint lists them
+    /// under.
+    /// </summary>
+    public IReadOnlyList<string> PaymentMethodIds { get; set; } = [];
+}
+
+/// <summary>The body of <c>PUT .../spark/stablecoins</c>.</summary>
+/// <remarks>
+/// A full replacement, as <c>PUT</c> implies: an omitted <see cref="Enabled"/> means off. Unlike Stable Balance's,
+/// that default moves no money — it stops new invoices offering USDC and USDT, and every quote already shown still
+/// settles.
+/// </remarks>
+public class SparkStablecoinsInput
+{
+    /// <summary>Offer USDC and USDT on new invoices (both, or neither).</summary>
+    public bool Enabled { get; set; }
+}
+
+#endregion
+
 /// <summary>
 /// A cross-chain quote, for a store sweeping to an EVM address.
 /// </summary>
@@ -922,27 +922,3 @@ public sealed record SparkCrossChainQuoteData(
         quote.ExpiresAt,
         quote.ProviderQuoteId);
 }
-
-#region Server settings
-
-/// <summary>Flint server-level settings, shared across all stores on this BTCPay instance.</summary>
-public class SparkServerSettingsData
-{
-    /// <summary>
-    /// When set, Flint POSTs a <c>plugin.update-available</c> event here whenever a newer version is
-    /// detected on the plugin registry. The check runs once per day.
-    /// </summary>
-    public string? UpdateWebhookUrl { get; set; }
-}
-
-/// <summary>Request body for <c>PUT /api/v1/server/spark</c>.</summary>
-public class SparkServerSettingsRequest
-{
-    /// <summary>
-    /// The URL to call when a plugin update is available, or null/empty to disable the notification.
-    /// Must be a valid http or https URL when non-empty.
-    /// </summary>
-    public string? UpdateWebhookUrl { get; set; }
-}
-
-#endregion

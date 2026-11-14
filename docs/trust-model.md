@@ -5,13 +5,59 @@
 Spark is a 2-of-3 statechain system operated by Lightspark, Breez and Flashnet. Funds held on Spark
 are not held in your own custody in the way an on-chain UTXO or a Lightning channel you own is:
 every Lightning receive rides Lightspark's service provider, and unilateral exit is a multi-day last
-resort that requires reachable operators and an external UTXO. Keeping the auto-sweep threshold low
+resort that needs an external UTXO and an exit-state backup taken while the operators were still
+reachable. Keeping the auto-sweep threshold low
 is the best available mitigation, since it bounds how much is ever exposed on the L2.
 
-The plugin performs **cooperative exits only** (owner decision). It offers no unilateral-exit path, so if the
-Spark operators were to become unavailable or refuse to process an exit, recovering funds would mean using
-the store's recovery phrase with another Spark wallet implementation. Set the sweep threshold according to
-how much you are willing to have depend on those operators; sweeping is the only thing that reduces it.
+Every sweep this plugin makes is a **cooperative exit**, and that is the only automated path off Spark: the
+operators build and broadcast one Bitcoin transaction for a flat fee, and it lands in seconds. Set the sweep
+threshold according to how much you are willing to have depend on those operators; sweeping is the only thing
+that reduces it.
+
+There is also a **unilateral exit**, linked from every store's Advanced page. Opening it shows a disclosure
+first, and nothing can be quoted or built until someone with store-settings rights has accepted it; that
+acceptance is stored and re-checked on the server before every quote and build. Read what it is before
+counting on it:
+
+- **The plugin never broadcasts.** It asks the SDK to build and sign the statechain's timelocked transaction
+  tree and then shows you the raw transactions; pushing them, in dependency order, with `submitpackage` where
+  a transaction and its fee-bumping child go together, is your job.
+- **It works with the operators gone only if you prepared.** An exit is quoted and built from data the SDK
+  holds locally, so it no longer needs the operators to be reachable — but only for leaves whose data was
+  collected while they still were. The exit-state backup on the Advanced page is that copy: a wallet whose
+  own storage is lost and has no backup cannot rebuild its exit data from anywhere once the operators are
+  gone, and a leaf is only exitable this way once its chain has been synced at least once.
+- **You have to fund it on-chain first.** The tree transactions cannot pay their own fees, so the exit is
+  bumped by CPFP from a native-SegWit UTXO you send to an address the plugin derives from the store's seed at
+  its own hardened account. Too little there and nothing gets built. Fan-out and fee-bumping fees come out
+  of that funding and the final sweep's fee out of the recovered value; unspent funding is swept to the
+  destination with the rest, and funding for an exit that is never broadcast is not spent.
+- **It settles in days, not seconds.** The outputs are behind CSV timelocks measured in blocks; the money is
+  spendable when the last one expires, not when the transactions are signed. That window has a cost: about 50
+  blocks after a step becomes valid, Spark's watchtowers can broadcast their own version of that step, whose
+  fee comes out of the leaf rather than the funding UTXO — so a step left unbroadcast for more than about
+  eight hours after it became ready pays part of its own cost out of the money being recovered. The exit page
+  reports each step's readiness as of the last check or build, and the operator is expected to check it every
+  few hours while steps mature.
+- **Broadcasting needs Bitcoin Core 29 or later.** The packages carry zero-value P2A anchors, which older
+  nodes will not relay.
+- **A block explorer learns about it, and only while you use the page.** Flint asks an esplora API
+  (mempool.space by default on mainnet; a server administrator can point it at an own instance) three things,
+  all from the exit page and all after the disclosure has been accepted: a suggested fee rate when the quote
+  form is shown, what has arrived on the funding address each time the page is opened while an exit waits for
+  funding, and the funding address's outputs when an exit is built. The last two disclose the funding address,
+  and with it that this server is running an exit. Nothing else contacts it: not opening the page to read the
+  disclosure, not quoting, checking progress, abandoning or completing, not the Advanced page or the exit-state
+  backups, and no background or scheduled task. Off mainnet there is no default and nothing is asked until an
+  explorer is set.
+- **The exit-state backup is sensitive.** Flint writes one automatically for every store under
+  `<DataDir>/Plugins/Flint/exit-state/`, owner-only. Treat it as a secret: it carries every leaf of the wallet
+  and the transactions under them, so anyone who reads it learns the balance, how it is split and the store's
+  history. Download it and keep it off the server, encrypted — a copy that dies with the machine is not a backup.
+
+So it is a last resort that costs days and attention, not a second sweep destination. If the operators
+became unavailable and this path did not get you out, recovering funds still means using the store's recovery
+phrase with another Spark wallet implementation.
 
 **Stable Balance adds a second counterparty, and a different kind.** Holding the store's balance in USDB
 means holding a token issued by a regulated stablecoin issuer whose metadata says it is **freezable**: the
@@ -24,6 +70,17 @@ it, on the settings page and through the API alike.
 wallet as an ordinary transfer to the provider's address and depend on the provider to settle on the far
 side; until it does, they are neither on Spark nor at the destination. The plugin records the provider's own
 quote id before sending and reports what it says it delivered, which is the most the SDK exposes.
+
+**Accepting USDC and USDT puts a conversion provider between the payer and the store** — Orchestra, the same
+provider a cross-chain sweep uses, in the other direction. The payer sends their stablecoin to the provider's
+deposit address on their own chain; the provider converts it and pays bitcoin into the store's Spark wallet. Until
+it does, the money is with the provider and is neither the payer's nor the store's. If the provider never
+delivers, the invoice is simply not paid, and the store has received nothing it could refund from — the payer's
+claim is against the provider, and the invoice records the provider's order id and the payer's transaction hash to
+pursue it with. The coin's issuer, Circle or Tether, is the payer's counterparty up to that point and never the
+store's: the store receives bitcoin. The one exception is a store holding its balance in USDB through Stable
+Balance, which takes on the freezable-issuer risk described above for that balance. The feature is off by default
+and mainnet only.
 
 **The store's Lightning connection string is a bearer spend credential, store-bound at save time.**
 Setup writes a `type=flint;store-id=…;key=…` string into the store's Lightning payment method. The
@@ -50,6 +107,19 @@ a new one) mints a fresh key and rewrites the store's Lightning configuration wi
 copy of the old string — so a leaked string is revoked by re-running setup, without waiting for a removal.
 Between provisions it never expires. Treat it like a macaroon, and keep the sweep threshold low enough that
 the balance it could reach is a balance you can afford to lose.
+
+**On BTCPay Server 2.4.5 and later, core adds its own barrier in front of these.** Core now treats a
+Lightning connection string with no `server=` as unsafe. So saving a new or changed `type=flint` string
+through either path core offers (the Lightning setup page and Greenfield's payment-method `PUT`) needs
+`btcpay.server.canmodifyserversettings`. On such a host, a store owner who is not a server admin cannot put
+a new `type=flint` string on any store through core. The plugin never needed that path, because
+setup and repair write the configuration directly. The plugin's own layers stay in place:
+
+- On BTCPay 2.4.1–2.4.4, which this plugin still supports, they are the only enforcement.
+- Configurations saved before an upgrade survive it.
+- The sweep and key rotation also cover writes that never pass through HTTP.
+
+On 2.4.5 the save-time refusal still guards an administrator against pasting the wrong store's string.
 
 **The instance administrator is a counterparty on any server you do not operate.** Setup stores the
 store's Spark seed encrypted in the store's settings blob, and the data-protection keys that decrypt it

@@ -121,7 +121,7 @@ public enum SparkPaymentStatus
 }
 
 /// <summary>Result of minting a receive request (BOLT11 invoice) on the SSP.</summary>
-public sealed record SparkReceiveResult(string PaymentRequest, long FeeSats);
+public sealed record SparkReceiveResult(string PaymentRequest, long FeeSats, string PaymentHash);
 
 /// <summary>
 /// Wallet-level information, from the SDK's <c>GetInfo</c>.
@@ -173,13 +173,19 @@ public sealed record SparkNodeInfo(
 /// happened. A scan anchored to a record's creation time wants the opposite: its target is the oldest row in
 /// the window, so paging newest-first walks away from it.
 /// </param>
+/// <param name="Method">
+/// Only payments of this kind: <see cref="SparkPaymentMethod.Spark"/> (plain Spark transfers — no Lightning, no
+/// deposits) or <see cref="SparkPaymentMethod.Token"/> (token payments). Null for every kind. These are the two the
+/// SDK can filter by in storage, and the two a cross-chain receive arrives as: sats, or the Stable Balance token.
+/// </param>
 public sealed record SparkListPaymentsQuery(
     SparkPaymentDirection? Direction = null,
     bool CompletedOnly = false,
     DateTimeOffset? From = null,
     int Offset = 0,
     int Limit = 50,
-    bool Ascending = false);
+    bool Ascending = false,
+    SparkPaymentMethod? Method = null);
 
 /// <summary>
 /// What the SDK quoted for a send, before it is executed. Surfaced so the caller can enforce its own

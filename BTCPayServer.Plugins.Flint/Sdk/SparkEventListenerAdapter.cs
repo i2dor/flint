@@ -32,6 +32,30 @@ public enum SparkEventKind
     /// <summary>An on-chain static deposit was seen, before it is claimed.</summary>
     NewDeposits,
 
+    /// <summary>
+    /// A payment the SDK already reported gained provider metadata — for this plugin, the Orchestra conversion
+    /// details on an inbound USDC/USDT receive.
+    /// </summary>
+    /// <remarks>
+    /// Routed exactly like a completion, because for a cross-chain receive it usually <em>is</em> the
+    /// completion as far as the plugin can tell: the inbound Spark transfer is reported first as a plain
+    /// transfer with nothing tying it to a quote, and the conversion details arrive only with this event, once
+    /// the provider confirms the order.
+    /// </remarks>
+    PaymentMetadataUpdated,
+
+    /// <summary>
+    /// The data a unilateral exit is built from changed, so any exit-state backup exported earlier no longer
+    /// covers the wallet.
+    /// </summary>
+    /// <remarks>
+    /// The SDK emits it once it has completed the exit data of a leaf that was missing it, and whenever it
+    /// rebuilds a leaf's data — which is what a send, a swap, a renewal or the SDK's own leaf optimisation does
+    /// to the leaf set. An export omits a leaf whose data is not collected yet, so this, not a payment event,
+    /// is the moment a fresh backup starts to cover a leaf the previous one could not.
+    /// </remarks>
+    UnilateralExitStateChanged,
+
     Other
 }
 
@@ -116,6 +140,10 @@ public sealed class SparkEventListenerAdapter : EventListener
                 SdkEvent.Synced => new SparkEventEnvelope(_storeId, SparkEventKind.Synced, null),
                 SdkEvent.ClaimedDeposits => new SparkEventEnvelope(_storeId, SparkEventKind.ClaimedDeposits, null),
                 SdkEvent.NewDeposits => new SparkEventEnvelope(_storeId, SparkEventKind.NewDeposits, null),
+                SdkEvent.PaymentMetadataUpdated updated =>
+                    new SparkEventEnvelope(_storeId, SparkEventKind.PaymentMetadataUpdated, updated.payment),
+                SdkEvent.UnilateralExitStateChanged =>
+                    new SparkEventEnvelope(_storeId, SparkEventKind.UnilateralExitStateChanged, null),
                 _ => new SparkEventEnvelope(_storeId, SparkEventKind.Other, null)
             };
 

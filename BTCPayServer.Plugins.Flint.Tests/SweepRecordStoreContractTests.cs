@@ -63,43 +63,37 @@ public abstract class SweepRecordStoreContractTests
         return record;
     }
 
+    /// <remarks>
+    /// <para>
+    /// The round trip goes through the store, so on the Postgres implementation this is what proves the entity is
+    /// mapped (a column missing from the model silently reads back as its default), and on the in-memory one it
+    /// proves the hand-written <c>InMemorySweepRecordStore.Copy</c> carries every column. That second omission
+    /// already happened: when Wave 7 added the cross-chain columns none of them were copied, so a cross-chain row
+    /// came back as a cooperative exit and every engine test exercised the wrong crash-recovery branch.
+    /// </para>
+    /// <para>
+    /// Every property is set through <see cref="EveryProperty"/>, so a dropped column fails, and so do two
+    /// swapped ones wherever <see cref="DistinctValues"/> can tell them apart.
+    /// </para>
+    /// </remarks>
     [Fact]
     public async Task A_record_round_trips_with_every_field()
     {
-        // Not an assertion that a constructor stored its arguments: the round trip goes through the store, so on
-        // the Postgres implementation this is what proves the entity is mapped — a column missing from the model
-        // silently reads back as its default.
-        var store = await CreateStoreAsync();
-        var record = NewRecord("key-1");
-        record.FeeSats = 2_190;
-        record.TxId = "8808985e78ad465c25727d5ad749f60a5787855d4f1ddffebfc4afb4dbde1b37";
-        record.Error = "nothing in particular";
-        record.Trigger = SweepTrigger.Manual;
-        record.ConfirmationSpeed = SweepConfirmationSpeed.Slow;
-        record.DestinationMode = SweepDestinationMode.StaticAddress;
-        record.RefusalCode = SweepRefusalCode.FeeAboveLimit;
-        record.LastSeenAt = Origin.AddMinutes(3);
-        record.AttemptCount = 7;
+        // Computed properties have nothing to store.
+        var properties = EveryProperty.Of<SweepRecord>(
+            nameof(SweepRecord.RecipientAmountSats),
+            nameof(SweepRecord.FeePercent),
+            nameof(SweepRecord.IsInFlight),
+            nameof(SweepRecord.LastActivityAt),
+            nameof(SweepRecord.IsCrossChain));
+        var record = EveryProperty.Filled<SweepRecord>(properties);
 
+        var store = await CreateStoreAsync();
         await store.AddAsync(record, Ct);
-        var read = await store.GetAsync(StoreId, "key-1", Ct);
+        var read = await store.GetAsync(record.StoreId, record.IdempotencyKey, Ct);
 
         Assert.NotNull(read);
-        Assert.Equal(Destination, read.DestinationAddress);
-        Assert.Equal(SweepDestinationMode.StaticAddress, read.DestinationMode);
-        Assert.Equal(200_000, read.AmountSats);
-        Assert.True(read.FeesIncluded);
-        Assert.Equal(SweepConfirmationSpeed.Slow, read.ConfirmationSpeed);
-        Assert.Equal(2_190, read.QuotedFeeSats);
-        Assert.Equal(2_190, read.FeeSats);
-        Assert.Equal(200_000, read.BalanceAtDecisionSats);
-        Assert.Equal("8808985e78ad465c25727d5ad749f60a5787855d4f1ddffebfc4afb4dbde1b37", read.TxId);
-        Assert.Equal(SweepTrigger.Manual, read.Trigger);
-        Assert.Equal(SweepRecordStatus.Pending, read.Status);
-        Assert.Equal("nothing in particular", read.Error);
-        Assert.Equal(SweepRefusalCode.FeeAboveLimit, read.RefusalCode);
-        Assert.Equal(Origin.AddMinutes(3), read.LastSeenAt);
-        Assert.Equal(7, read.AttemptCount);
+        EveryProperty.AssertCarried(record, read, properties, "the round trip");
     }
 
     [Fact]
@@ -659,6 +653,67 @@ public abstract class SweepRecordStoreContractTests
         // The bridge provider's order id is durable — it is the handle an investigation into a stuck delivery
         // quotes at the provider, and it used to live only on the in-memory copy the resolving pass held.
         Assert.Equal("order-7f3a", stored.ProviderOrderId);
+    }
+
+    #endregion
+
+    #region Report listing
+
+    [Fact]
+    public async Task The_report_lists_this_stores_sends_in_the_range_oldest_first()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("newest", status: SweepRecordStatus.Confirmed, minutesOld: 10), Ct);
+        await store.AddAsync(NewRecord("oldest", status: SweepRecordStatus.Sent, minutesOld: 50), Ct);
+        await store.AddAsync(NewRecord("middle", status: SweepRecordStatus.Failed, minutesOld: 30), Ct);
+        await store.AddAsync(NewRecord("pending", minutesOld: 20), Ct);
+        await store.AddAsync(NewRecord("before-range", status: SweepRecordStatus.Confirmed, minutesOld: 120), Ct);
+        await store.AddAsync(NewRecord("other-store", OtherStoreId, SweepRecordStatus.Confirmed, minutesOld: 10), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddMinutes(-60), Origin, Ct);
+
+        Assert.Equal(["oldest", "middle", "pending", "newest"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_leaves_refusals_out()
+    {
+        // A store below its fee ceiling writes a refusal every pass; a report of what left the wallet is not the
+        // place for them.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRefusal("refused", SweepRefusalCode.FeeAboveLimit, minutesOld: 5), Ct);
+        await store.AddAsync(NewRecord("sent", status: SweepRecordStatus.Sent, minutesOld: 5), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddDays(-1), Origin, Ct);
+
+        Assert.Equal(["sent"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_range_includes_both_ends()
+    {
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("at-from", status: SweepRecordStatus.Sent, minutesOld: 60), Ct);
+        await store.AddAsync(NewRecord("at-to", status: SweepRecordStatus.Sent), Ct);
+
+        var listed = await store.ListForReportAsync(StoreId, Origin.AddMinutes(-60), Origin, Ct);
+
+        Assert.Equal(["at-from", "at-to"], listed.Select(r => r.IdempotencyKey));
+    }
+
+    [Fact]
+    public async Task The_report_range_may_be_given_in_any_timezone()
+    {
+        // BTCPay passes the merchant's chosen timezone through; Npgsql refuses a non-UTC DateTimeOffset outright.
+        var store = await CreateStoreAsync();
+        await store.AddAsync(NewRecord("inside", status: SweepRecordStatus.Sent, minutesOld: 30), Ct);
+        await store.AddAsync(NewRecord("outside", status: SweepRecordStatus.Sent, minutesOld: 90), Ct);
+        var tokyo = TimeSpan.FromHours(9);
+
+        var listed = await store.ListForReportAsync(
+            StoreId, Origin.AddMinutes(-60).ToOffset(tokyo), Origin.ToOffset(tokyo), Ct);
+
+        Assert.Equal(["inside"], listed.Select(r => r.IdempotencyKey));
     }
 
     #endregion

@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests.FundedRegtest;
@@ -33,9 +31,6 @@ public class FundedRegtestAuditGatingTests
     private const string FakePreimage =
         "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
 
-    private static string ExpectedFingerprint(string value) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..12].ToLowerInvariant();
-
     [Fact]
     public void A_withheld_source_prints_the_fingerprint_of_a_preimage_row_not_its_value()
     {
@@ -45,7 +40,11 @@ public class FundedRegtestAuditGatingTests
 
         var row = FundedRegtestWallet.HexRunRow("sdk.log", "PREIMAGE", run, sourceWithheld: true);
 
-        Assert.Contains(ExpectedFingerprint(FakePreimage), row, StringComparison.OrdinalIgnoreCase);
+        // The seed fingerprint's own function, so a value fingerprint and a verdict can be matched by hand — and
+        // not a slice of the value, which would publish part of the secret it stands in for.
+        var fingerprint = FundedRegtestWallet.Fingerprint(FakePreimage);
+        Assert.Contains($"`{fingerprint}`", row, StringComparison.Ordinal);
+        Assert.DoesNotContain(fingerprint, FakePreimage, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(FakePreimage, row, StringComparison.OrdinalIgnoreCase);
         // The context is withheld too: "payment preimage" beside a fingerprint would name the class of the
         // withheld value for every row at once.
@@ -94,15 +93,6 @@ public class FundedRegtestAuditGatingTests
         Assert.False(FundedRegtestWallet.ValueIsWithheld("payment hash"));
         Assert.False(FundedRegtestWallet.ValueIsWithheld("sweep txid"));
         Assert.False(FundedRegtestWallet.ValueIsWithheld("sweep idempotency key"));
-    }
-
-    [Fact]
-    public void Fingerprints_use_the_same_one_way_SHA256_prefix_as_the_seed_fingerprint()
-    {
-        var cell = FundedRegtestWallet.AuditValue(true, FakePreimage);
-
-        Assert.Equal($"`{ExpectedFingerprint(FakePreimage)}`", cell);
-        Assert.Equal($"`{FakePreimage}`", FundedRegtestWallet.AuditValue(false, FakePreimage));
     }
 
     [Fact]

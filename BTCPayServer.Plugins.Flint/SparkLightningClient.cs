@@ -145,7 +145,7 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
 
     /// <summary>
     /// BTCPay persists <c>client.ToString()</c> as the store's Lightning connection string
-    /// (<c>LightningPaymentMethodConfig</c>) and runs its <c>IsSafe</c> check against it, so this must
+    /// (<c>LightningPaymentMethodConfig</c>) and parses it back through the registered handlers, so this must
     /// round-trip through <see cref="SparkConnectionStringHandler"/>.
     /// </summary>
     public override string ToString() => SparkConnectionString.Format(_storeId, _paymentKey);
@@ -171,6 +171,16 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// the check passes — the configuration sweep (<c>SparkLightningConfigSweeper</c>), which runs at
     /// startup and about every half hour thereafter, is the backstop for configurations that predate this
     /// check or that were written without one.
+    /// </para>
+    /// <para>
+    /// <b>What BTCPay 2.4.5 changed.</b> From 2.4.5, core treats a connection string with no <c>server=</c> as
+    /// unsafe, so saving a new or changed <c>type=flint</c> string through core's Lightning form or Greenfield's
+    /// payment-method <c>PUT</c> needs <c>btcpay.server.canmodifyserversettings</c>. Those are the only two core
+    /// paths that write a Lightning connection string. On a 2.4.5 host, then, a store owner who is not an admin
+    /// can no longer attempt the cross-store copy, and this check is left guarding an admin against pasting the
+    /// wrong store's string. On 2.4.1–2.4.4, inside the plugin's support range, it is still the only thing
+    /// refusing a non-admin. Keep it even once the floor reaches 2.4.5: it is a few lines, and upstream may well
+    /// relax that rule for nodeless plugin handlers, which would make it the boundary again.
     /// </para>
     /// <para>
     /// The live check uses the cached, non-syncing <c>GetInfo</c>: it returns in ~0 ms and proves the native
@@ -687,10 +697,13 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     /// every ten minutes for each payout left <c>InProgress</c>.
     /// </para>
     /// <para>
-    /// <b>Returning null here cancels a payout.</b> The pending listener maps a null payment through
-    /// <c>_ =&gt; PayoutState.Cancelled</c>, so failing to find a payment that really was made marks the payout
-    /// cancelled while the recipient keeps the sats. That is why the scan is paged rather than a single
-    /// newest-first page: the payout being resolved may be ten minutes and any number of payments old.
+    /// <b>Up to BTCPay 2.4.5, returning null here cancels a payout.</b> The pending listener maps a null payment
+    /// through <c>_ =&gt; PayoutState.Cancelled</c>, so failing to find a payment that really was made marks the
+    /// payout cancelled while the recipient keeps the sats. That is why the scan is paged rather than a single
+    /// newest-first page: the payout being resolved may be ten minutes and any number of payments old. BTCPay 2.4.6
+    /// (btcpayserver#7679) leaves a payout with a proof <c>InProgress</c> on a null lookup and asks again next time,
+    /// and its Greenfield pay endpoint no longer dereferences a null here. The floor is still 2.4.1, so a missed
+    /// payment remains a cancelled payout on older hosts, and on 2.4.6 a payout stuck <c>InProgress</c>.
     /// </para>
     /// <para>
     /// A hash lookup rather than an id lookup because the SDK's id for an outgoing payment is opaque
@@ -793,8 +806,9 @@ public class SparkLightningClient : IExtendedLightningClient, IDisposable
     #region Node-shaped members — permanently unsupported
 
     /// <summary>
-    /// Called by <c>LightningLikePaymentHandler</c> during checkout preparation (to show node connection
-    /// details) and by the Greenfield API. BTCPay catches the failure and continues, so throwing
+    /// Called by core's "Test connection" button, by the Greenfield API, and — up to BTCPay 2.4.4 only — by
+    /// <c>LightningLikePaymentHandler</c> on every invoice it created (to show node connection details; 2.4.5
+    /// dropped that lookup). BTCPay catches the failure and continues, so throwing
     /// <see cref="NotSupportedException"/> is the correct answer for a nodeless wallet: there is no node id,
     /// alias, block height or peer address to report, and inventing one would put a meaningless "connect to
     /// this node" string in front of the merchant.

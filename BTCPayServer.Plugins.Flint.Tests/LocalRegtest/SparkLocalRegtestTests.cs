@@ -500,7 +500,7 @@ public class SparkLocalRegtestTests
             store,
             broadcaster,
             new SparkInvoiceCreditor(
-                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
 
         return new SparkLightningClient(
@@ -546,6 +546,7 @@ public class SparkLocalRegtestTests
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             new FakeCrossChainValueOracle(),
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             TimeProvider.System,
             NullLogger<SparkSweepEngine>.Instance);
     }

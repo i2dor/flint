@@ -40,7 +40,7 @@ public class SparkLightningClientTests
             store,
             broadcaster,
             new SparkInvoiceCreditor(
-                new FakeInvoiceCreditGateway(), store, NullLogger<SparkInvoiceCreditor>.Instance),
+                new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
             NullLogger<SparkSettlementReconciler>.Instance);
 
         var client = new SparkLightningClient(
@@ -356,8 +356,8 @@ public class SparkLightningClientTests
     public async Task GetInvoice_does_not_query_the_SDK_for_an_already_paid_invoice()
     {
         var (client, sdk, store, _, _) = Create();
-        var record = Seed(store);
-        record.TrySettle("sdk-1", 100_000, PaymentFixture.Preimage, DateTimeOffset.UtcNow);
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, PaymentFixture.Preimage, DateTimeOffset.UtcNow, Ct);
 
         var invoice = await client.GetInvoice(Hash, Ct);
 
@@ -450,8 +450,8 @@ public class SparkLightningClientTests
     public async Task CancelInvoice_does_not_throw_for_an_unknown_or_settled_invoice()
     {
         var (client, _, store, _, _) = Create();
-        var record = Seed(store);
-        record.TrySettle("sdk-1", 100_000, null, DateTimeOffset.UtcNow);
+        Seed(store);
+        await store.SettleAsync(StoreId, Hash, "sdk-1", 100_000, null, DateTimeOffset.UtcNow, Ct);
 
         // BTCPay calls this speculatively on expiry; throwing would log an error for every paid invoice.
         await client.CancelInvoice(Hash, Ct);
@@ -1123,9 +1123,10 @@ public class SparkLightningClientTests
     [Fact]
     public async Task GetPayment_finds_a_send_pushed_off_the_first_page_of_history()
     {
-        // Returning null here cancels a payout: LightningPendingPayoutListener maps a null payment through
-        // `_ => PayoutState.Cancelled`, so failing to find a send that really happened marks the payout
-        // cancelled while the recipient keeps the sats. A single newest-first page would do exactly that.
+        // Up to BTCPay 2.4.5, returning null here cancels a payout: LightningPendingPayoutListener maps a null
+        // payment through `_ => PayoutState.Cancelled`, so failing to find a send that really happened marks the
+        // payout cancelled while the recipient keeps the sats (2.4.6 leaves it InProgress instead). A single
+        // newest-first page would do exactly that.
         var harness = Create();
         var target = new SparkPayment(
             "target", SparkPaymentDirection.Send, SparkPaymentStatus.Completed, SparkPaymentMethod.Lightning,

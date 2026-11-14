@@ -5,7 +5,6 @@ using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
 using Microsoft.Extensions.Logging.Abstractions;
-using System.Globalization;
 using Network = NBitcoin.Network;
 using Xunit;
 
@@ -84,7 +83,7 @@ public class SparkSweepEngineTests
             NullLogger<SweepDestinationResolver>.Instance);
 
         var engine = new SparkSweepEngine(
-            settings, runtime, records, resolver, Routes(), Oracle(), labeler, time, logger);
+            settings, runtime, records, resolver, Routes(), Oracle(), labeler, new InMemorySparkLedgerStore(), time, logger);
         return new Harness(engine, sdk, records, addresses, settings, runtime, time, log, logger, labeler);
     }
 
@@ -116,7 +115,7 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness(new SweepSettings { Enabled = true, ReserveSats = 50_000 }, balanceSats: 500_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
 
@@ -152,7 +151,7 @@ public class SparkSweepEngineTests
         // from; without it a sweep is money that arrived with no explanation.
         var h = CreateHarness();
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var labeled = Assert.Single(h.Labeler.Labeled);
         Assert.Equal(StoreId, labeled.StoreId);
@@ -165,7 +164,7 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness(balanceSats: 10_000);
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Empty(h.Labeler.Labeled);
     }
@@ -181,7 +180,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
         h.Sdk.Seed(CompletedExit(key, 450_000, 2_190));
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var labeled = Assert.Single(h.Labeler.Labeled);
         Assert.Equal("txid-recovered", labeled.TxId);
@@ -194,15 +193,16 @@ public class SparkSweepEngineTests
         // counters — which would pass just as happily with the two writes reversed.
         var h = CreateHarness();
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var key = Assert.Single(h.Sdk.OnchainSendCalls).IdempotencyKey;
         Assert.Equal(
             [
                 // The balance is synced and read first, because a threshold decision on a stale balance is the wrong
-                // sweep…
+                // sweep. The sync is explicit (SyncWalletAsync) followed by a cached read, since ensureSynced alone
+                // was observed staying stale on the funded run.
                 "sdk:sync",
-                "sdk:getinfo:synced",
+                "sdk:getinfo:cached",
                 // …then the pre-flight quote…
                 "sdk:quote",
                 // …then the record exists, with its key, *before* anything can have been sent…
@@ -221,7 +221,7 @@ public class SparkSweepEngineTests
         // GetPayment(key) is later asked for.
         var h = CreateHarness();
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.True(Guid.TryParse(Assert.Single(h.Sdk.OnchainSendCalls).IdempotencyKey, out _));
     }
@@ -234,11 +234,11 @@ public class SparkSweepEngineTests
         // count cannot express it — swapping the two calls would leave SyncCount == 1 and the balance stale.
         var h = CreateHarness();
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
-        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a synced read; got [{string.Join(", ", h.Log.Entries)}]");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
+        Assert.True(sync >= 0 && read >= 0, $"expected both a sync and a balance read; got [{string.Join(", ", h.Log.Entries)}]");
         Assert.True(sync < read, "the wallet must be synced before its balance is read");
     }
 
@@ -248,7 +248,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.NextOnchainSendStatus = SparkPaymentStatus.Completed;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         Assert.Equal(SweepRecordStatus.Confirmed, h.Records.Single()!.Status);
@@ -259,13 +259,13 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness();
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         // The first sweep left the wallet on its reserve of zero, so top it back up and resolve the first record so
         // it stops blocking.
         h.Sdk.BalanceSats = 500_000;
         h.Sdk.NextOnchainSendStatus = SparkPaymentStatus.Completed;
         h.Time.Advance(TimeSpan.FromMinutes(1));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(2, h.Sdk.OnchainSendCalls.Count);
         Assert.Equal(FakeSweepAddressSource.RegtestAddresses[0], h.Sdk.OnchainSendCalls[0].Address);
@@ -308,18 +308,18 @@ public class SparkSweepEngineTests
             ReserveSats = reserveSats
         });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         var record = h.Records.Single()!;
         Assert.Equal(expectedRecipientSats, record.RecipientAmountSats);
         Assert.Equal(
-            $"Sweep of {expectedRecipientSats.ToString("N0", CultureInfo.InvariantCulture)} sat accepted for a 2,190 sat fee. It confirms on-chain shortly.",
+            $"Sweep of {expectedRecipientSats:N0} sat accepted for a 2,190 sat fee. It confirms on-chain shortly.",
             result.Reason);
 
         // The sentence and the row must never disagree: they are the same fact shown in two places, and the
         // merchant has no way to tell which one is lying.
-        Assert.Contains($"{record.RecipientAmountSats.ToString("N0", CultureInfo.InvariantCulture)} sat", result.Reason);
+        Assert.Contains($"{record.RecipientAmountSats:N0} sat", result.Reason);
     }
 
     /// <summary>
@@ -335,7 +335,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(new SweepSettings { Enabled = true, ReserveSats = 50_000 });
         h.Sdk.NextOnchainSendStatus = SparkPaymentStatus.Completed;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         Assert.Equal(SweepRecordStatus.Confirmed, h.Records.Single()!.Status);
@@ -354,7 +354,7 @@ public class SparkSweepEngineTests
             ReserveSats = 10_000
         });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         var send = Assert.Single(h.Sdk.OnchainSendCalls);
@@ -374,7 +374,7 @@ public class SparkSweepEngineTests
             ConfirmationSpeed = SweepConfirmationSpeed.Slow
         });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SparkOnchainSpeed.Slow, Assert.Single(h.Sdk.OnchainSendCalls).Speed);
         // 1,950 rather than the medium tier's 2,190. A numeric cast between the two enums would have bought Fast.
@@ -390,7 +390,7 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness(new SweepSettings { Enabled = false });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Skipped, result.Kind);
         Assert.Empty(h.Sdk.OnchainSendCalls);
@@ -405,7 +405,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(
             new SweepSettings { Enabled = true, BalanceThresholdSats = 200_000 }, balanceSats: 150_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Skipped, result.Kind);
         Assert.Contains("150,000 sat has not passed the 200,000 sat sweep threshold", result.Reason);
@@ -420,7 +420,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(
             new SweepSettings { Enabled = false, BalanceThresholdSats = 10_000_000 }, balanceSats: 500_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         Assert.Equal(SweepTrigger.Manual, h.Records.Single()!.Trigger);
@@ -434,7 +434,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(
             new SweepSettings { Enabled = true, MinimumSweepSats = 100_000 }, balanceSats: 20_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("below this store's 100,000 sat minimum", result.Reason);
@@ -451,7 +451,7 @@ public class SparkSweepEngineTests
             new SweepSettings { Enabled = true, BalanceThresholdSats = 1, MinimumSweepSats = 100_000 },
             balanceSats: 20_000);
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(0, h.Addresses.ReservedCount);
         Assert.Empty(h.Sdk.OnchainQuoteCalls);
@@ -471,7 +471,7 @@ public class SparkSweepEngineTests
             },
             balanceSats: 100_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("2,190 sat exit fee is 2.24%", result.Reason);
@@ -494,7 +494,7 @@ public class SparkSweepEngineTests
             MaxFeeFlatSats = 1_000
         });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("above the 1,000 sat limit", result.Reason);
@@ -512,7 +512,7 @@ public class SparkSweepEngineTests
         h.Sdk.OnchainTiersAtSend = new SparkOnchainFeeQuote(
             "SparkCoopExitFeeQuote:later", Origin, 40_000, 50_000, 60_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         // 2,190 on the pre-flight quote cleared the 1% ceiling on 447,810; 50,000 does not.
@@ -536,11 +536,11 @@ public class SparkSweepEngineTests
         // last-moment fee spike would stop the store sweeping until a human intervened.
         var h = CreateHarness(new SweepSettings { Enabled = true, MaxFeePercent = 1.0 });
         h.Sdk.OnchainTiersAtSend = new SparkOnchainFeeQuote("q", Origin, 40_000, 50_000, 60_000);
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         h.Sdk.OnchainTiersAtSend = null;
         h.Time.Advance(TimeSpan.FromMinutes(2));
-        var second = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var second = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, second.Kind);
     }
@@ -575,7 +575,7 @@ public class SparkSweepEngineTests
             ReserveSats = 500
         });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("reserve is only 500 sat", result.Reason);
@@ -590,7 +590,7 @@ public class SparkSweepEngineTests
             Result = SweepAddressResult.NoWallet("This store has no Bitcoin wallet.")
         });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Equal("This store has no Bitcoin wallet.", result.Reason);
@@ -604,7 +604,7 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness(walletRunning: false);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("Spark wallet is not running", result.Reason);
@@ -620,7 +620,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Settings.Settings[StoreId]!.Sweep = null!;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         // Sweeping defaults to off, so the pass declines rather than sweeping on defaults nobody chose.
         Assert.Equal(SweepOutcomeKind.Skipped, result.Kind);
@@ -647,7 +647,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(
             new SweepSettings { Enabled = true, BalanceThresholdSats = 0 }, balanceSats: 150_000);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Skipped, result.Kind);
         Assert.Contains("200,000 sat sweep threshold", result.Reason);
@@ -660,7 +660,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Settings.Settings.Remove(StoreId);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Skipped, result.Kind);
         Assert.Empty(h.Records.Records);
@@ -688,7 +688,7 @@ public class SparkSweepEngineTests
             // Leaf-optimisation drift: a few sats either way, every pass. This is what defeated a de-duplication
             // keyed on the rendered sentence.
             h.Sdk.BalanceSats = 500_000 + (pass % 7) - 3;
-            messages.Add((await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct)).Reason);
+            messages.Add((await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Reason);
         }
 
         var record = Assert.Single(h.Records.Records).Value;
@@ -718,7 +718,7 @@ public class SparkSweepEngineTests
         for (var pass = 0; pass < 5; pass++)
         {
             h.Time.Advance(TimeSpan.FromMinutes(2));
-            await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+            await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         }
 
         Assert.Equal(5, Assert.Single(h.Records.Records).Value.AttemptCount);
@@ -732,12 +732,12 @@ public class SparkSweepEngineTests
         // something else happened once.
         var h = CreateHarness(new SweepSettings { Enabled = true, MaxFeePercent = 0.1 });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         h.Time.Advance(TimeSpan.FromMinutes(2));
         // A manual attempt, which always files its own row.
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
         h.Time.Advance(TimeSpan.FromMinutes(2));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(2, h.Records.Records.Count);
         var automatic = h.Records.Records.Values.Single(r => r.Trigger is SweepTrigger.Automatic);
@@ -751,9 +751,9 @@ public class SparkSweepEngineTests
         // itself and recurred a week later is visible as two episodes instead of one endless tally.
         var h = CreateHarness(new SweepSettings { Enabled = true, MaxFeePercent = 0.1 });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         h.Time.Advance(SparkSweepEngine.RefusalCoalescingWindow + TimeSpan.FromMinutes(1));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(2, h.Records.Records.Count);
         Assert.All(h.Records.Records.Values, r => Assert.Equal(1, r.AttemptCount));
@@ -764,10 +764,10 @@ public class SparkSweepEngineTests
     {
         var h = CreateHarness(new SweepSettings { Enabled = true, MaxFeePercent = 0.1 });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         h.Time.Advance(TimeSpan.FromMinutes(2));
         h.Addresses.Result = SweepAddressResult.NoWallet("no wallet here");
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(2, h.Records.Records.Count);
         Assert.Equal(
@@ -785,9 +785,9 @@ public class SparkSweepEngineTests
             Result = SweepAddressResult.NoWallet("This store has no Bitcoin wallet.")
         });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         h.Time.Advance(TimeSpan.FromMinutes(1));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(2, h.Records.Records.Count);
         Assert.Contains(h.Records.Records.Values, r => r.Trigger is SweepTrigger.Manual);
@@ -805,7 +805,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.ExpireNextQuotes = 1;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
         Assert.Equal(2, h.Sdk.OnchainSendCalls.Count);
@@ -821,7 +821,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.ExpireNextQuotes = 5;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         // Two attempts, then the outcome is left unknown for the next pass to resolve rather than hammered.
         Assert.Equal(SweepOutcomeKind.Unresolved, result.Kind);
@@ -839,7 +839,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness(new SweepSettings { Enabled = true, DrainWhenSweeping = false, ReserveSats = 5_000 });
         h.Sdk.BalanceOnSend = 1_000;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Failed, result.Kind);
         var record = h.Records.Single();
@@ -864,7 +864,7 @@ public class SparkSweepEngineTests
             },
             balanceSats: 294);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("below the 294 sat on-chain minimum", result.Reason);
@@ -889,7 +889,7 @@ public class SparkSweepEngineTests
             },
             balanceSats: 293);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Empty(h.Sdk.OnchainQuoteCalls);
@@ -914,7 +914,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.FailOnchainSendWith = failure;
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Failed, result.Kind);
         var record = h.Records.Single();
@@ -927,7 +927,7 @@ public class SparkSweepEngineTests
         h.Time.Advance(TimeSpan.FromMinutes(2));
         Assert.Equal(
             SweepOutcomeKind.Swept,
-            (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct)).Kind);
+            (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Kind);
     }
 
     public static TheoryData<string, Exception> FailuresThatProvablySentNothing() => new()
@@ -968,7 +968,7 @@ public class SparkSweepEngineTests
         h.Sdk.FailOnchainSendWith = new ObjectDisposedException(
             "SparkSdkClient", "The Spark wallet for store S has been shut down.");
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Unresolved, result.Kind);
         var record = h.Records.Single();
@@ -982,7 +982,7 @@ public class SparkSweepEngineTests
         h.Time.Advance(TimeSpan.FromMinutes(2));
         Assert.NotEqual(
             SweepOutcomeKind.Swept,
-            (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct)).Kind);
+            (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Kind);
     }
 
     [Fact]
@@ -993,7 +993,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.FailOnchainSendWith = new SdkException.NetworkException("@v1=connection reset");
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Unresolved, result.Kind);
         var record = h.Records.Single();
@@ -1015,7 +1015,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
         h.Sdk.Seed(CompletedExit(key, 450_000, 2_190));
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         // Nothing is re-sent: the record was resolved by asking, not by retrying.
         Assert.Empty(h.Sdk.OnchainSendCalls);
@@ -1036,7 +1036,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
         h.Sdk.Seed(CompletedExit(key, 450_000, 2_190) with { Status = SparkPaymentStatus.Pending });
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var record = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.Equal(SweepRecordStatus.Sent, record!.Status);
@@ -1051,14 +1051,14 @@ public class SparkSweepEngineTests
         // complete" as "it did not happen". The later passes are given a fresh balance so they genuinely do sweep —
         // otherwise the "never under the original key" half of this test would be checking an empty sequence.
         var h = CreateHarness();
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         var key = Assert.Single(h.Sdk.OnchainSendCalls).IdempotencyKey;
 
         for (var pass = 0; pass < 3; pass++)
         {
             h.Time.Advance(TimeSpan.FromMinutes(10));
             h.Sdk.BalanceSats = 500_000;
-            await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+            await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         }
 
         var record = await h.Records.GetAsync(StoreId, key, Ct);
@@ -1079,12 +1079,12 @@ public class SparkSweepEngineTests
         // Stated directly rather than left as a side effect of another test: a Sent exit's funds have already left
         // the balance, so holding new sweeps behind it would strand every later receive.
         var h = CreateHarness();
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         Assert.Equal(SweepRecordStatus.Sent, h.Records.Single()!.Status);
 
         h.Sdk.BalanceSats = 500_000;
         h.Time.Advance(TimeSpan.FromMinutes(2));
-        var second = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var second = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, second.Kind);
     }
@@ -1105,7 +1105,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
         h.Sdk.Seed(CompletedExit(key, 1_234, 7) with { Direction = direction, Method = method });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
         var record = await h.Records.GetAsync(StoreId, key, Ct);
@@ -1135,7 +1135,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(exitKey), Ct);
         h.Sdk.Seed(CompletedExit(exitKey, 1_234, 7) with { Method = SparkPaymentMethod.Token });
 
-        var blocked = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var blocked = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         // Rejected: a Token payment is not what a cooperative exit produces, so the row keeps blocking.
         Assert.Equal(SweepOutcomeKind.InFlight, blocked.Kind);
@@ -1155,7 +1155,7 @@ public class SparkSweepEngineTests
                 SparkCrossChainProvider.Orchestra, SparkConversionStatus.Completed, "q_1", "order-1", 35_600_000)
         });
 
-        await crossChainHarness.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await crossChainHarness.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var resolved = await crossChainHarness.Records.GetAsync(StoreId, crossChainKey, Ct);
         Assert.Equal(SweepRecordStatus.Confirmed, resolved!.Status);
@@ -1181,7 +1181,7 @@ public class SparkSweepEngineTests
         // The SDK knows nothing about it — the send may be in flight on an uncancellable call right now.
 
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace - TimeSpan.FromSeconds(1));
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
         Assert.Empty(h.Sdk.OnchainSendCalls);
@@ -1196,7 +1196,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
 
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var record = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.Equal(SweepRecordStatus.Failed, record!.Status);
@@ -1213,7 +1213,7 @@ public class SparkSweepEngineTests
     {
         // What makes retrying with the same key safe, and therefore what makes the crash-recovery design work.
         var h = CreateHarness();
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         var send = Assert.Single(h.Sdk.OnchainSendCalls);
         var balanceAfterFirst = h.Sdk.BalanceSats;
 
@@ -1235,7 +1235,7 @@ public class SparkSweepEngineTests
         await h.Records.AddAsync(NewPending(key), Ct);
 
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
         Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
@@ -1261,12 +1261,12 @@ public class SparkSweepEngineTests
         // Inside the escalation window the shortfall blocks...
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
         Assert.Equal(
-            SweepOutcomeKind.InFlight, (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct)).Kind);
+            SweepOutcomeKind.InFlight, (await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct)).Kind);
         Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
 
         // ...and past it, the row closes and sweeping is free again.
         h.Time.Advance(SparkSweepEngine.ShortfallWriteOffAge);
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var record = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.Equal(SweepRecordStatus.Failed, record!.Status);
@@ -1293,7 +1293,7 @@ public class SparkSweepEngineTests
         h.Sdk.OnSync = sdk => sdk.PaymentsById[key] = CompletedExit(key, 450_000, 2_190);
 
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var record = await h.Records.GetAsync(StoreId, key, Ct);
         Assert.NotEqual(SweepRecordStatus.Failed, record!.Status);
@@ -1313,7 +1313,7 @@ public class SparkSweepEngineTests
         h.Sdk.OnSync = _ => throw new SdkException.NetworkException("@v1=offline");
 
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromSeconds(1));
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
         Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
@@ -1330,7 +1330,7 @@ public class SparkSweepEngineTests
         h.Sdk.FailWith = new SdkException.NetworkException("@v1=offline");
         h.Time.Advance(SparkSweepEngine.UnresolvedGrace + TimeSpan.FromMinutes(1));
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.InFlight, result.Kind);
         Assert.Equal(SweepRecordStatus.Pending, (await h.Records.GetAsync(StoreId, key, Ct))!.Status);
@@ -1357,17 +1357,17 @@ public class SparkSweepEngineTests
         runtime.Clients[StoreId] = h.Sdk;
         var engine = new SparkSweepEngine(
             h.Settings, runtime, h.Records, resolver, Routes(), Oracle(),
-            new FakeSweepTransactionLabeler(), h.Time,
+            new FakeSweepTransactionLabeler(), new InMemorySparkLedgerStore(), h.Time,
             NullLogger<SparkSweepEngine>.Instance);
 
-        var first = engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var first = engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         await reached.Task;
 
         // Bounded, so that a missing guard fails this test instead of hanging the whole run: without it the second
         // pass would queue behind the first on an address source that cannot return until the second pass has
         // already returned, and the suite would simply stop.
         var second = await engine
-            .RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct)
+            .RunAsync(StoreId, SweepTrigger.Manual, Ct)
             .WaitAsync(TimeSpan.FromSeconds(10), Ct);
 
         gate.SetResult();
@@ -1386,10 +1386,10 @@ public class SparkSweepEngineTests
         h.Records.FailAddWith = new InvalidOperationException("database down");
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct));
+            () => h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct));
 
         h.Records.FailAddWith = null;
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Swept, result.Kind);
     }
@@ -1429,7 +1429,7 @@ public class SparkSweepEngineTests
             new SweepSettings { Enabled = true, MinimumSweepSats = 100_000 }, balanceSats: 20_000);
 
         var preview = await h.Engine.PreviewAsync(StoreId, Ct);
-        var run = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var run = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.False(preview.CanSweep);
         Assert.Equal(run.Reason, preview.RefusalReason);
@@ -1445,7 +1445,7 @@ public class SparkSweepEngineTests
         await h.Engine.PreviewAsync(StoreId, Ct);
 
         var sync = h.Log.Entries.IndexOf("sdk:sync");
-        var read = h.Log.Entries.IndexOf("sdk:getinfo:synced");
+        var read = h.Log.Entries.IndexOf("sdk:getinfo:cached");
         Assert.True(sync >= 0 && read >= 0);
         Assert.True(sync < read, "a preview must sync before it reads the balance");
     }
@@ -1467,10 +1467,10 @@ public class SparkSweepEngineTests
         // contained it, which made that assertion unfalsifiable.
         h.Settings.Settings[StoreId]!.ProtectedMnemonic = $"CA-protected-blob::{mnemonic}";
 
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
         await h.Engine.PreviewAsync(StoreId, Ct);
         h.Settings.Settings[StoreId]!.Sweep.Enabled = false;
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.NotEmpty(h.Logger.Lines);
         Assert.DoesNotContain("abandon", h.Logger.AllText);
@@ -1478,19 +1478,6 @@ public class SparkSweepEngineTests
         // The protected blob is not seed material a reader can use, but it is still key-derived and has no business
         // in an operator's log.
         Assert.DoesNotContain("CA-protected-blob", h.Logger.AllText);
-    }
-
-    [Fact]
-    public async Task A_refusal_logs_its_reason_and_its_code()
-    {
-        var h = CreateHarness(addressSource: new FakeSweepAddressSource
-        {
-            Result = SweepAddressResult.NoWallet("This store has no Bitcoin wallet.")
-        });
-
-        await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
-
-        Assert.Contains("refusing to sweep (NoDestination) — This store has no Bitcoin wallet.", h.Logger.AllText);
     }
 
     [Theory]
@@ -1505,11 +1492,12 @@ public class SparkSweepEngineTests
         var h = CreateHarness(new SweepSettings { Enabled = true, BalanceThresholdSats = 1 });
         arrange(h);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.False(string.IsNullOrWhiteSpace(result.Reason));
-        Assert.Contains($"refusing to sweep ({expected})", h.Logger.AllText);
+        // The whole line, so the reason an operator reads in the log is the one the record and the caller got.
+        Assert.Contains($"refusing to sweep ({expected}) — {result.Reason}", h.Logger.AllText);
 
         var record = Assert.Single(h.Records.Records).Value;
         Assert.Equal(expected, record.RefusalCode);
@@ -1577,11 +1565,11 @@ public class SparkSweepEngineTests
         // The split matters to a merchant: one means "your balance moved", the other means "Spark is unhappy".
         var funds = CreateHarness();
         funds.Sdk.FailQuoteWith = new SdkException.SparkException("@v1=Tree service error: insufficient funds");
-        var fundsResult = await funds.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var fundsResult = await funds.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         var broken = CreateHarness();
         broken.Sdk.FailQuoteWith = new SdkException.SparkException("@v1=service provider is unhappy");
-        var brokenResult = await broken.Engine.RunAsync(StoreId, SweepTrigger.Automatic, cancellationToken: Ct);
+        var brokenResult = await broken.Engine.RunAsync(StoreId, SweepTrigger.Automatic, Ct);
 
         Assert.Contains("insufficient funds", fundsResult.Reason);
         Assert.Contains("may have been spent", fundsResult.Reason);
@@ -1598,7 +1586,7 @@ public class SparkSweepEngineTests
         h.Sdk.FailQuoteWith = new SdkException.SparkException("@v1=service provider is unhappy");
 
         var preview = await h.Engine.PreviewAsync(StoreId, Ct);
-        var run = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var run = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.False(preview.CanSweep);
         Assert.Equal(run.Reason, preview.RefusalReason);
@@ -1610,7 +1598,7 @@ public class SparkSweepEngineTests
         var h = CreateHarness();
         h.Sdk.FailWith = new SdkException.NetworkException("@v1=offline");
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Contains("balance could not be read", result.Reason);
@@ -1639,7 +1627,7 @@ public class SparkSweepEngineTests
         // question the button press answers, and this is the button a merchant actually clicks.
         var h = CreateHarness(new SweepSettings { Enabled = false, MaxFeePercent = 0.1 });
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Equal(SweepRefusalCode.FeeAboveLimit, h.Records.Single()!.RefusalCode);
@@ -1658,7 +1646,7 @@ public class SparkSweepEngineTests
             },
             balanceSats: 500);
 
-        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, cancellationToken: Ct);
+        var result = await h.Engine.RunAsync(StoreId, SweepTrigger.Manual, Ct);
 
         Assert.Equal(SweepOutcomeKind.Refused, result.Kind);
         Assert.Equal(SweepRefusalCode.BelowDustFloor, h.Records.Single()!.RefusalCode);

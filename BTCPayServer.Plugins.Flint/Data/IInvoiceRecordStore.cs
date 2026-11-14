@@ -119,6 +119,11 @@ public interface IInvoiceRecordStore
     /// <see cref="InvoiceSettlementOutcome.Settled"/> for a given invoice — that is the caller that notifies
     /// BTCPay — and every other caller must be told
     /// <see cref="InvoiceSettlementOutcome.AlreadySettled"/>.
+    /// <para>
+    /// A cancelled invoice settles exactly like an unpaid one. The Spark SDK has no cancellation primitive, so
+    /// a cancelled invoice is still payable on the service provider, and refusing that payment would leave real
+    /// money in the wallet with no BTCPay invoice ever marked paid for it.
+    /// </para>
     /// </remarks>
     Task<InvoiceSettlementResult> SettleAsync(
         string storeId,

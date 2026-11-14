@@ -61,9 +61,11 @@ public sealed class SparkSurfaceHarness
         SparkDepositService depositService,
         SparkStableBalanceService stableBalanceService,
         CrossChainCatalog crossChainCatalog,
-        StubHttpMessageHandler crossChainRequests)
+        StubHttpMessageHandler crossChainRequests,
+        FakeExitStateBackupStore exitStateBackups)
     {
         CrossChainCatalog = crossChainCatalog;
+        ExitStateBackups = exitStateBackups;
         CrossChainRequests = crossChainRequests;
         Protector = protector;
         SweepEngine = sweepEngine;
@@ -139,6 +141,16 @@ public sealed class SparkSurfaceHarness
     /// <summary>Every HTTP request the catalogue made, so "rendering costs no round trip" is falsifiable.</summary>
     public StubHttpMessageHandler CrossChainRequests { get; }
 
+    /// <summary>The USDC/USDT path the MVC controller's switch goes through, over in-memory fakes.</summary>
+    public StablecoinHarness Stablecoins { get; private init; } = null!;
+
+    /// <summary>
+    /// The exit-state backup store the controller reports <c>ExitStateBackupTakenAt</c> from — empty
+    /// unless a test stores one, which is what a harness that stored nothing should answer.
+    /// </summary>
+    public FakeExitStateBackupStore ExitStateBackups { get; }
+
+
     public FakeSparkSdkClient VictimWallet => (FakeSparkSdkClient)Runtime.Clients[VictimStore];
 
     public FakeSparkSdkClient WalletOf(string storeId) => (FakeSparkSdkClient)Runtime.Clients[storeId];
@@ -163,6 +175,9 @@ public sealed class SparkSurfaceHarness
     /// because that is the state the sweep page has to keep rendering and saving in, and because a test that did
     /// not ask for a live catalogue should not quietly get one.
     /// </param>
+    /// <param name="unilateralExit">
+    /// The unilateral-exit service the pages call, or null for one that refuses everything.
+    /// </param>
     public static SparkSurfaceHarness Create(
         bool allowHotWalletForAll = true,
         HotWalletSeedResult? hotWalletSeed = null,
@@ -170,7 +185,8 @@ public sealed class SparkSurfaceHarness
         bool configureAttackerStore = false,
         bool mainnet = false,
         bool serverAdmin = false,
-        string? crossChainRoutes = null)
+        string? crossChainRoutes = null,
+        ISparkUnilateralExitService? unilateralExit = null)
     {
         var writeLog = new WriteLog();
 
@@ -179,7 +195,7 @@ public sealed class SparkSurfaceHarness
             .Add(VictimStore, VictimNode);
 
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
-        var settings = new FakeSparkStoreSettingsStore(wiring, writeLog);
+        var settings = new FakeSparkStoreSettingsStore(writeLog);
 
         // The victim is a going concern: Spark configured, its own payment key, its own node config.
         settings.Settings[VictimStore] = new SparkSettings
@@ -225,6 +241,7 @@ public sealed class SparkSurfaceHarness
             new CrossChainRouteResolver(NullLogger<CrossChainRouteResolver>.Instance),
             valueOracle,
             new FakeSweepTransactionLabeler(),
+            new InMemorySparkLedgerStore(),
             TimeProvider.System, NullLogger<SparkSweepEngine>.Instance);
 
         var provisionerLog = new CapturingLogger<SparkStoreProvisioner>();
@@ -263,18 +280,29 @@ public sealed class SparkSurfaceHarness
             TimeProvider.System,
             NullLogger<CrossChainCatalog>.Instance);
 
+        var stablecoins = new StablecoinHarness(runtime, available: mainnet, writeLog: writeLog);
+
+        // Refuses everything unless a test supplies its own. A page test that did not ask for an exit service
+        // should not be able to quote one by accident, and an unstubbed call failing loudly beats it returning
+        // a plausible-looking empty page.
+        var exit = unilateralExit ?? new UnavailableUnilateralExitService();
+
+        // The Advanced page reads the backup's TakenAt from the same singleton the service writes, so the
+        // harness hands one instance to both and lets a page test script it.
+        var exitStateBackups = new FakeExitStateBackupStore();
+
         var mvc = new SparkController(
             settings, provisioner, wiring, seedResolver, statusReader, sweepEngine, sweepSettings,
-            depositService, stableBalanceService, crossChainCatalog,
+            depositService, stableBalanceService, exit, runtime, exitStateBackups,
+            crossChainCatalog, stablecoins.Service, null!,
             new FakeAuthorizationService(), NullLogger<SparkController>.Instance);
 
         var api = new GreenfieldSparkController(
             settings,
             provisioner, seedResolver, statusReader, sweepSettings, sweepEngine,
-            runtime, depositService, stableBalanceService,
-            NullLogger<GreenfieldSparkController>.Instance,
-            // Server-level settings (GET/PUT /api/v1/server/spark) are not exercised by this harness.
-            null!);
+            depositService, stableBalanceService, stablecoins.Service,
+            new SparkLedgerBackfillService(null!, new InMemorySparkLedgerStore(), NullLogger<SparkLedgerBackfillService>.Instance),
+            NullLogger<GreenfieldSparkController>.Instance);
 
         var store = authoriseStore is null ? null : new StoreData { Id = authoriseStore };
 
@@ -284,7 +312,10 @@ public sealed class SparkSurfaceHarness
         return new SparkSurfaceHarness(
             mvc, api, settings, lightning, seedReader, sweepRecords, sweepAddresses, runtime, writeLog,
             provisionerLog, protector, sweepEngine, depositService, stableBalanceService,
-            crossChainCatalog, crossChainRequests);
+            crossChainCatalog, crossChainRequests, exitStateBackups)
+        {
+            Stablecoins = stablecoins
+        };
     }
 
     /// <summary>
@@ -325,5 +356,73 @@ public sealed class SparkSurfaceHarness
 
         if (withTempData && controller is Controller mvc)
             mvc.TempData = new TempDataDictionary(httpContext, new NullTempDataProvider());
+    }
+
+    /// <summary>
+    /// The default unilateral-exit service: a store with nothing in flight, and a refusal for every write.
+    /// </summary>
+    /// <remarks>
+    /// The tests that exercise the exit flow supply their own service, so this exists to satisfy the
+    /// constructor for every other surface test rather than to be exercised. It answers the read with an empty,
+    /// unacknowledged store — the state every other page test is implicitly asserting nothing about — and
+    /// refuses every write with a sentence that names itself, so a test that unexpectedly reaches one sees where
+    /// it came from.
+    /// </remarks>
+    private sealed class UnavailableUnilateralExitService : ISparkUnilateralExitService
+    {
+        private static UnilateralExitOpResult Refused =>
+            new(false, "No unilateral-exit service was supplied to this test harness.", null);
+
+        public Task<UnilateralExitPageData> ReadAsync(string storeId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(
+                new UnilateralExitPageData(
+                    WalletRunning: false,
+                    DisclosureAcknowledged: false,
+                    BalanceSats: 0,
+                    RecommendedFeeRateSatPerVbyte: null,
+                    ActiveRecord: null,
+                    History: [],
+                    FundingReceivedSat: null,
+                    FundingLargestOutputSat: null,
+                    LeafCount: null,
+                    FundingKeyPath: null,
+                    Transactions: null,
+                    TransactionsUnreadable: false,
+                    PendingBroadcast: null));
+
+        public Task<UnilateralExitOpResult> AcknowledgeDisclosureAsync(
+            string storeId, CancellationToken cancellationToken = default) => Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> QuoteAsync(
+            string storeId,
+            long feeRateSatPerVbyte,
+            string destinationAddress,
+            CancellationToken cancellationToken = default) => Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> BuildAsync(
+            string storeId, string recordId, long? feeRateSatPerVbyte,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> AbandonAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> MarkCompletedAsync(
+            string storeId, string recordId, bool confirmedWithoutVerdict,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> CheckAsync(
+            string storeId, string recordId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> SetExitStateBackupAsync(
+            string storeId, string? exitState, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
+
+        public Task<UnilateralExitOpResult> SetExplorerUrlAsync(
+            string storeId, string? esploraApiUrl, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Refused);
     }
 }

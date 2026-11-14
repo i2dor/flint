@@ -87,22 +87,15 @@ public class SparkApiContractTests
             var authorize = method.GetCustomAttributes<AuthorizeAttribute>().Single();
             Assert.Equal(AuthenticationSchemes.Greenfield, authorize.AuthenticationSchemes);
 
-            var isServerLevel = path.StartsWith("/api/v1/server/", StringComparison.Ordinal);
-            string expected;
-            if (isServerLevel)
-                expected = Policies.CanModifyServerSettings;
-            else if (verb is "get")
-                expected = Policies.CanViewStoreSettings;
-            else
-                expected = Policies.CanModifyStoreSettings;
+            var expected = verb is "get"
+                ? Policies.CanViewStoreSettings
+                : Policies.CanModifyStoreSettings;
 
             Assert.Equal(expected, policy);
 
             // Reads may not require a write permission and writes may not accept a read one.
-            var requiresWrite = policy == Policies.CanModifyStoreSettings
-                                || policy == Policies.CanModifyServerSettings;
             Assert.True(
-                verb is "get" || requiresWrite,
+                verb is "get" || policy == Policies.CanModifyStoreSettings,
                 $"{verb.ToUpperInvariant()} {path} changes state but is gated on {policy}");
         }
     }
@@ -238,7 +231,8 @@ public class SparkApiContractTests
         { "SparkSweepPreviewData", typeof(SparkSweepPreviewData) },
         { "SparkSweepDestinationData", typeof(SparkSweepDestinationData) },
         { "SparkSweepQuoteData", typeof(SparkSweepQuoteData) },
-        { "SparkBalanceSyncData", typeof(SparkBalanceSyncData) }
+        { "SparkStablecoinsData", typeof(SparkStablecoinsData) },
+        { "SparkStablecoinsInput", typeof(SparkStablecoinsInput) }
     };
 
     [Theory]
@@ -363,9 +357,11 @@ public class SparkApiContractTests
     [Fact]
     public async Task Nothing_in_the_published_document_offers_a_unilateral_exit()
     {
-        // The exit-path policy, asserted against the artefact merchants and integrators read. Sweeps are cooperative
-        // exits only; a documented path, parameter, field or enum value suggesting otherwise would be a promise the
-        // plugin does not keep and must not start keeping by accident.
+        // The API's exit-path policy, asserted against the artefact merchants and integrators read. Every sweep the
+        // API can cause is a cooperative exit; the plugin's unilateral exit is deliberately UI-only, because it ends
+        // in signed transactions an operator broadcasts by hand after a disclosure an API client cannot be shown.
+        // A documented path, parameter, field or enum value suggesting otherwise would be a promise the API does
+        // not keep and must not start keeping by accident.
         //
         // Names and enum values only, deliberately. Prose is allowed to say the word — the drainWhenSweeping
         // description exists precisely to deny that "drain" means a unilateral exit, and a check that banned the

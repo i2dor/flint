@@ -155,24 +155,24 @@ public class SparkInvoiceCreditor
 
     private readonly IInvoiceCreditGateway _gateway;
     private readonly IInvoiceRecordStore _invoiceStore;
+    private readonly ISparkLedgerStore _ledger;
     private readonly ILogger<SparkInvoiceCreditor> _logger;
 
     public SparkInvoiceCreditor(
         IInvoiceCreditGateway gateway,
         IInvoiceRecordStore invoiceStore,
+        ISparkLedgerStore ledger,
         ILogger<SparkInvoiceCreditor> logger)
     {
         _gateway = gateway;
         _invoiceStore = invoiceStore;
+        _ledger = ledger;
         _logger = logger;
     }
 
-    /// <summary>The oldest settlement a credit is still <em>attempted</em> for, given the horizon.</summary>
-    public static DateTimeOffset CreditableFrom(DateTimeOffset now) => now - CreditRetryHorizon;
-
     /// <summary>
-    /// The oldest settlement the credit walk still <em>lists</em>, which is deliberately older than
-    /// <see cref="CreditableFrom"/>.
+    /// The oldest settlement the credit walk still <em>lists</em>, which is deliberately older than the oldest
+    /// one a credit is still <em>attempted</em> for (<see cref="CreditRetryHorizon"/> ago).
     /// </summary>
     /// <remarks>
     /// The two must not be the same value. A record that is only listed while it is still creditable can never
@@ -268,7 +268,7 @@ public class SparkInvoiceCreditor
         {
             // The ordinary case: BTCPay's own listener was watching and credited it. Marking it here is what
             // stops every later pass asking again.
-            await MarkCreditedAsync(record, cancellationToken).ConfigureAwait(false);
+            await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
             return SparkInvoiceCreditResult.AlreadyRecorded;
         }
 
@@ -294,7 +294,7 @@ public class SparkInvoiceCreditor
                     "Store {StoreId}: the Lightning payment {PaymentHash} was credited to BTCPay invoice "
                     + "{InvoiceId}, which was no longer being watched for it",
                     record.StoreId, record.PaymentHash, match.InvoiceId);
-                await MarkCreditedAsync(record, cancellationToken).ConfigureAwait(false);
+                await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
                 return SparkInvoiceCreditResult.Credited;
 
             case SparkInvoiceCreditOutcome.AlreadyRecorded:
@@ -304,7 +304,7 @@ public class SparkInvoiceCreditor
                     "Store {StoreId}: BTCPay invoice {InvoiceId} already held the Lightning payment "
                     + "{PaymentHash}",
                     record.StoreId, match.InvoiceId, record.PaymentHash);
-                await MarkCreditedAsync(record, cancellationToken).ConfigureAwait(false);
+                await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
                 return SparkInvoiceCreditResult.AlreadyRecorded;
 
             case SparkInvoiceCreditOutcome.PromptMissing:
@@ -380,17 +380,47 @@ public class SparkInvoiceCreditor
     /// A false return is not a failure: it means the other caller of this compare-and-set stamped it first,
     /// and "credited" is what both of them concluded.
     /// </remarks>
-    private async Task MarkCreditedAsync(InvoiceRecord record, CancellationToken cancellationToken)
+    private async Task MarkCreditedAsync(
+        InvoiceRecord record,
+        string? btcPayInvoiceId,
+        CancellationToken cancellationToken)
     {
         var creditedAt = DateTimeOffset.UtcNow;
-        if (await _invoiceStore
+        if (!await _invoiceStore
                 .MarkCreditedAsync(record.StoreId, record.PaymentHash, creditedAt, cancellationToken)
                 .ConfigureAwait(false))
         {
-            // Kept in step so a caller holding this instance — the settlement path does — does not re-attempt
-            // the credit it just completed. The same value that was persisted, not a second reading of the
-            // clock, so an in-hand record cannot disagree with the row about when the credit landed.
-            record.CreditedAt ??= creditedAt;
+            return;
+        }
+
+        // Kept in step so a caller holding this instance does not re-attempt the credit it just completed.
+        record.CreditedAt ??= creditedAt;
+
+        // Append a ledger entry. The write is in a separate transaction from the credit stamp above;
+        // the backfill job reconciles any entry missed here by matching on PaymentHash.
+        try
+        {
+            await _ledger.AppendAsync(new SparkLedgerEntry
+            {
+                Id = Guid.NewGuid().ToString(),
+                StoreId = record.StoreId,
+                EntryType = SparkLedgerEntryType.LightningReceive,
+                AmountMsat = record.AmountReceivedMsat ?? 0,
+                FeeMsat = 0,
+                OccurredAt = record.SettledAt ?? record.CreatedAt,
+                RecordedAt = creditedAt,
+                SdkPaymentId = record.SdkPaymentId,
+                PaymentHash = record.PaymentHash,
+                BtcPayInvoiceId = btcPayInvoiceId,
+                IsBackfill = false,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "Store {StoreId}: Lightning receive {PaymentHash} credited but ledger append failed; "
+                + "backfill will recover the entry",
+                record.StoreId, record.PaymentHash);
         }
     }
 

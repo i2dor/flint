@@ -136,8 +136,8 @@ public class SparkLightningConfigSweeperTests
         Assert.Equal(new SparkLightningConfigSweepResult(2, 1), result);
         Assert.Null(configs.Stores["store-1"].ConnectionString);
         Assert.Null(configs.Stores["store-3"].ConnectionString);
-        // Store-2's settings were written exactly twice: once rotated, and its own wire-up is in the config
-        // store, not here.
+        // Store-2's settings were written exactly once, by the one rotation both references share; its own
+        // Lightning wire-up lives in the config store, not here.
         Assert.Single(settings.Writes, w => w.StoreId == "store-2");
     }
 

@@ -1,11 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
-using BTCPayServer.Plugins.Flint;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client;
 using BTCPayServer.Data;
@@ -13,14 +11,12 @@ using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
-using BTCPayServer.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Logging;
-using NBitcoin;
 using Newtonsoft.Json.Serialization;
 
 namespace BTCPayServer.Plugins.Flint.Controllers;
@@ -36,7 +32,8 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// <see cref="SparkController"/> calls as well — <see cref="SparkSeedResolver"/> for seed sources and the
 /// hot-wallet policy gate, <see cref="SparkStoreProvisioner"/> for provisioning and removal,
 /// <see cref="SparkStoreStatusReader"/> for status, <see cref="SparkSweepSettingsService"/> for the sweep
-/// configuration, and <see cref="SparkSweepEngine"/> for sweeping. If the two surfaces ever behave differently,
+/// configuration, <see cref="SparkSweepEngine"/> for sweeping, and <see cref="StablecoinPaymentService"/> for the
+/// USDC and USDT switch. If the two surfaces ever behave differently,
 /// that is a bug in one of them and not a feature of either.
 /// </para>
 /// <para>
@@ -50,7 +47,10 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// the hole survives into JSON, and the same two guards are applied here: the route value is pinned with
 /// <see cref="FromRouteAttribute"/>, and it is checked against the store BTCPay actually authorised, which is the
 /// only value in the request that a body cannot influence. No request model in this API carries a store id at all
-/// (see <see cref="SparkApiModels"/>), so there is nothing for a body to name.
+/// (see <see cref="SparkApiModels"/>), so there is nothing for a body to name. BTCPay 2.4.6 also fails
+/// authorisation when the route, query string, form or wallet id name different stores, which closes the
+/// form-against-route shape in core; it still never reads a JSON body, and hosts from 2.4.1 to 2.4.5 have no such
+/// check, so both guards stay.
 /// </para>
 /// <para>
 /// <b>Secrets.</b> A generated recovery phrase is returned exactly once, in the response to the
@@ -63,6 +63,8 @@ namespace BTCPayServer.Plugins.Flint.Controllers;
 /// <b>Exit paths.</b> Every sweep this API can cause is a cooperative exit, by owner decision. There is no
 /// unilateral-exit endpoint, no parameter that selects one, and no way to
 /// reach one; "drain" in the sweep settings means the SDK's <c>FeesIncluded</c> fee policy and nothing else.
+/// The plugin's unilateral-exit flow is deliberately UI-only and stays unreachable from here: it ends in signed
+/// transactions an operator broadcasts by hand, after reading a disclosure an API client cannot be shown.
 /// </para>
 /// <para>
 /// <b>Not on the graph BTCPay builds at startup.</b> A controller is constructed per request, so nothing here
@@ -87,11 +89,11 @@ public class GreenfieldSparkController : ControllerBase
     private readonly SparkStoreStatusReader _statusReader;
     private readonly SparkSweepSettingsService _sweepSettings;
     private readonly SparkSweepEngine _sweepEngine;
-    private readonly ISparkStoreRuntime _runtime;
     private readonly SparkDepositService _deposits;
     private readonly SparkStableBalanceService _stableBalance;
+    private readonly StablecoinPaymentService _stablecoins;
+    private readonly SparkLedgerBackfillService _backfill;
     private readonly ILogger<GreenfieldSparkController> _logger;
-    private readonly SettingsRepository _serverSettingsRepository;
 
     public GreenfieldSparkController(
         ISparkStoreSettingsStore settingsStore,
@@ -100,11 +102,11 @@ public class GreenfieldSparkController : ControllerBase
         SparkStoreStatusReader statusReader,
         SparkSweepSettingsService sweepSettings,
         SparkSweepEngine sweepEngine,
-        ISparkStoreRuntime runtime,
         SparkDepositService deposits,
         SparkStableBalanceService stableBalance,
-        ILogger<GreenfieldSparkController> logger,
-        SettingsRepository serverSettingsRepository)
+        StablecoinPaymentService stablecoins,
+        SparkLedgerBackfillService backfill,
+        ILogger<GreenfieldSparkController> logger)
     {
         _settingsStore = settingsStore;
         _provisioner = provisioner;
@@ -112,11 +114,11 @@ public class GreenfieldSparkController : ControllerBase
         _statusReader = statusReader;
         _sweepSettings = sweepSettings;
         _sweepEngine = sweepEngine;
-        _runtime = runtime;
         _deposits = deposits;
         _stableBalance = stableBalance;
+        _stablecoins = stablecoins;
+        _backfill = backfill;
         _logger = logger;
-        _serverSettingsRepository = serverSettingsRepository;
     }
 
     #region Status
@@ -374,7 +376,7 @@ public class GreenfieldSparkController : ControllerBase
     /// minute and the engine re-quotes on a real sweep, so it is an estimate.
     /// </para>
     /// <para>
-    /// <b>Always a cooperative exit.</b> There is no parameter here or anywhere else in this plugin that selects a
+    /// <b>Always a cooperative exit.</b> There is no parameter here or anywhere else in this API that selects a
     /// unilateral exit.
     /// </para>
     /// <para>
@@ -383,32 +385,6 @@ public class GreenfieldSparkController : ControllerBase
     /// are not reported as an error status.
     /// </para>
     /// </remarks>
-    /// <summary>
-    /// One sweep record, by its idempotency key.
-    /// </summary>
-    [Authorize(Policy = Policies.CanViewStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-    [HttpGet("~/api/v1/stores/{storeId}/spark/sweep/{idempotencyKey}")]
-    public async Task<IActionResult> GetSweepRecord(
-        [FromRoute] string storeId,
-        [FromRoute] string idempotencyKey,
-        CancellationToken cancellationToken)
-    {
-        if (!ResolveStore(storeId, out var store))
-            return StoreNotFound();
-
-        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
-            return NotConfigured();
-
-        var record = await _sweepSettings
-            .ReadRecordAsync(store.Id, idempotencyKey, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (record is null)
-            return NotFound(new { Code = "sweep-record-not-found", Message = "No sweep record with that idempotency key." });
-
-        return Ok(SparkSweepRecordData.From(record));
-    }
-
     [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
     [HttpPost("~/api/v1/stores/{storeId}/spark/sweep")]
     public async Task<IActionResult> Sweep(
@@ -431,26 +407,8 @@ public class GreenfieldSparkController : ControllerBase
             return Ok(ToModel(preview));
         }
 
-        if (request?.DestinationAddress is not null)
-        {
-            try
-            {
-                BitcoinAddress.Create(request.DestinationAddress, _sweepSettings.Network);
-            }
-            catch
-            {
-                return this.CreateAPIError(422, "invalid-destination",
-                    $"'{request.DestinationAddress}' is not a valid Bitcoin address on {_sweepSettings.Network.ChainName}.");
-            }
-        }
-
         var result = await _sweepEngine
-            .RunAsync(
-                store.Id,
-                SweepTrigger.Manual,
-                force: request?.Force ?? false,
-                destinationOverride: request?.DestinationAddress,
-                cancellationToken)
+            .RunAsync(store.Id, SweepTrigger.Manual, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(SparkSweepResultData.From(result));
@@ -660,93 +618,108 @@ public class GreenfieldSparkController : ControllerBase
 
     #endregion
 
-    #region Balance sync
+    #region USDC and USDT at checkout
 
     /// <summary>
-    /// Forces a wallet sync and returns the current Spark balance.
+    /// Whether the store's checkout takes USDC and USDT, received into its Spark wallet as bitcoin.
     /// </summary>
-    /// <remarks>
-    /// The balance reported by other endpoints is read from the SDK cache without forcing a sync and may lag
-    /// settlement by up to 20 seconds. This endpoint forces an explicit sync before reading, so the returned
-    /// value is current at call time. It does not trigger or preview a sweep.
-    /// </remarks>
-    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-    [HttpPost("~/api/v1/stores/{storeId}/spark/sync")]
-    public async Task<IActionResult> SyncBalance([FromRoute] string storeId, CancellationToken cancellationToken)
+    [Authorize(Policy = Policies.CanViewStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpGet("~/api/v1/stores/{storeId}/spark/stablecoins")]
+    public async Task<IActionResult> GetStablecoins([FromRoute] string storeId, CancellationToken cancellationToken)
     {
         if (!ResolveStore(storeId, out var store))
             return StoreNotFound();
 
-        if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
-            return NotConfigured();
-
-        var sdk = await _runtime.GetSdkClientAsync(store.Id).ConfigureAwait(false);
-
-        if (sdk is null)
+        try
         {
-            return Ok(new SparkBalanceSyncData
-            {
-                WalletRunning = false,
-                BalanceSats = 0,
-                SyncedAt = DateTimeOffset.UtcNow
-            });
+            if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+                return NotConfigured();
+
+            return await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false) is { } data
+                ? Ok(data)
+                : StablecoinsUnavailable();
         }
-
-        await sdk.SyncWalletAsync(cancellationToken).ConfigureAwait(false);
-        var info = await sdk.GetInfoAsync(ensureSynced: true, cancellationToken).ConfigureAwait(false);
-
-        return Ok(new SparkBalanceSyncData
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            WalletRunning = true,
-            BalanceSats = info.BalanceSats,
-            SyncedAt = DateTimeOffset.UtcNow
-        });
+            return StablecoinsUnavailable(ex, store.Id);
+        }
     }
 
-    #endregion
-
-    #region Server settings
-
-    /// <summary>Flint server-level settings (shared across all stores).</summary>
-    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-    [HttpGet("~/api/v1/server/spark")]
-    public async Task<IActionResult> GetServerSettings(CancellationToken cancellationToken)
-    {
-        var settings = await _serverSettingsRepository
-            .GetSettingAsync<SparkServerSettings>()
-            .ConfigureAwait(false) ?? new SparkServerSettings();
-
-        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
-    }
-
-    /// <summary>Update Flint server-level settings.</summary>
-    [Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
-    [HttpPut("~/api/v1/server/spark")]
-    public async Task<IActionResult> UpdateServerSettings(
-        [FromBody] SparkServerSettingsRequest? request,
+    /// <summary>
+    /// Turns USDC and USDT on or off for the store's checkout — both payment methods, as the Flint page's switch does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It changes what <em>new</em> invoices offer and moves no money: turning it off leaves every quote already
+    /// shown payable, and each one still settles onto its invoice. So an empty body, which a full replacement reads
+    /// as <c>enabled: false</c>, is taken at its word here, unlike Stable Balance's.
+    /// </para>
+    /// <para>
+    /// Mainnet only. Enabling anywhere else is refused rather than stored: the provider serves no other network, and
+    /// a switch that reads "on" while checkout never offers the coins would be a promise the server cannot keep.
+    /// </para>
+    /// </remarks>
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPut("~/api/v1/stores/{storeId}/spark/stablecoins")]
+    public async Task<IActionResult> UpdateStablecoins(
+        [FromRoute] string storeId,
+        [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] SparkStablecoinsInput? request,
         CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl))
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        try
         {
-            if (!Uri.TryCreate(request.UpdateWebhookUrl, UriKind.Absolute, out var uri)
-                || uri.Scheme is not ("http" or "https"))
+            if (await _settingsStore.GetAsync(store.Id).ConfigureAwait(false) is null)
+                return NotConfigured();
+
+            request ??= new SparkStablecoinsInput();
+            if (request.Enabled && !_stablecoins.Available)
             {
-                return this.CreateAPIError(422, "invalid-update-webhook-url",
-                    $"'{request.UpdateWebhookUrl}' is not a valid http/https URL.");
+                ModelState.AddModelError(
+                    JsonName(nameof(SparkStablecoinsInput.Enabled)),
+                    "USDC and USDT payments are only available on Bitcoin mainnet.");
+                return this.CreateValidationError(ModelState);
             }
+
+            if (!await _stablecoins.SetEnabledAsync(store.Id, request.Enabled, cancellationToken).ConfigureAwait(false))
+            {
+                return this.CreateAPIError(
+                    500, "stablecoins-not-updated", "The store's payment methods could not be updated.");
+            }
+
+            return await ReadStablecoinsAsync(store.Id, cancellationToken).ConfigureAwait(false) is { } data
+                ? Ok(data)
+                : StablecoinsUnavailable();
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return StablecoinsUnavailable(ex, store.Id);
+        }
+    }
 
-        var settings = await _serverSettingsRepository
-            .GetSettingAsync<SparkServerSettings>()
-            .ConfigureAwait(false) ?? new SparkServerSettings();
+    /// <summary>The switch's state, or null when it cannot be read right now — which is not the same as "off".</summary>
+    private async Task<SparkStablecoinsData?> ReadStablecoinsAsync(string storeId, CancellationToken cancellationToken) =>
+        await _stablecoins.TryReadEnabledAsync(storeId, cancellationToken).ConfigureAwait(false) is { } enabled
+            ? new SparkStablecoinsData
+            {
+                Available = _stablecoins.Available,
+                Enabled = enabled,
+                PaymentMethodIds = StablecoinPayments.Assets.Select(asset => asset.PaymentMethodId.ToString()).ToList()
+            }
+            : null;
 
-        settings.UpdateWebhookUrl = string.IsNullOrWhiteSpace(request?.UpdateWebhookUrl)
-            ? null
-            : request.UpdateWebhookUrl;
-
-        await _serverSettingsRepository.UpdateSetting(settings).ConfigureAwait(false);
-
-        return Ok(new SparkServerSettingsData { UpdateWebhookUrl = settings.UpdateWebhookUrl });
+    /// <summary>
+    /// A 503 for a database that did not answer. Both actions degrade to it rather than letting the exception reach
+    /// BTCPay, which answers an unhandled plugin exception during a request by disabling the plugin and restarting.
+    /// </summary>
+    private IActionResult StablecoinsUnavailable(Exception? ex = null, string? storeId = null)
+    {
+        if (ex is not null)
+            _logger.LogWarning(ex, "Store {StoreId}: the USDC/USDT switch could not be read or written", storeId);
+        return this.CreateAPIError(
+            503, "stablecoins-unavailable", "The store's USDC and USDT settings could not be read right now. Try again shortly.");
     }
 
     #endregion
@@ -767,40 +740,19 @@ public class GreenfieldSparkController : ControllerBase
         StorageDirectory = status.StorageDirectoryFor(User)
     };
 
-    private SparkSweepConfigurationData ToModel(SparkSweepSettingsView view, SparkSweepHistoryPage history)
+    private SparkSweepConfigurationData ToModel(SparkSweepSettingsView view, SparkSweepHistoryPage history) => new()
     {
-        var warnings = new List<string>();
-        var networkName = _sweepSettings.Network.ChainName.ToString();
-        if (networkName == "Mainnet")
-        {
-            var threshold = view.Settings.BalanceThresholdSats;
-            var minSweep = view.Settings.MinimumSweepSats;
-            if (threshold < SweepSettings.DefaultBalanceThresholdSats)
-                warnings.Add(
-                    $"Balance threshold ({threshold:N0} sats) is below the " +
-                    $"{SweepSettings.DefaultBalanceThresholdSats:N0}-sat recommended minimum; " +
-                    "mainnet exit fees will represent a higher share of the swept amount.");
-            if (minSweep < SweepSettings.DefaultMinimumSweepSats)
-                warnings.Add(
-                    $"Minimum sweep amount ({minSweep:N0} sats) is below the " +
-                    $"{SweepSettings.DefaultMinimumSweepSats:N0}-sat recommended floor; " +
-                    "fee defaults were measured on regtest and are higher on mainnet.");
-        }
-        return new SparkSweepConfigurationData
-        {
-            Settings = view.Settings,
-            WalletRunning = view.WalletRunning,
-            BalanceSats = view.BalanceSats,
-            StoreWalletStatus = view.StoreWalletStatus,
-            StoreWalletReason = view.StoreWalletReason,
-            Network = networkName,
-            Total = history.Total,
-            Skip = history.Skip,
-            Count = history.Count,
-            History = history.Records.Select(SparkSweepRecordData.From).ToList(),
-            Warnings = warnings
-        };
-    }
+        Settings = view.Settings,
+        WalletRunning = view.WalletRunning,
+        BalanceSats = view.BalanceSats,
+        StoreWalletStatus = view.StoreWalletStatus,
+        StoreWalletReason = view.StoreWalletReason,
+        Network = _sweepSettings.Network.ChainName.ToString(),
+        Total = history.Total,
+        Skip = history.Skip,
+        Count = history.Count,
+        History = history.Records.Select(SparkSweepRecordData.From).ToList()
+    };
 
     private static SparkSweepPreviewData ToModel(SweepPreview preview) => new()
     {
@@ -823,6 +775,34 @@ public class GreenfieldSparkController : ControllerBase
         Quote = preview.Quote is { } quote ? SparkSweepQuoteData.From(quote) : null,
         Settings = SweepSettingsInput.From(preview.Settings)
     };
+
+    #endregion
+
+    #region Ledger backfill
+
+    [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+    [HttpPost("~/api/v1/stores/{storeId}/spark/ledger/backfill")]
+    public async Task<IActionResult> BackfillLedger(
+        [FromRoute] string storeId,
+        [FromQuery] bool dryRun = true,
+        CancellationToken cancellationToken = default)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return StoreNotFound();
+
+        var report = await _backfill.RunAsync(store.Id, dryRun, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            dryRun = report.DryRun,
+            storeId = report.StoreId,
+            lightningReceives = new { report.LightningReceives.Skipped, report.LightningReceives.Created, report.LightningReceives.Failed },
+            stablecoinReceives = new { report.StablecoinReceives.Skipped, report.StablecoinReceives.Created, report.StablecoinReceives.Failed },
+            sends = new { report.Sends.Skipped, report.Sends.Created, report.Sends.Failed },
+            sweeps = new { report.Sweeps.Skipped, report.Sweeps.Created, report.Sweeps.Failed },
+            unilateralExits = new { report.UnilateralExits.Skipped, report.UnilateralExits.Created, report.UnilateralExits.Failed },
+            total = new { report.Total.Skipped, report.Total.Created, report.Total.Failed },
+        });
+    }
 
     #endregion
 

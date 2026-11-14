@@ -31,7 +31,7 @@ public class SparkStoreProvisionerTests
         WriteLog Writes,
         CapturingLogger<SparkStoreProvisioner> Log);
 
-    private static Harness Create(bool storeExists = true)
+    private static Harness Create(bool storeExists = true, IExitStateBackupStore? exitStateBackups = null)
     {
         // One shared log across both fakes, because the ordering between them is the invariant that matters and
         // two separate call counters cannot express it.
@@ -42,13 +42,12 @@ public class SparkStoreProvisionerTests
 
         var wiring = new SparkLightningWiring(config, NullLogger<SparkLightningWiring>.Instance);
 
-        // Wired to the wiring so a removal clears the Lightning configuration, as SparkService.Set(null) does.
-        var settings = new FakeSparkStoreSettingsStore(wiring, writes);
+        var settings = new FakeSparkStoreSettingsStore(writes);
         var protector = Protector();
         var log = new CapturingLogger<SparkStoreProvisioner>();
 
         return new Harness(
-            new SparkStoreProvisioner(settings, wiring, protector, log),
+            new SparkStoreProvisioner(settings, wiring, protector, log, exitStateBackups),
             settings, config, protector, writes, log);
     }
 
@@ -295,6 +294,38 @@ public class SparkStoreProvisionerTests
     }
 
     [Fact]
+    public async Task A_seed_change_keeps_the_old_wallet_s_deprecated_backup_aside_instead_of_carrying_it()
+    {
+        // An earlier version kept the exit-state backup in the settings. Carried to a new seed, the new
+        // wallet's connect would adopt the old wallet's blob as its own.
+        var backups = new FakeExitStateBackupStore();
+        var h = Create(exitStateBackups: backups);
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "old-wallet-legacy-blob";
+
+        var replacement = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, replacement, SeedSource.Imported)).Succeeded);
+
+        Assert.Null(h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup);
+        Assert.Equal([(StoreId, ExitStateBackupSetAside.OtherWallet)], backups.SetAsides);
+        Assert.DoesNotContain("old-wallet-legacy-blob", h.Log.AllText);
+    }
+
+    [Fact]
+    public async Task Re_provisioning_the_same_seed_keeps_its_deprecated_backup_for_the_connect_to_adopt()
+    {
+        var backups = new FakeExitStateBackupStore();
+        var h = Create(exitStateBackups: backups);
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup = "same-wallet-legacy-blob";
+
+        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Imported)).Succeeded);
+
+        Assert.Equal("same-wallet-legacy-blob", h.Settings.Settings[StoreId]!.UnilateralExit.ExitStateBackup);
+        Assert.Empty(backups.SetAsides);
+    }
+
+    [Fact]
     public async Task Provision_rotates_the_payment_key_and_keeps_sweep_settings_across_a_seed_change()
     {
         // The payment key is a bearer spend credential — the connection string carrying it drives this store's
@@ -307,6 +338,12 @@ public class SparkStoreProvisionerTests
         var first = h.Settings.Settings[StoreId]!;
         first.Sweep.Enabled = true;
         first.Sweep.BalanceThresholdSats = 100_000;
+        first.Deposits.ClaimFeeLeewaySatPerVbyte = 9;
+        first.StableBalance.DisclosureAcknowledged = true;
+        // Infrastructure configuration, which has nothing to do with which seed the store runs on — and off
+        // mainnet losing it means the next unilateral exit refuses for want of a block explorer.
+        first.UnilateralExit.DisclosureAcknowledged = true;
+        first.UnilateralExit.EsploraApiUrl = "https://explorer.test/api";
         first.ApiKeyOverride = "merchant-key";
 
         var replacement = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
@@ -316,8 +353,19 @@ public class SparkStoreProvisionerTests
         Assert.NotEqual(first.PaymentKey, second.PaymentKey);
         Assert.True(second.Sweep.Enabled);
         Assert.Equal(100_000, second.Sweep.BalanceThresholdSats);
+        Assert.Equal(9, second.Deposits.ClaimFeeLeewaySatPerVbyte);
+        Assert.True(second.StableBalance.DisclosureAcknowledged);
+        Assert.True(second.UnilateralExit.DisclosureAcknowledged);
+        Assert.Equal("https://explorer.test/api", second.UnilateralExit.EsploraApiUrl);
         Assert.Equal("merchant-key", second.ApiKeyOverride);
         Assert.Equal(SeedSource.Imported, second.SeedSource);
+
+        // Copied, not aliased. Sharing a block with the object the caller still holds would make a later edit to
+        // one silently edit the other — including the copy a failed attempt is supposed to roll back to.
+        Assert.NotSame(first.Sweep, second.Sweep);
+        Assert.NotSame(first.Deposits, second.Deposits);
+        Assert.NotSame(first.StableBalance, second.StableBalance);
+        Assert.NotSame(first.UnilateralExit, second.UnilateralExit);
     }
 
     [Fact]
@@ -340,7 +388,8 @@ public class SparkStoreProvisionerTests
         // one server reuses the same hot-wallet seed for both; SparkService's wallet-uniqueness guard refuses the
         // second — two SDK instances on one wallet corrupt its SQLite file — and it refuses by *returning*, with
         // no exception to catch. Before this, the second store got "Spark is now set up", an enabled Lightning
-        // payment method, and a checkout that failed every single time.
+        // payment method, and a checkout that failed every single time. A chain the SDK has no network for
+        // (testnet, signet) declines the same quiet way and takes the same path, with its own reason relayed.
         var h = Create();
         h.Config.Add("store-2");
 
@@ -358,45 +407,6 @@ public class SparkStoreProvisionerTests
         Assert.Null(h.Settings.Settings["store-2"]);
         Assert.Null(h.Config.Stores["store-2"].ConnectionString);
         Assert.DoesNotContain(h.Config.Writes, write => write.StoreId == "store-2");
-    }
-
-    [Fact]
-    public async Task Provision_reports_the_reason_when_the_chain_is_unsupported()
-    {
-        // Same quiet-failure shape, different cause: a BTCPay running on testnet or signet, which the SDK has no
-        // network for at all.
-        var h = Create();
-        h.Settings.NextSetDeclinesWith = "The Spark SDK supports mainnet and regtest only; this server runs on testnet.";
-
-        var result = await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated);
-
-        Assert.False(result.Succeeded);
-        Assert.Contains("mainnet and regtest only", result.Error);
-        Assert.Null(h.Settings.Settings[StoreId]);
-        Assert.Empty(h.Config.Writes);
-    }
-
-    [Fact]
-    public async Task Provision_does_not_alias_the_previous_sweep_settings()
-    {
-        // Settings objects are handed out by reference from the service's cache. Aliasing the sweep block across
-        // a seed change would make a later edit to the new configuration silently edit the old one — including
-        // the copy a failed attempt is supposed to roll back to.
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
-
-        var first = h.Settings.Settings[StoreId]!;
-        first.Sweep.BalanceThresholdSats = 100_000;
-
-        Assert.True((await h.Provisioner.ProvisionAsync(
-            StoreId, SparkStoreProvisioner.GenerateMnemonic(), SeedSource.Imported)).Succeeded);
-
-        var second = h.Settings.Settings[StoreId]!;
-        Assert.Equal(100_000, second.Sweep.BalanceThresholdSats);
-        Assert.NotSame(first.Sweep, second.Sweep);
-
-        second.Sweep.BalanceThresholdSats = 7;
-        Assert.Equal(100_000, first.Sweep.BalanceThresholdSats);
     }
 
     [Fact]
@@ -437,40 +447,64 @@ public class SparkStoreProvisionerTests
         Assert.Null(h.Settings.Writes[^1].Settings);
     }
 
+    /// <remarks>
+    /// Over the real <c>SparkService</c>, not the settings-store fake. RemoveAsync does not clear the Lightning
+    /// configuration itself — <c>SparkService.Set(null)</c> does, because that is the single choke point for
+    /// "this store no longer has a Spark wallet". A fake that did the clearing on the service's behalf kept this
+    /// green with the service's call deleted, which would leave a removed wallet's checkout pointing at nothing.
+    /// Another store's Spark configuration is there too, and must survive: the clear is for this store only.
+    /// </remarks>
     [Fact]
     public async Task Remove_clears_the_lightning_payment_method_it_wrote()
     {
-        // RemoveAsync does not clear the Lightning configuration itself — SparkService.Set(null) does, because
-        // that is the single choke point for "this store no longer has a Spark wallet". This pins that coupling
-        // end to end, so removing the clearing from either side fails a test.
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
-        Assert.NotNull(h.Config.Stores[StoreId].ConnectionString);
+        var (spark, provisioner) = await OverTheRealServiceAsync();
+        using var _ = spark;
+        const string otherStore = "store-2";
+        var otherStoresWallet = BTCPayServer.Plugins.Flint.SparkConnectionString.Format(otherStore, "its-own-key");
+        spark.Lightning.Add(otherStore, otherStoresWallet);
+        Assert.True((await provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        Assert.NotNull(spark.Lightning.Stores[StoreId].ConnectionString);
 
-        await h.Provisioner.RemoveAsync(StoreId);
+        await provisioner.RemoveAsync(StoreId);
 
-        Assert.Null(h.Config.Stores[StoreId].ConnectionString);
-        Assert.Equal(
-            [
-                $"settings:{StoreId}:stored", $"lightning:{StoreId}:set",
-                $"settings:{StoreId}:removed", $"lightning:{StoreId}:cleared"
-            ],
-            h.Writes.Entries);
+        Assert.Null(spark.Lightning.Stores[StoreId].ConnectionString);
+        Assert.Equal(otherStoresWallet, spark.Lightning.Stores[otherStore].ConnectionString);
     }
 
+    /// <remarks>
+    /// The other half, at the same call site: the service clears only a configuration that is its own, not
+    /// whatever the store's Lightning payment method happens to hold.
+    /// </remarks>
     [Fact]
     public async Task Remove_leaves_another_nodes_configuration_alone()
     {
-        var h = Create();
-        Assert.True((await h.Provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
+        var (spark, provisioner) = await OverTheRealServiceAsync();
+        using var _ = spark;
+        Assert.True((await provisioner.ProvisionAsync(StoreId, ValidMnemonic, SeedSource.Generated)).Succeeded);
 
         // The merchant moved to their own node after setting Spark up.
         const string ownNode = "type=lnd-rest;server=https://127.0.0.1:8080/;macaroon=abcdef";
-        h.Config.Add(StoreId, ownNode);
+        spark.Lightning.Add(StoreId, ownNode);
 
-        await h.Provisioner.RemoveAsync(StoreId);
+        await provisioner.RemoveAsync(StoreId);
 
-        Assert.Equal(ownNode, h.Config.Stores[StoreId].ConnectionString);
+        Assert.Equal(ownNode, spark.Lightning.Stores[StoreId].ConnectionString);
+    }
+
+    /// <summary>A provisioner over a started <c>SparkService</c>, for what the service does on its behalf.</summary>
+    private static async Task<(SparkServiceHarness Spark, SparkStoreProvisioner Provisioner)>
+        OverTheRealServiceAsync()
+    {
+        var spark = SparkServiceHarness.Create();
+        spark.Lightning.Add(StoreId);
+        await spark.Service.StartAsync(CancellationToken.None);
+
+        var provisioner = new SparkStoreProvisioner(
+            spark.Service,
+            new SparkLightningWiring(spark.Lightning, NullLogger<SparkLightningWiring>.Instance),
+            spark.Protector,
+            new CapturingLogger<SparkStoreProvisioner>());
+        return (spark, provisioner);
     }
 
     #endregion
