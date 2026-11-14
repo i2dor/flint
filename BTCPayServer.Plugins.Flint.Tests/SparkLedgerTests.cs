@@ -74,6 +74,53 @@ public class SparkLedgerTests
         Assert.False(exists);
     }
 
+    // ---- AppendAsync: unique SdkPaymentId constraint ----
+
+    [Fact]
+    public async System.Threading.Tasks.Task AppendAsync_second_insert_same_SdkPaymentId_is_silent_and_idempotent()
+    {
+        // Mirrors the Postgres UNIQUE partial index on (StoreId, SdkPaymentId) WHERE SdkPaymentId IS NOT NULL.
+        // EfSparkLedgerStore catches PostgresException SqlState 23505 and treats it as "already recorded".
+        // InMemorySparkLedgerStore enforces the same contract.
+        var store = new InMemorySparkLedgerStore();
+        var first = SendEntry(StoreA, "pay-dup");
+        var second = SendEntry(StoreA, "pay-dup");   // duplicate SdkPaymentId
+
+        await store.AppendAsync(first, Ct);
+        await store.AppendAsync(second, Ct);  // must not throw
+
+        Assert.Equal(1, await store.CountAsync(StoreA, Ct));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task AppendAsync_null_SdkPaymentId_is_not_subject_to_uniqueness()
+    {
+        // The partial index excludes rows WHERE SdkPaymentId IS NULL (Sweeps, UnilateralExits).
+        // Both appends must succeed; count must be 2.
+        var store = new InMemorySparkLedgerStore();
+        var e1 = new SparkLedgerEntry
+        {
+            Id = Guid.NewGuid().ToString(), StoreId = StoreA,
+            EntryType = SparkLedgerEntryType.Sweep,
+            AmountMsat = 1_000_000, FeeMsat = 0,
+            OccurredAt = T0, RecordedAt = T0,
+            SdkPaymentId = null, IsBackfill = false,
+        };
+        var e2 = new SparkLedgerEntry
+        {
+            Id = Guid.NewGuid().ToString(), StoreId = StoreA,
+            EntryType = SparkLedgerEntryType.Sweep,
+            AmountMsat = 2_000_000, FeeMsat = 0,
+            OccurredAt = T0, RecordedAt = T0,
+            SdkPaymentId = null, IsBackfill = false,
+        };
+
+        await store.AppendAsync(e1, Ct);
+        await store.AppendAsync(e2, Ct);
+
+        Assert.Equal(2, await store.CountAsync(StoreA, Ct));
+    }
+
     // ---- ExistsForPaymentHashAsync store isolation ----
 
     [Fact]

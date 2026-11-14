@@ -22,7 +22,16 @@ public sealed class InMemorySparkLedgerStore : ISparkLedgerStore
     public Task AppendAsync(SparkLedgerEntry entry, CancellationToken cancellationToken = default)
     {
         lock (_lock)
+        {
+            // Mirrors the UNIQUE partial index on (StoreId, SdkPaymentId) WHERE SdkPaymentId IS NOT NULL.
+            // A second insert with the same (StoreId, SdkPaymentId) is silently dropped, matching EfSparkLedgerStore's
+            // 23505 catch (the real DB raises unique_violation; the EF layer swallows it as "already recorded").
+            if (entry.SdkPaymentId is not null &&
+                _entries.Any(e => e.StoreId == entry.StoreId && e.SdkPaymentId == entry.SdkPaymentId))
+                return Task.CompletedTask;
+
             _entries.Add(entry);
+        }
         return Task.CompletedTask;
     }
 

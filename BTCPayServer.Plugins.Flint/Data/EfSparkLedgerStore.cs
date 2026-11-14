@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace BTCPayServer.Plugins.Flint.Data;
 
@@ -17,9 +18,17 @@ public sealed class EfSparkLedgerStore : ISparkLedgerStore
 
     public async Task AppendAsync(SparkLedgerEntry entry, CancellationToken cancellationToken = default)
     {
-        await using var context = _factory.CreateContext();
-        context.SparkLedger.Add(entry);
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var context = _factory.CreateContext();
+            context.SparkLedger.Add(entry);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: "23505" })
+        {
+            // Two concurrent callers both passed the ExistsFor... guard before either committed.
+            // The second insert hits the UNIQUE index; the entry is already recorded, so this is success.
+        }
     }
 
     public async Task<bool> ExistsForSdkPaymentAsync(
