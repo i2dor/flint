@@ -154,6 +154,7 @@ public class SparkPluginDbContext : DbContext
                 .HasDatabaseName("IX_SparkLedger_StoreId_OccurredAt");
             // Idempotency guard on the live write path: one entry per SDK payment per store.
             entity.HasIndex(e => new { e.StoreId, e.SdkPaymentId })
+                .IsUnique()
                 .HasFilter("\"SdkPaymentId\" IS NOT NULL")
                 .HasDatabaseName("IX_SparkLedger_StoreId_SdkPaymentId");
             // Backfill Lightning lookup: payment hash per store.

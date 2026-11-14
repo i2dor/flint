@@ -63,6 +63,7 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                 schema: "BTCPayServer.Plugins.Flint",
                 table: "SparkLedger",
                 columns: new[] { "StoreId", "SdkPaymentId" },
+                unique: true,
                 filter: "\"SdkPaymentId\" IS NOT NULL");
         }
 

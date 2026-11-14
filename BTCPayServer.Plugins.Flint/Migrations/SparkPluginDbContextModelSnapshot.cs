@@ -519,6 +519,7 @@ namespace BTCPayServer.Plugins.Flint.Migrations
                         .HasFilter("\"PaymentHash\" IS NOT NULL");
 
                     b.HasIndex("StoreId", "SdkPaymentId")
+                        .IsUnique()
                         .HasDatabaseName("IX_SparkLedger_StoreId_SdkPaymentId")
                         .HasFilter("\"SdkPaymentId\" IS NOT NULL");
 

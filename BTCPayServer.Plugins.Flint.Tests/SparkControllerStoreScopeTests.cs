@@ -174,6 +174,12 @@ public class SparkControllerStoreScopeTests
     [InlineData("StableBalance GET")]
     [InlineData("StableBalance POST")]
     [InlineData("ReapplyStableBalance POST")]
+    [InlineData("Receive GET")]
+    [InlineData("Receive POST")]
+    [InlineData("ReceivePoll GET")]
+    [InlineData("Send GET")]
+    [InlineData("Send POST")]
+    [InlineData("WalletHistory GET")]
     [InlineData("Remove GET")]
     [InlineData("RemoveConfirmed POST")]
     public async Task Every_action_refuses_a_store_id_that_is_not_the_authorised_store(string action)
@@ -237,6 +243,12 @@ public class SparkControllerStoreScopeTests
                 },
                 ct),
             "ReapplyStableBalance POST" => await h.Mvc.ReapplyStableBalance(VictimStore, ct),
+            "Receive GET" => await h.Mvc.Receive(VictimStore, ct),
+            "Receive POST" => await h.Mvc.Receive(VictimStore, new SparkReceiveViewModel(), ct),
+            "ReceivePoll GET" => await h.Mvc.ReceivePoll(VictimStore, "aabbccdd", ct),
+            "Send GET" => await h.Mvc.Send(VictimStore, ct),
+            "Send POST" => await h.Mvc.Send(VictimStore, new SparkSendViewModel(), ct),
+            "WalletHistory GET" => await h.Mvc.WalletHistory(VictimStore, null, 0, 0, ct),
             "Remove GET" => await h.Mvc.Remove(VictimStore, ct),
             "RemoveConfirmed POST" => await h.Mvc.RemoveConfirmed(VictimStore),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action, "No invocation for this row.")
