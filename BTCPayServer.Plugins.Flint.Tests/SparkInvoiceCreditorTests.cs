@@ -1,6 +1,7 @@
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Services;
 using BTCPayServer.Plugins.Flint.Tests.Fakes;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace BTCPayServer.Plugins.Flint.Tests;
@@ -329,5 +330,30 @@ public class SparkInvoiceCreditorTests
 
         Assert.Equal(
             FakeInvoiceCreditGateway.LnurlPaymentMethodId, Assert.Single(credits.Credits).PaymentMethodId);
+    }
+
+    [Fact]
+    public async Task A_live_ledger_entry_carries_the_BOLT11_description()
+    {
+        // The ledger entry for a BTCPay-invoice receive should copy the BOLT11 'd' field so an operator
+        // can read the purpose of a payment without opening BTCPay. SparkInvoiceCreditor has the invoice
+        // record directly — no lookup needed.
+        var store = new InMemoryInvoiceRecordStore();
+        var credits = new FakeInvoiceCreditGateway();
+        var ledger = new InMemorySparkLedgerStore();
+        var creditor = new SparkInvoiceCreditor(
+            credits, store, ledger, NullLogger<SparkInvoiceCreditor>.Instance);
+
+        const string description = "Payment for order #42";
+        var record = Settled(store);
+        record.Description = description;
+        store.Seed(record);
+        credits.Mint(Hash, InvoiceId, StoreId);
+
+        await creditor.CreditAsync(record, Ct);
+
+        var entry = Assert.Single(ledger.All);
+        Assert.Equal(description, entry.Description);
+        Assert.Equal(SparkLedgerEntryType.LightningReceive, entry.EntryType);
     }
 }

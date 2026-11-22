@@ -412,6 +412,7 @@ public class SparkInvoiceCreditor
                 SdkPaymentId = record.SdkPaymentId,
                 PaymentHash = record.PaymentHash,
                 BtcPayInvoiceId = btcPayInvoiceId,
+                Description = record.Description,
                 IsBackfill = false,
             }, cancellationToken).ConfigureAwait(false);
         }
