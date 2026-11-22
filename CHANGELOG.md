@@ -7,96 +7,139 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
-## [1.3.1.4] - 2026-11-21
+## [1.4.0.1] — 2026-11-21
 
-### Fixed
+Upstream 1.4.0 (Breez Spark SDK 0.28.4, cooperative recovery, BTCPay Server 2.4.7) with fork additions:
+live ledger writes for unattributed `LightningReceive` (reconciler `NotFound` path) and `OnchainDeposit`
+entry types, BOLT11 description carried through to live `LightningReceive` entries, and idempotency
+guards on `SdkPaymentId` for all new paths.
 
-- **Sweep fee double-counting** (`BackfillSweepsAsync`, `SparkSweepEngine`): when `FeesIncluded=true`
-  the SDK deducts `AmountSats` (gross = net + fee) from the wallet balance. Both the backfill path and
-  the live sweep path were writing `AmountMsat = AmountSats * 1000` (gross), causing
-  `debit = gross + fee = net + 2 * fee`. Corrected to `AmountMsat = RecipientAmountSats * 1000`
-  (net). The `FeeMsat` field was already correct. Convention enforced by extracted `MapSweepRecord`.
-- **Backfill API response** (`GreenfieldSparkController`): `sdkPayments` field was included in
-  `total` but not exposed separately; `total != sum(categories)` for stores with SDK-primary backfill
-  entries. Now exposed as a sibling field.
+The SDK storage migration warning from 1.4.0 applies: SDK 0.28.4 migrates each store's `storage.sql`
+from schema 44 to 48 on first start. Roll back to 1.3.1.x requires restoring those files; without them
+re-enter the store's recovery phrase into a fresh install.
+
+### Added
+
+- **Live ledger write for unattributed LightningReceive** (`SparkSettlementReconciler`, `NotFound` path):
+  a completed Lightning or LNURL receive that has no matching BTCPay invoice is now written to the ledger
+  as a live `LightningReceive` entry with `BtcPayInvoiceId = null`. Idempotency guard on `SdkPaymentId`.
+- **Live ledger write for OnchainDeposit** (`SparkService`, `Deposit` branch): a claimed on-chain static-
+  address deposit is written to the ledger immediately. Idempotency guard on `SdkPaymentId`.
+- **BOLT11 description on live LightningReceive** (`SparkInvoiceCreditor.MarkCreditedAsync`): the BOLT11
+  `d` tag from the `InvoiceRecord` is copied to the live ledger entry. The backfill path already did this.
 
 ### Security
 
-- **Reconciliation integrity** (`SparkLedgerBackfillService`, `SparkSweepEngine`): the
-  double-fee-counting bug caused `SUM(debit) > SDK balance` by `2 * SUM(sweep_fees)` for every
-  store with `FeesIncluded=true` sweeps. Confirmed against production data: BTCfactura showed
-  -2,940 sats discrepancy (2 sweeps x 1,470 sats fee each). Fix verified with 2 unit tests
-  (`MapSweepRecord_uses_net_AmountMsat_when_FeesIncluded`,
-  `MapSweepRecord_uses_full_AmountMsat_when_fees_excluded`); full suite: 20/20.
-  Data correction required after deploy: delete backfill rows for affected sweeps, re-run backfill.
+- **Live-write idempotency** (`SparkSettlementReconciler`, `SparkService`): `ExistsForSdkPaymentAsync`
+  checks prevent duplicate ledger rows if the same event fires more than once. Verified with 3 tests:
+  double-fire, backfill-after-live-write, and mixed live+backfill sequence.
 
-## [1.3.1.3] - 2026-11-21
+## [1.4.0] — 2026-11-16
 
-### Added
+Breez Spark SDK 0.28.4, which renames its unilateral-exit API into a *recovery* that covers both ways a
+leaf comes back, and a build against BTCPay Server 2.4.7. The rename buys merchants one real thing: a leaf
+the Spark operators have already moved on-chain is now recovered **cooperatively** — one transaction they
+co-sign, paying its own fee out of the value it recovers — so a recovery made entirely of such leaves asks
+for no Bitcoin of yours and builds straight away. A recovery that still has to walk a leaf's pre-signed tree
+is unchanged in every respect that matters: it needs the same funding UTXO, the same manual broadcasts, and
+the same multi-day timelocks. The supported range is unchanged: BTCPay Server 2.4.1 or newer.
 
-- **SDK-primary backfill**: `BackfillFromSdkAsync` pages through `ListPaymentsAsync` for all stores and
-  writes one ledger row per completed payment. All seven SDK directions are covered: LightningReceive,
-  StablecoinReceive (BTC-landing), StablecoinReceive (Token/USDB, AmountMsat=0 pending token column),
-  OnchainDeposit (auto-claimed static-address deposit; txid:vout in Description; claim fee in FeeMsat),
-  Send (Lightning and Spark), and Sweep (cooperative exit). Pre-existing DB-sourced backfill paths
-  (lightning, stablecoin, sweeps, unilateral exits) are unchanged.
-- **OnchainDeposit entry type** (`SparkLedgerEntryType.OnchainDeposit = 5`): records auto-claimed
-  on-chain Bitcoin deposits as credits. No DB migration required (enum stored as int; appending to tail
-  is backward-compatible). Identifier: `SdkPaymentId` + `Description` (`txid:vout`); no PaymentHash.
-- **SDK Description preserved**: every ledger row stores the SDK payment description
-  (e.g. "Bitrefill <id>") for future per-order margin calculation against WooCommerce orders.
-- **EF migration** `20261121000000_SparkLedgerDescription`: adds `Description text nullable` column
-  to `SparkLedger`.
+Validated before shipping:
+- The unit suite (1,990 tests, 1,841 executed) passes, as do CI's store suite (135 tests against real
+  Postgres) and its live regtest suite, all on SDK 0.28.4 and BTCPay 2.4.7.
+- **The local Spark stack did not run, and cannot on this SDK.** SDK 0.27 added four tree-node status values
+  (`Consolidated`, `WatchtowerExited`, `WatchtowerExitRecovered`, `Returned`) and submits them in the status
+  filters it sends the operators; the fixture's operators are pinned to an August `spark` build that answers
+  `invalid transfer status: unknown tree node status: 16`, so the fixture's wallet is never funded and the
+  suite fails in its own setup. Measured on one fixture: 0.26.1 passes these suites in seconds, 0.28.4 cannot
+  start. The `local-regtest` job is therefore advisory from this release, with the reason in the workflow
+  and in [CI, releases & upstream updates](docs/ci-and-releases.md); it goes green by itself when the
+  fixture ships current operators.
+- The packaged release candidate ran on the mainnet `btcpay-dev` host, on BTCPay 2.4.6. All three stores'
+  wallets started and synced with their balances unchanged (679 / 0 / 0 sat, identical before and after), a
+  Spark BOLT11 invoice was minted afterwards, and nothing was logged above warning.
+- The plugin adds no database migration, so its schema is untouched by this release.
 
-### Note
-
-- With Stable Balance ON (USDB destination) `AmountMsat` for Token receives is set to 0.
-  A separate token-amount column is required to represent USDB balances; not implemented in this
-  release.
-
-### Security
-
-- Live `Send` path (`SparkSendPaymentService`, lines 121-133): amounts and fees come from the SDK
-  `SparkPayment` record, not from internal estimates. Confirmed correct; no changes.
-- Live `Sweep` path (`SparkSweepEngine`, lines 2149-2161): same - SDK-authoritative amounts.
-  Confirmed correct; no changes.
-
-## [1.3.1.2] - 2026-11-13
+**Rolling back is not free, and it is not the plugin's schema that costs.** On first start SDK 0.28.4
+migrated each store's own local storage (its SQLite `storage.sql`) from schema 44 to 48, adding six tables.
+A 1.3.1 build reads the earlier schema, so downgrading needs those files restored — a copy of each is kept
+beside the host's pre-upgrade state — as well as the previous plugin directory. Without that, roll back by
+re-entering the store's recovery phrase into a fresh install rather than by swapping the binary back.
 
 ### Added
 
-- **SparkLedger**: append-only ledger recording every Lightning receive, stablecoin receive, send, sweep,
-  and unilateral exit with amount, fee, timestamp, and SDK payment reference. Enables
-  `opening_balance + SUM(credits) - SUM(debits) = current_SDK_balance` reconciliation.
-- **Backfill endpoint**: `POST /api/v1/stores/{storeId}/spark/ledger/backfill?dryRun=true` replays
-  existing settled payments into the ledger. Dry-run is the default; each payment type is idempotent.
+- **Cooperative recovery, for leaves the operators have already taken on-chain.** SDK 0.28's `RecoverFunds`
+  picks each leaf's route from what it finds on-chain: a leaf still in Spark is walked out through its
+  pre-signed tree, and a leaf the operators already moved on-chain is paid out by a single transaction they
+  co-sign. The exit page builds both, labels each transaction with its kind, and gives the right broadcast
+  instruction for each — the cooperative ones go out alone, through any node, as soon as they are ready,
+  because they pay their own fee and wait for nothing. Every leaf is labelled with the method the SDK will
+  use, so the quote explains why it does or does not ask for funding.
+- **A recovery that needs no funding says so, instead of asking for zero sats.** When every selected leaf is
+  cooperative the SDK reports no funding requirement at all; the page now says "None — nothing needs
+  funding", keeps the build button, and the build goes straight through with no funding output, no signing
+  key and no explorer lookup. That last part is not cosmetic: a store with no esplora API configured can
+  recover these leaves, where before the build would have refused for want of an explorer it did not need.
+- **A quote now says which leaves it looked at and left out, and why.** SDK 0.28 reports the skipped set
+  with a reason per leaf, several of them actionable — "recovering it would cost more than it is worth at
+  this fee rate" is answered by a lower rate, "the operators could not be reached to locate its funds" by
+  trying again — where before a shorter list than expected had no explanation at all. The reasons appear in
+  the answer to the press that quoted them, and in the log.
+- **A cooperative leaf the operators refuse is shown beside the set, not swallowed.** A build co-signs
+  cooperative leaves one at a time and does not fail when one is refused: the SDK builds the rest and lists
+  the refusals. The page now carries that list, with the SDK's reason and the fee rate a replacement would
+  need, and says plainly that the transactions below it are a complete recovery of everything else and that
+  the refused leaf needs an attempt of its own. It is stored with the transaction set, so it survives a
+  reload days later rather than existing only in the message from one press.
 
-## [1.3.1.1] - 2026-11-12
+### Changed
 
-### Added
-
-- **Send payment**: send a Lightning payment from the store wallet directly from the BTCPay plugin UI.
-- **Receive payment**: generate a BOLT11 invoice with optional amount and description; QR code shown inline.
-- **Wallet history**: paginated payment history with direction filter (All / Received / Sent), period filter
-  (All time / 7 days / 30 days), and one-click BOLT11 copy.
-- **SparkPluginUpdateChecker**: the plugin checks for newer releases on GitHub and shows a dismissible
-  notice in the BTCPay admin UI. Fork-specific; not sent upstream.
+- **Breez Spark SDK 0.26.1 → 0.28.4.** The unilateral-exit calls became the recovery calls, the response
+  grew the cooperative half described above, and the leaves a selection covers are now reported whether
+  recovered or skipped. Three smaller renames came with it, none of which change behaviour here: a BOLT11
+  receive can carry a preimage (the plugin still lets the service provider hold it, as before, so its
+  invoices are not hold invoices), the deposit claim fee cap is a wrapper around an on-chain part plus an
+  optional share of the amount (the plugin sets the on-chain part and leaves the share unset, which is the
+  shape its own ceiling has always had), and a deposit claim that exceeds the cap no longer reports the rate
+  it would have needed — only the fee in sats, which is the figure the operator acts on.
+- **This release can only talk to Spark operators that speak the 0.27 protocol.** The four tree-node status
+  values that arrived in 0.27 are sent in the SDK's status filters, and an older operator rejects them
+  outright, so a wallet on such a network fails every sync rather than degrading. Lightspark's operators —
+  what a store uses unless it has been pointed at a private network — are current, and the mainnet test host
+  synced normally; a self-hosted Spark deployment on August-era operators would need to be upgraded before
+  this plugin version can serve it.
+- **Recovery selection is `All`, deliberately.** The SDK now offers "only the leaves that already left the
+  balance" and "every leaf worth recovering". An emergency exit of a live balance is the second, so an
+  automatic selection asks for it by name; picking the narrower one would quietly report "nothing worth
+  recovering" for exactly the funds this feature exists to rescue. A resumed exit still pins its leaf ids
+  with `Specific`, unchanged.
+- **BTCPay Server submodule v2.4.6 → v2.4.7.** The declared support floor stays at 2.4.1 — raising it is a
+  support decision and lowering it an engineering claim, and a build against a newer server is neither. The
+  end-to-end BTCPay image moved with it, by multi-arch digest, so CI exercises the same server version the
+  plugin is compiled against rather than one behind it.
+- **SSH.NET 2026.0.0 → 2026.0.1**, the transitive-vulnerability pin, and **xunit.v3 4.0.2 → 4.0.3** for the
+  test project. CI's own actions moved to `actions/setup-dotnet` 6.1.0, `docker/login-action` 4.8.0 and
+  `docker/bake-action` 7.5.0.
 
 ### Fixed
 
-- Sweep engine: `GetInfo(ensureSynced: false)` is now used after the explicit `SyncWalletAsync` calls
-  at the three sweep balance reads. `ensureSynced: true` is a no-op after any SDK sync; `SyncWalletAsync`
-  is what makes the balance current. No behaviour change — the balance was already fresh.
-- Razor view compatibility for SDK 10.0.400: moved script tags out of Razor code blocks in
-  `LNPaymentMethodSetupTabhead.cshtml`, `StablecoinCheckout.cshtml`, and `StablecoinInvoicePayments.cshtml`
-  to avoid parser errors with the stricter Razor source generator shipped in dotnet 10.0.400.
+- **Completing an exit no longer assumes there is a sweep.** Completion asks whether every transaction in the
+  set is in a block; a set recovered entirely cooperatively has no sweep, so the old wording and the old
+  confirmation rule described a transaction that would never exist.
 
-### Maintenance
+## [1.3.1.4] — 2026-11-21
 
-- `btcpayserver` submodule pinned to v2.4.6 (reverted from a post-release commit that introduced a
-  `VerifyAddress.razor` incompatible with SDK 10.0.400).
-- `Directory.Build.props`: suppress cascading Razor/CS errors from both the plugin and the btcpayserver
-  submodule when building with SDK 10.0.400.
+### Fixed
+
+- **Sweep fee double-counting** (`BackfillSweepsAsync`, `SparkSweepEngine`): `AmountMsat` corrected to
+  `RecipientAmountSats * 1000` (net) when `FeesIncluded=true`.
+- **Backfill API response** (`GreenfieldSparkController`): `sdkPayments` now exposed as a sibling field.
+
+### Security
+
+- **Reconciliation integrity**: double-fee-counting caused `SUM(debit) > SDK balance` by `2 * SUM(sweep_fees)`.
+  BTCfactura showed -2,940 sats discrepancy. Data correction required after deploy: re-run backfill for
+  affected sweeps.
 
 ## [1.3.1] — 2026-10-14
 
