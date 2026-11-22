@@ -268,7 +268,7 @@ public class SparkInvoiceCreditor
         {
             // The ordinary case: BTCPay's own listener was watching and credited it. Marking it here is what
             // stops every later pass asking again.
-            await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
+            await MarkCreditedAsync(record, match.InvoiceId, match.RateEur, match.RateRon, match.RateAt, cancellationToken).ConfigureAwait(false);
             return SparkInvoiceCreditResult.AlreadyRecorded;
         }
 
@@ -294,7 +294,7 @@ public class SparkInvoiceCreditor
                     "Store {StoreId}: the Lightning payment {PaymentHash} was credited to BTCPay invoice "
                     + "{InvoiceId}, which was no longer being watched for it",
                     record.StoreId, record.PaymentHash, match.InvoiceId);
-                await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
+                await MarkCreditedAsync(record, match.InvoiceId, match.RateEur, match.RateRon, match.RateAt, cancellationToken).ConfigureAwait(false);
                 return SparkInvoiceCreditResult.Credited;
 
             case SparkInvoiceCreditOutcome.AlreadyRecorded:
@@ -304,7 +304,7 @@ public class SparkInvoiceCreditor
                     "Store {StoreId}: BTCPay invoice {InvoiceId} already held the Lightning payment "
                     + "{PaymentHash}",
                     record.StoreId, match.InvoiceId, record.PaymentHash);
-                await MarkCreditedAsync(record, match.InvoiceId, cancellationToken).ConfigureAwait(false);
+                await MarkCreditedAsync(record, match.InvoiceId, match.RateEur, match.RateRon, match.RateAt, cancellationToken).ConfigureAwait(false);
                 return SparkInvoiceCreditResult.AlreadyRecorded;
 
             case SparkInvoiceCreditOutcome.PromptMissing:
@@ -383,6 +383,9 @@ public class SparkInvoiceCreditor
     private async Task MarkCreditedAsync(
         InvoiceRecord record,
         string? btcPayInvoiceId,
+        decimal? rateEur,
+        decimal? rateRon,
+        DateTimeOffset? rateAt,
         CancellationToken cancellationToken)
     {
         var creditedAt = DateTimeOffset.UtcNow;
@@ -414,6 +417,10 @@ public class SparkInvoiceCreditor
                 BtcPayInvoiceId = btcPayInvoiceId,
                 Description = record.Description,
                 IsBackfill = false,
+                InvoiceRateEur = rateEur,
+                InvoiceRateRon = rateRon,
+                InvoiceRateSource = rateEur is not null || rateRon is not null ? "btcpay_invoice" : null,
+                InvoiceRateAt = rateAt,
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

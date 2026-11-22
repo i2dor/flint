@@ -78,7 +78,10 @@
         else
         {
             <form method="post" asp-action="Receive" asp-route-storeId="@Model.StoreId">
-                <div asp-validation-summary="All" class="alert alert-danger" role="alert"></div>
+                @if (ViewData.ModelState.ErrorCount > 0)
+                {
+                    <div asp-validation-summary="All" class="alert alert-danger" role="alert"></div>
+                }
 
                 <div class="mb-3">
                     <label asp-for="AmountSats" class="form-label">Amount (sat)</label>

@@ -64,6 +64,16 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
 
     private sealed record Row(string InvoiceId, string StoreId, string PaymentMethodId);
 
+    private readonly Dictionary<string, (decimal? RateEur, decimal? RateRon, DateTimeOffset? RateAt)> _rates
+        = new(StringComparer.Ordinal);
+
+    /// <summary>Configures the rates the gateway will attach to a match for <paramref name="paymentHash"/>.</summary>
+    public void WithRates(string paymentHash, decimal? rateEur, decimal? rateRon, DateTimeOffset? rateAt = null)
+    {
+        lock (_gate)
+            _rates[paymentHash] = (rateEur, rateRon, rateAt ?? DateTimeOffset.UtcNow);
+    }
+
     /// <summary>An invoice's current payment prompt: the BOLT11 it offers now, and its preimage once known.</summary>
     private sealed class Prompt
     {
@@ -207,11 +217,16 @@ public sealed class FakeInvoiceCreditGateway : IInvoiceCreditGateway
             {
                 return Task.FromResult<SparkInvoiceCreditMatch?>(null);
             }
+            var alreadyHas = _payments.Contains((paymentHash, row.PaymentMethodId));
+            _rates.TryGetValue(paymentHash, out var rates);
             var match = new SparkInvoiceCreditMatch(
                 row.InvoiceId,
                 row.StoreId,
                 row.PaymentMethodId,
-                _payments.Contains((paymentHash, row.PaymentMethodId)));
+                alreadyHas,
+                rates.RateEur,
+                rates.RateRon,
+                rates.RateAt);
             if (_creditedByBTCPayAfterNextLookup.Remove(paymentHash))
                 _payments.Add((paymentHash, row.PaymentMethodId));
             return Task.FromResult<SparkInvoiceCreditMatch?>(match);

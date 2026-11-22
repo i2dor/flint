@@ -354,6 +354,7 @@ public class SparkPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<IStablecoinQuoteStore, EfStablecoinQuoteStore>();
         services.AddSingleton<IUnilateralExitRecordStore, EfUnilateralExitRecordStore>();
         services.AddSingleton<ISparkLedgerStore, EfSparkLedgerStore>();
+        services.AddSingleton<SparkLedgerQueryService>();
         services.AddSingleton<SparkLedgerBackfillService>();
         services.AddDbContext<SparkPluginDbContext>((provider, options) =>
         {

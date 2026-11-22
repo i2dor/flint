@@ -97,6 +97,7 @@ public class SparkController : Controller
     private readonly CrossChainCatalog _crossChainCatalog;
     private readonly StablecoinPaymentService _stablecoins;
     private readonly SparkSendPaymentService _sendPayment;
+    private readonly SparkLedgerQueryService _ledgerQuery;
     private readonly IAuthorizationService _authorizationService;
     private readonly ILogger<SparkController> _logger;
 
@@ -116,6 +117,7 @@ public class SparkController : Controller
         CrossChainCatalog crossChainCatalog,
         StablecoinPaymentService stablecoins,
         SparkSendPaymentService sendPayment,
+        SparkLedgerQueryService ledgerQuery,
         IAuthorizationService authorizationService,
         ILogger<SparkController> logger)
     {
@@ -134,6 +136,7 @@ public class SparkController : Controller
         _crossChainCatalog = crossChainCatalog;
         _stablecoins = stablecoins;
         _sendPayment = sendPayment;
+        _ledgerQuery = ledgerQuery;
         _authorizationService = authorizationService;
         _logger = logger;
     }
@@ -2084,10 +2087,13 @@ public class SparkController : Controller
     [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanViewStoreSettings)]
     public async Task<IActionResult> WalletHistory(
         [FromRoute] string storeId,
-        [FromQuery] string? direction,
+        [FromQuery] string? direction = null,
         [FromQuery] int period = 0,
         [FromQuery] int skip = 0,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        [FromQuery] string? type = null,
+        [FromQuery] string? asset = null,
+        [FromQuery] string? chain = null)
     {
         if (!ResolveStore(storeId, out var store))
             return NotFound();
@@ -2097,36 +2103,86 @@ public class SparkController : Controller
         if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
             return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
 
-        const int pageSize = 25;
+        const int pageSize = 50;
         skip = Math.Max(0, skip);
 
-        SparkPaymentDirection? dir = direction switch
+        var filters = new SparkLedgerFilters
         {
-            "send"    => SparkPaymentDirection.Send,
-            "receive" => SparkPaymentDirection.Receive,
-            _         => null
+            Direction = direction,
+            Period    = period,
+            Type      = type,
+            Asset     = asset,
+            Chain     = chain,
         };
 
-        DateTimeOffset? from = period > 0
-            ? DateTimeOffset.UtcNow.AddDays(-period)
-            : null;
+        var page = await _ledgerQuery.QueryAsync(storeId, filters, skip, pageSize, cancellationToken)
+            .ConfigureAwait(false);
 
-        var raw = await _sendPayment.ListAllAsync(
-            storeId, dir, from, skip, pageSize + 1, cancellationToken).ConfigureAwait(false);
+        var canModify = await _authorizationService
+            .AuthorizeAsync(User, storeId, Policies.CanModifyStoreSettings)
+            .ConfigureAwait(false);
 
-        var hasMore = raw.Count > pageSize;
-        var payments = hasMore ? raw.Take(pageSize).ToList() : raw;
-
-        return View(new SparkWalletHistoryViewModel
+        return View(new SparkLedgerHistoryViewModel
         {
-            StoreId   = storeId,
-            Payments  = payments,
-            Direction = dir,
-            Period    = period,
-            Skip      = skip,
-            Count     = pageSize,
-            HasMore   = hasMore
+            StoreId          = storeId,
+            Rows             = page.Rows,
+            Totals           = page.Totals,
+            PendingQuotes    = page.PendingQuotes,
+            Filters          = filters,
+            Skip             = skip,
+            PageSize         = pageSize,
+            HasMore          = page.HasMore,
+            TotalCount       = page.TotalCount,
+            CanExportCsv     = canModify.Succeeded,
+            StablecoinTotals = page.StablecoinTotals,
+            AvailableAssets  = page.AvailableAssets,
+            AvailableChains  = page.AvailableChains,
         });
+    }
+
+    [HttpGet("history/export")]
+    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie, Policy = Policies.CanModifyStoreSettings)]
+    public async Task<IActionResult> WalletHistoryExport(
+        [FromRoute] string storeId,
+        [FromQuery] string? direction = null,
+        [FromQuery] int period = 0,
+        CancellationToken cancellationToken = default,
+        [FromQuery] string? type = null,
+        [FromQuery] string? asset = null,
+        [FromQuery] string? chain = null)
+    {
+        if (!ResolveStore(storeId, out var store))
+            return NotFound();
+
+        storeId = store.Id;
+
+        if (await _settingsStore.GetAsync(storeId).ConfigureAwait(false) is null)
+            return await RedirectToSetupOrDeny(storeId).ConfigureAwait(false);
+
+        var filters = new SparkLedgerFilters
+        {
+            Direction = direction,
+            Period    = period,
+            Type      = type,
+            Asset     = asset,
+            Chain     = chain,
+        };
+
+        var fileName = $"flint-history-{storeId[..Math.Min(8, storeId.Length)]}-" +
+                       $"{DateTimeOffset.UtcNow:yyyyMMdd}.csv";
+
+        Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
+        Response.ContentType = "text/csv; charset=utf-8";
+
+        // Write a UTF-8 BOM so Excel opens accented characters correctly.
+        await Response.Body.WriteAsync(
+            new byte[] { 0xEF, 0xBB, 0xBF }, cancellationToken).ConfigureAwait(false);
+
+        await using var writer = new StreamWriter(Response.Body, System.Text.Encoding.UTF8, leaveOpen: true);
+        await _ledgerQuery.WriteCsvAsync(storeId, filters, writer, cancellationToken).ConfigureAwait(false);
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        return new EmptyResult();
     }
 
     #endregion

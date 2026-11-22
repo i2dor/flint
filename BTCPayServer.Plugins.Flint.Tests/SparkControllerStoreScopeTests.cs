@@ -180,6 +180,7 @@ public class SparkControllerStoreScopeTests
     [InlineData("Send GET")]
     [InlineData("Send POST")]
     [InlineData("WalletHistory GET")]
+    [InlineData("WalletHistoryExport GET")]
     [InlineData("Remove GET")]
     [InlineData("RemoveConfirmed POST")]
     public async Task Every_action_refuses_a_store_id_that_is_not_the_authorised_store(string action)
@@ -249,6 +250,7 @@ public class SparkControllerStoreScopeTests
             "Send GET" => await h.Mvc.Send(VictimStore, ct),
             "Send POST" => await h.Mvc.Send(VictimStore, new SparkSendViewModel(), ct),
             "WalletHistory GET" => await h.Mvc.WalletHistory(VictimStore, null, 0, 0, ct),
+            "WalletHistoryExport GET" => await h.Mvc.WalletHistoryExport(VictimStore, null, 0, ct),
             "Remove GET" => await h.Mvc.Remove(VictimStore, ct),
             "RemoveConfirmed POST" => await h.Mvc.RemoveConfirmed(VictimStore),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action, "No invocation for this row.")

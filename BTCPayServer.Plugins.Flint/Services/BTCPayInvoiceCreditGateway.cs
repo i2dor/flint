@@ -8,6 +8,7 @@ using BTCPayServer.Lightning;
 using BTCPayServer.Payments;
 using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Plugins.Flint.Data;
+using BTCPayServer.Rating;
 using BTCPayServer.Services.Invoices;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
@@ -151,8 +152,10 @@ public sealed class BTCPayInvoiceCreditGateway : IInvoiceCreditGateway
                 .GetPayments(false)
                 .Any(p => p.Id == paymentHash && p.PaymentMethodId == paymentMethodId);
 
+            var (rateEur, rateRon, rateAt) = SnapshotRates(invoice);
             return new SparkInvoiceCreditMatch(
-                invoice.Id, invoice.StoreId, paymentMethodId.ToString(), alreadyHasPayment);
+                invoice.Id, invoice.StoreId, paymentMethodId.ToString(), alreadyHasPayment,
+                rateEur, rateRon, rateAt);
         }
 
         // Core's own table has no row for this hash. That is the ordinary answer for a BOLT11 that was never
@@ -182,8 +185,18 @@ public sealed class BTCPayInvoiceCreditGateway : IInvoiceCreditGateway
             .GetPayments(false)
             .Any(p => p.Id == paymentHash && p.PaymentMethodId == indexedPaymentMethodId);
 
+        var (indexedRateEur, indexedRateRon, indexedRateAt) = SnapshotRates(indexedInvoice);
         return new SparkInvoiceCreditMatch(
-            indexedInvoice.Id, indexedInvoice.StoreId, entry.PaymentMethodId, alreadyRecorded);
+            indexedInvoice.Id, indexedInvoice.StoreId, entry.PaymentMethodId, alreadyRecorded,
+            indexedRateEur, indexedRateRon, indexedRateAt);
+    }
+
+    private static (decimal? RateEur, decimal? RateRon, DateTimeOffset RateAt) SnapshotRates(
+        InvoiceEntity invoice)
+    {
+        decimal? rateEur = invoice.TryGetRate(new CurrencyPair("BTC", "EUR"), out var eur) ? eur : null;
+        decimal? rateRon = invoice.TryGetRate(new CurrencyPair("BTC", "RON"), out var ron) ? ron : null;
+        return (rateEur, rateRon, invoice.InvoiceTime);
     }
 
     /// <inheritdoc />
