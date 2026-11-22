@@ -4,15 +4,15 @@
     "net10.0": {
       "Breez.Sdk.Spark": {
         "type": "Direct",
-        "requested": "[0.26.1, 0.26.1]",
-        "resolved": "0.26.1",
-        "contentHash": "dq7hpjZrNznEV8YPC9JDMBUjsarbDnMT6c0u/HIyods4JwpmCR5F/RoVn4D3AWIcVR+10VlpMmoffYWlTynF1g=="
+        "requested": "[0.28.4, 0.28.4]",
+        "resolved": "0.28.4",
+        "contentHash": "TKzKujOJbx506t4j5I7YjtY6E8lG3VpmZu9Jg1gyFaA4yhVQ4f3IXT0C9t1QspllHvdYN5sxyhOnAprnLPSGTA=="
       },
       "SSH.NET": {
         "type": "Direct",
-        "requested": "[2026.0.0, )",
-        "resolved": "2026.0.0",
-        "contentHash": "Yu9dirPq8l3oaat0+OQ7K0nUf5MmYltpia5UGqsApTG4zTPvBC1cxbNnC3NERij26dUST0A3Ef1QdHSn5ArbWQ==",
+        "requested": "[2026.0.1, )",
+        "resolved": "2026.0.1",
+        "contentHash": "74/nnq/n7EZLGLsUTt4aEE+/iet3B6ahi2iFfXgRXb6rNAvxsxLwbhLZ6lzITfAEB1vkmuAI3gXxOp2HcUMa2g==",
         "dependencies": {
           "BouncyCastle.Cryptography": "2.7.0",
           "Microsoft.Extensions.Logging.Abstractions": "8.0.3"
