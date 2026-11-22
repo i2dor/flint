@@ -26,6 +26,8 @@
     string DirUrl(string? dir)    => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = dir,  type = f.Type,  asset = f.Asset,  chain = f.Chain,  period = f.Period, skip = 0 }) ?? "#";
     string TypeUrl(string? type)  => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type,         asset = f.Asset,  chain = f.Chain,  period = f.Period, skip = 0 }) ?? "#";
     string PeriodUrl(int period)  => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type,  asset = f.Asset,  chain = f.Chain,  period,            skip = 0 }) ?? "#";
+    string AssetUrl(string? asset) => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type, asset,             chain = f.Chain,  period = f.Period, skip = 0 }) ?? "#";
+    string ChainUrl(string? chain) => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type, asset = f.Asset,  chain,             period = f.Period, skip = 0 }) ?? "#";
     string PageUrl(int skip)      => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type,  asset = f.Asset,  chain = f.Chain,  period = f.Period, skip }) ?? "#";
     string ExportUrl()            => Url.Action("WalletHistoryExport", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type, asset = f.Asset, chain = f.Chain, period = f.Period }) ?? "#";
 
@@ -67,6 +69,28 @@
         <a class="btn btn-sm @(f.Period == 90 ? "btn-secondary" : "btn-outline-secondary")" href="@PeriodUrl(90)">90 days</a>
     </div>
 
+    @if (Model.AvailableAssets.Count > 0)
+    {
+        <div class="btn-group" role="group" aria-label="Filter by asset">
+            <a class="btn btn-sm @(f.Asset == null ? "btn-secondary" : "btn-outline-secondary")" href="@AssetUrl(null)">All assets</a>
+            @foreach (var asset in Model.AvailableAssets)
+            {
+                <a class="btn btn-sm @(f.Asset == asset ? "btn-secondary" : "btn-outline-secondary")" href="@AssetUrl(asset)">@asset</a>
+            }
+        </div>
+    }
+
+    @if (Model.AvailableChains.Count > 0)
+    {
+        <div class="btn-group" role="group" aria-label="Filter by chain">
+            <a class="btn btn-sm @(f.Chain == null ? "btn-secondary" : "btn-outline-secondary")" href="@ChainUrl(null)">All chains</a>
+            @foreach (var chain in Model.AvailableChains)
+            {
+                <a class="btn btn-sm @(f.Chain == chain ? "btn-secondary" : "btn-outline-secondary")" href="@ChainUrl(chain)">@SparkLedgerQueryService.ChainDisplayName(chain)</a>
+            }
+        </div>
+    }
+
     @if (Model.CanExportCsv)
     {
         <a class="btn btn-sm btn-outline-primary ms-auto" href="@ExportUrl()">
@@ -90,6 +114,16 @@
         </span>
         <span class="text-secondary ms-auto">@Model.TotalCount.ToString("N0", CultureInfo.InvariantCulture) entries</span>
     </div>
+    @if (Model.StablecoinTotals.Count > 0)
+    {
+        <div class="d-flex flex-wrap gap-3 mb-3 small">
+            <span class="text-secondary">Stablecoin received:</span>
+            @foreach (var st in Model.StablecoinTotals)
+            {
+                <span><strong>@st.FormattedAmount</strong></span>
+            }
+        </div>
+    }
 }
 
 @* ---- Table ---- *@
@@ -220,6 +254,16 @@ else
                                 {
                                     <div>BTCPay invoice: <span class="font-monospace user-select-all">@e.BtcPayInvoiceId</span></div>
                                 }
+                                @if (!string.IsNullOrEmpty(row.WcOrderId))
+                                {
+                                    <div>WooCommerce order: <span class="font-monospace">#@row.WcOrderId</span></div>
+                                }
+                                @if (e.EntryType == SparkLedgerEntryType.StablecoinReceive)
+                                {
+                                    var convStatus = e.SdkPaymentId is not null ? "Completed" : "Pending";
+                                    var convClass  = e.SdkPaymentId is not null ? "text-success" : "text-warning";
+                                    <div>Conversion: <span class="@convClass">@convStatus</span></div>
+                                }
                                 @if (e.StablecoinExternalTxHash is { } txHash && stableTxUrl is null)
                                 {
                                     @* Hash present but chain unknown - show it without a link *@
@@ -305,10 +349,9 @@ else
     </div>
 }
 
-@* ---- Client-side: local time conversion ---- *@
-<script>
+@section PageFootContent {
+    <script>
     (function () {
-        // Show browser-local time in a small second line under each UTC timestamp.
         document.querySelectorAll('.spark-ts-local[data-utc]').forEach(function (el) {
             try {
                 var d = new Date(el.dataset.utc);
@@ -319,4 +362,5 @@ else
             } catch (e) { /* ignore */ }
         });
     })();
-</script>
+    </script>
+}

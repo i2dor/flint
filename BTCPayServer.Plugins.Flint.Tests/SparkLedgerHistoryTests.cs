@@ -159,6 +159,41 @@ public class SparkLedgerHistoryTests
         Assert.Equal(expected, SparkLedgerQueryService.IsCredit(type));
     }
 
+    // ---- XSS / HTML injection -----------------------------------------------
+
+    // The Razor view renders Description, PaymentHash, etc. via @expr which auto-HTML-encodes output.
+    // No Html.Raw calls exist in WalletHistory.cshtml (confirmed by grep: 0 matches).
+    // These tests verify the CSV path, which uses SanitizeCsvField for every field.
+
+    [Fact]
+    public void SanitizeCsvField_wraps_script_tag_in_csv_quotes_no_formula_prefix()
+    {
+        // A <script> tag does not start with an injection char, so no "'" prefix.
+        // It must still be safely wrapped in CSV double-quotes with any embedded quotes doubled.
+        var input  = "<script>alert(1)</script>";
+        var result = SparkLedgerQueryService.SanitizeCsvField(input);
+        Assert.Equal("\"<script>alert(1)</script>\"", result);
+    }
+
+    [Fact]
+    public void SanitizeCsvField_handles_xss_with_embedded_double_quotes()
+    {
+        var input  = "<img src=x onerror=\"alert(1)\">";
+        var result = SparkLedgerQueryService.SanitizeCsvField(input);
+        // Embedded " must be doubled; whole field wrapped in quotes.
+        Assert.Equal("\"<img src=x onerror=\"\"alert(1)\"\">\"", result);
+    }
+
+    [Fact]
+    public void SanitizeCsvField_handles_combined_xss_and_formula_injection()
+    {
+        // Starts with '=' (formula injection) AND contains HTML.
+        var input  = "=<script>alert(1)</script>";
+        var result = SparkLedgerQueryService.SanitizeCsvField(input);
+        // "'" prefix added because first char is '='; then wrapped in quotes.
+        Assert.Equal("\"'=<script>alert(1)</script>\"", result);
+    }
+
     // ---- ChainDisplayName ----------------------------------------------------
 
     [Theory]

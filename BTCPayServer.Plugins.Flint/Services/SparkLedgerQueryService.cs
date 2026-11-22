@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Models;
+using BTCPayServer.Services.Invoices;
 using Microsoft.EntityFrameworkCore;
 
 namespace BTCPayServer.Plugins.Flint.Services;
@@ -35,9 +36,13 @@ public sealed class SparkLedgerQueryService
     private static readonly Regex SolanaBase58   = new(@"^[1-9A-HJ-NP-Za-km-z]{87,88}$", RegexOptions.Compiled);
 
     private readonly SparkPluginDbContextFactory _factory;
+    private readonly InvoiceRepository _invoiceRepository;
 
-    public SparkLedgerQueryService(SparkPluginDbContextFactory factory)
-        => _factory = factory;
+    public SparkLedgerQueryService(SparkPluginDbContextFactory factory, InvoiceRepository invoiceRepository)
+    {
+        _factory = factory;
+        _invoiceRepository = invoiceRepository;
+    }
 
     // ---- Query -----------------------------------------------------------------
 
@@ -63,10 +68,45 @@ public sealed class SparkLedgerQueryService
         var hasMore = entries.Count > pageSize;
         if (hasMore) entries.RemoveAt(entries.Count - 1);
 
-        var rows = await AttachDecimalsAsync(ctx, entries, ct).ConfigureAwait(false);
+        List<SparkLedgerRow> rows = [.. (await AttachDecimalsAsync(ctx, entries, ct).ConfigureAwait(false))];
+
+        // Attach WC order IDs from BTCPay invoice metadata (one batch query).
+        var invoiceIds = rows
+            .Select(r => r.Entry.BtcPayInvoiceId)
+            .Where(id => id is not null)
+            .Cast<string>()
+            .Distinct()
+            .ToArray();
+
+        if (invoiceIds.Length > 0)
+        {
+            var invoices = await _invoiceRepository.GetInvoices(new InvoiceQuery
+            {
+                InvoiceId = invoiceIds,
+                StoreId   = [storeId],
+            }, ct).ConfigureAwait(false);
+
+            var orderIdByInvoiceId = invoices
+                .Where(inv => inv.Metadata.OrderId is not null)
+                .ToDictionary(inv => inv.Id, inv => inv.Metadata.OrderId!);
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i];
+                if (r.Entry.BtcPayInvoiceId is not null
+                    && orderIdByInvoiceId.TryGetValue(r.Entry.BtcPayInvoiceId, out var oid))
+                    rows[i] = r with { WcOrderId = oid };
+            }
+        }
 
         // Totals use the same filters but without pagination.
         var totals = await ComputeTotalsAsync(ctx, storeId, filters, ct).ConfigureAwait(false);
+
+        // Stablecoin totals per asset/chain for the current filter.
+        var stablecoinTotals = await ComputeStablecoinTotalsAsync(ctx, storeId, filters, ct).ConfigureAwait(false);
+
+        // Available assets/chains across the whole store (for filter buttons).
+        var (availableAssets, availableChains) = await GetAvailableFiltersAsync(ctx, storeId, ct).ConfigureAwait(false);
 
         // Pending: unsettled stablecoin quotes still within the match window.
         var window = DateTimeOffset.UtcNow - PendingMatchWindow;
@@ -76,7 +116,8 @@ public sealed class SparkLedgerQueryService
             .ToListAsync(ct)
             .ConfigureAwait(false);
 
-        return new SparkLedgerPage(rows, totals, pending, skip, pageSize, hasMore, total);
+        return new SparkLedgerPage(rows, totals, pending, skip, pageSize, hasMore, total,
+            stablecoinTotals, availableAssets, availableChains);
     }
 
     // ---- CSV export ------------------------------------------------------------
@@ -257,6 +298,74 @@ public sealed class SparkLedgerQueryService
 
         if (agg is null) return new SparkLedgerTotals();
         return new SparkLedgerTotals(agg.InMsat, agg.OutMsat, agg.FeeMsat);
+    }
+
+    private static async Task<IReadOnlyList<StablecoinAssetTotal>> ComputeStablecoinTotalsAsync(
+        SparkPluginDbContext ctx,
+        string storeId,
+        SparkLedgerFilters filters,
+        CancellationToken ct)
+    {
+        var rows = await BuildBaseQuery(ctx, storeId, filters)
+            .Where(e => e.EntryType == SparkLedgerEntryType.StablecoinReceive
+                     && e.StablecoinPaidBaseUnits != null
+                     && e.StablecoinAsset != null
+                     && e.StablecoinChain != null
+                     && e.StablecoinQuoteId != null)
+            .Select(e => new
+            {
+                e.StablecoinAsset,
+                e.StablecoinChain,
+                e.StablecoinPaidBaseUnits,
+                e.StablecoinQuoteId,
+            })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        if (rows.Count == 0) return [];
+
+        var quoteIds = rows.Select(r => r.StablecoinQuoteId!).Distinct().ToList();
+        var decimalsMap = await ctx.StablecoinQuotes
+            .Where(q => quoteIds.Contains(q.Id))
+            .ToDictionaryAsync(q => q.Id, q => q.Decimals, ct)
+            .ConfigureAwait(false);
+
+        return rows
+            .GroupBy(r => (r.StablecoinAsset!.ToUpperInvariant(), r.StablecoinChain!.ToLowerInvariant()))
+            .Select(g =>
+            {
+                var asset = g.Key.Item1;
+                var chain = g.Key.Item2;
+                var dec   = g.Select(r => decimalsMap.TryGetValue(r.StablecoinQuoteId!, out var d) ? d : 6)
+                             .FirstOrDefault(d => d != 0, 6);
+                var total = g.Aggregate(BigInteger.Zero, (sum, r) =>
+                    BigInteger.TryParse(r.StablecoinPaidBaseUnits, NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out var units) ? sum + units : sum);
+                var formatted = FormatStablecoinAmount(total.ToString(CultureInfo.InvariantCulture), asset, chain, dec)
+                                ?? $"{total} {asset}";
+                return new StablecoinAssetTotal(asset, chain, formatted);
+            })
+            .OrderBy(st => st.Asset).ThenBy(st => st.Chain)
+            .ToList();
+    }
+
+    private static async Task<(IReadOnlyList<string> Assets, IReadOnlyList<string> Chains)> GetAvailableFiltersAsync(
+        SparkPluginDbContext ctx,
+        string storeId,
+        CancellationToken ct)
+    {
+        var pairs = await ctx.SparkLedger
+            .Where(e => e.StoreId == storeId
+                     && e.EntryType == SparkLedgerEntryType.StablecoinReceive
+                     && e.StablecoinAsset != null
+                     && e.StablecoinChain != null)
+            .Select(e => new { e.StablecoinAsset, e.StablecoinChain })
+            .Distinct()
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var assets = pairs.Select(p => p.StablecoinAsset!.ToUpperInvariant()).Distinct().OrderBy(a => a).ToList<string>();
+        var chains = pairs.Select(p => p.StablecoinChain!.ToLowerInvariant()).Distinct().OrderBy(c => c).ToList<string>();
+
+        return (assets, chains);
     }
 
     private static async Task<IReadOnlyList<SparkLedgerRow>> AttachDecimalsAsync(

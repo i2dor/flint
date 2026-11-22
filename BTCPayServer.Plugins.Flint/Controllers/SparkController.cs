@@ -2124,16 +2124,19 @@ public class SparkController : Controller
 
         return View(new SparkLedgerHistoryViewModel
         {
-            StoreId      = storeId,
-            Rows         = page.Rows,
-            Totals       = page.Totals,
-            PendingQuotes = page.PendingQuotes,
-            Filters      = filters,
-            Skip         = skip,
-            PageSize     = pageSize,
-            HasMore      = page.HasMore,
-            TotalCount   = page.TotalCount,
-            CanExportCsv = canModify.Succeeded,
+            StoreId          = storeId,
+            Rows             = page.Rows,
+            Totals           = page.Totals,
+            PendingQuotes    = page.PendingQuotes,
+            Filters          = filters,
+            Skip             = skip,
+            PageSize         = pageSize,
+            HasMore          = page.HasMore,
+            TotalCount       = page.TotalCount,
+            CanExportCsv     = canModify.Succeeded,
+            StablecoinTotals = page.StablecoinTotals,
+            AvailableAssets  = page.AvailableAssets,
+            AvailableChains  = page.AvailableChains,
         });
     }
 

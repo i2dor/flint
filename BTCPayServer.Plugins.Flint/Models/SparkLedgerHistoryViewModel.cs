@@ -6,7 +6,10 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 namespace BTCPayServer.Plugins.Flint.Models;
 
 /// <summary>Row returned by <see cref="Services.SparkLedgerQueryService"/>.</summary>
-public record SparkLedgerRow(SparkLedgerEntry Entry, int? StablecoinDecimals);
+public record SparkLedgerRow(SparkLedgerEntry Entry, int? StablecoinDecimals, string? WcOrderId = null);
+
+/// <summary>Stablecoin received total for one asset/chain combination.</summary>
+public record StablecoinAssetTotal(string Asset, string Chain, string FormattedAmount);
 
 /// <summary>Aggregated totals over the filtered period.</summary>
 public record SparkLedgerTotals(long TotalInMsat = 0, long TotalOutMsat = 0, long TotalFeeMsat = 0)
@@ -41,7 +44,10 @@ public record SparkLedgerPage(
     int Skip,
     int PageSize,
     bool HasMore,
-    long TotalCount);
+    long TotalCount,
+    IReadOnlyList<StablecoinAssetTotal> StablecoinTotals,
+    IReadOnlyList<string> AvailableAssets,
+    IReadOnlyList<string> AvailableChains);
 
 /// <summary>ViewModel for the Wallet History page.</summary>
 public class SparkLedgerHistoryViewModel
@@ -62,4 +68,13 @@ public class SparkLedgerHistoryViewModel
 
     /// <summary>True when the current user has CanModifyStoreSettings; shows the CSV export button.</summary>
     public bool CanExportCsv { get; set; }
+
+    /// <summary>Stablecoin received totals per asset/chain for the current filter.</summary>
+    public IReadOnlyList<StablecoinAssetTotal> StablecoinTotals { get; set; } = [];
+
+    /// <summary>Distinct stablecoin assets present in this store (for filter buttons).</summary>
+    public IReadOnlyList<string> AvailableAssets { get; set; } = [];
+
+    /// <summary>Distinct stablecoin chains present in this store (for filter buttons).</summary>
+    public IReadOnlyList<string> AvailableChains { get; set; } = [];
 }
