@@ -29,3 +29,4 @@ e2e/local-regtest/up.log
 e2e/local-regtest/network.docker.json
 e2e/btcpay/btcpay.json
 e2e/btcpay/data/
+packed/
