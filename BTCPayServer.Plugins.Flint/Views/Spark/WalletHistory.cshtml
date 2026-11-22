@@ -1,18 +1,36 @@
-@model SparkWalletHistoryViewModel
+@model SparkLedgerHistoryViewModel
 @using System.Globalization
-@using BTCPayServer.Plugins.Flint.Sdk
+@using BTCPayServer.Plugins.Flint.Data
 @{
-    // No nav entry of its own: the page is linked from the status page and borrows the top-level entry.
     ViewData.SetLayoutModel(new LayoutModel(SparkNavPages.Spark, "Wallet history").SetCategory(SparkNavCategory.Id));
 
     BTCPayServer.ViewDataDictionaryExtensions.SetBreadcrumbs(ViewData,
         new BTCPayServer.Components.Breadcrumb.BreadcrumbItem("Flint", Action: "Status",
             Controller: "Spark", RouteValues: new { storeId = Model.StoreId }));
 
-    var dirParam   = Model.Direction switch { SparkPaymentDirection.Send => "send", SparkPaymentDirection.Receive => "receive", _ => "" };
-    var periodParam = Model.Period;
-    var prevSkip   = Math.Max(0, Model.Skip - Model.Count);
-    var nextSkip   = Model.Skip + Model.Count;
+    var f = Model.Filters;
+
+    // Build URL helper for filter links: preserve other params when changing one.
+    string FilterUrl(string? dir = null, string? type = null, string? asset = null, string? chain = null, int? period = null, int skip = 0) =>
+        Url.Action("WalletHistory", "Spark", new
+        {
+            storeId   = Model.StoreId,
+            direction = dir  ?? (dir  == null && type == null && asset == null && chain == null && period == null ? f.Direction : dir),
+            type      = type ?? f.Type,
+            asset     = asset ?? f.Asset,
+            chain     = chain ?? f.Chain,
+            period    = period ?? f.Period,
+            skip,
+        }) ?? "#";
+
+    string DirUrl(string? dir)    => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = dir,  type = f.Type,  asset = f.Asset,  chain = f.Chain,  period = f.Period, skip = 0 }) ?? "#";
+    string TypeUrl(string? type)  => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type,         asset = f.Asset,  chain = f.Chain,  period = f.Period, skip = 0 }) ?? "#";
+    string PeriodUrl(int period)  => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type,  asset = f.Asset,  chain = f.Chain,  period,            skip = 0 }) ?? "#";
+    string PageUrl(int skip)      => Url.Action("WalletHistory", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type,  asset = f.Asset,  chain = f.Chain,  period = f.Period, skip }) ?? "#";
+    string ExportUrl()            => Url.Action("WalletHistoryExport", "Spark", new { storeId = Model.StoreId, direction = f.Direction, type = f.Type, asset = f.Asset, chain = f.Chain, period = f.Period }) ?? "#";
+
+    var prevSkip = Math.Max(0, Model.Skip - Model.PageSize);
+    var nextSkip = Model.Skip + Model.PageSize;
 }
 
 <div class="sticky-header">
@@ -21,103 +39,211 @@
 
 <partial name="_StatusMessage" />
 
-@* Direction filter *@
+@* ---- Filters ---- *@
 <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+
+    @* Direction *@
     <div class="btn-group" role="group" aria-label="Filter by direction">
-        <a class="btn btn-sm @(Model.Direction == null ? "btn-primary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="" asp-route-period="@periodParam" asp-route-skip="0">
-            All
-        </a>
-        <a class="btn btn-sm @(Model.Direction == SparkPaymentDirection.Receive ? "btn-primary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="receive" asp-route-period="@periodParam" asp-route-skip="0">
-            Received
-        </a>
-        <a class="btn btn-sm @(Model.Direction == SparkPaymentDirection.Send ? "btn-primary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="send" asp-route-period="@periodParam" asp-route-skip="0">
-            Sent
-        </a>
+        <a class="btn btn-sm @(f.Direction == null ? "btn-primary" : "btn-outline-secondary")" href="@DirUrl(null)">All</a>
+        <a class="btn btn-sm @(f.Direction == "in"  ? "btn-primary" : "btn-outline-secondary")" href="@DirUrl("in")">Received</a>
+        <a class="btn btn-sm @(f.Direction == "out" ? "btn-primary" : "btn-outline-secondary")" href="@DirUrl("out")">Sent</a>
     </div>
 
-    <div class="btn-group" role="group" aria-label="Filter by period">
-        <a class="btn btn-sm @(Model.Period == 0 ? "btn-secondary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="@dirParam" asp-route-period="0" asp-route-skip="0">
-            All time
-        </a>
-        <a class="btn btn-sm @(Model.Period == 7 ? "btn-secondary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="@dirParam" asp-route-period="7" asp-route-skip="0">
-            7 days
-        </a>
-        <a class="btn btn-sm @(Model.Period == 30 ? "btn-secondary" : "btn-outline-secondary")"
-           asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-           asp-route-direction="@dirParam" asp-route-period="30" asp-route-skip="0">
-            30 days
-        </a>
+    @* Type *@
+    <div class="btn-group" role="group" aria-label="Filter by type">
+        <a class="btn btn-sm @(f.Type == null          ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl(null)">All types</a>
+        <a class="btn btn-sm @(f.Type == "lightning"   ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl("lightning")">Lightning</a>
+        <a class="btn btn-sm @(f.Type == "stablecoin"  ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl("stablecoin")">Stablecoin</a>
+        <a class="btn btn-sm @(f.Type == "onchain"     ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl("onchain")">On-chain</a>
+        <a class="btn btn-sm @(f.Type == "send"        ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl("send")">Send</a>
+        <a class="btn btn-sm @(f.Type == "sweep"       ? "btn-secondary" : "btn-outline-secondary")" href="@TypeUrl("sweep")">Sweep</a>
     </div>
+
+    @* Period *@
+    <div class="btn-group" role="group" aria-label="Filter by period">
+        <a class="btn btn-sm @(f.Period == 0  ? "btn-secondary" : "btn-outline-secondary")" href="@PeriodUrl(0)">All time</a>
+        <a class="btn btn-sm @(f.Period == 7  ? "btn-secondary" : "btn-outline-secondary")" href="@PeriodUrl(7)">7 days</a>
+        <a class="btn btn-sm @(f.Period == 30 ? "btn-secondary" : "btn-outline-secondary")" href="@PeriodUrl(30)">30 days</a>
+        <a class="btn btn-sm @(f.Period == 90 ? "btn-secondary" : "btn-outline-secondary")" href="@PeriodUrl(90)">90 days</a>
+    </div>
+
+    @if (Model.CanExportCsv)
+    {
+        <a class="btn btn-sm btn-outline-primary ms-auto" href="@ExportUrl()">
+            <span class="fa fa-download me-1" aria-hidden="true"></span>Export CSV
+        </a>
+    }
 </div>
 
-@if (Model.Payments.Count == 0)
+@* ---- Totals ---- *@
+@if (Model.TotalCount > 0)
 {
-    <p class="text-secondary">No completed payments found.</p>
+    var t = Model.Totals;
+    <div class="d-flex flex-wrap gap-3 mb-3 small">
+        <span>In: <strong>@((t.TotalInMsat / 1000).ToString("N0", CultureInfo.InvariantCulture)) sat</strong></span>
+        <span>Out: <strong>@((t.TotalOutMsat / 1000).ToString("N0", CultureInfo.InvariantCulture)) sat</strong></span>
+        <span>Fees: <strong>@((t.TotalFeeMsat / 1000).ToString("N0", CultureInfo.InvariantCulture)) sat</strong></span>
+        <span>Net:
+            <strong class="@(t.NetMsat >= 0 ? "text-success" : "text-danger")">
+                @(t.NetMsat >= 0 ? "+" : "")@((t.NetMsat / 1000).ToString("N0", CultureInfo.InvariantCulture)) sat
+            </strong>
+        </span>
+        <span class="text-secondary ms-auto">@Model.TotalCount.ToString("N0", CultureInfo.InvariantCulture) entries</span>
+    </div>
+}
+
+@* ---- Table ---- *@
+@if (Model.Rows.Count == 0)
+{
+    <p class="text-secondary">No entries found.</p>
 }
 else
 {
     <div class="table-responsive">
-        <table class="table table-hover">
+        <table class="table table-hover align-middle">
             <thead>
                 <tr>
-                    <th>When</th>
+                    <th style="min-width:140px">Date</th>
+                    <th>Type</th>
                     <th>Direction</th>
                     <th class="text-end">Amount (sat)</th>
                     <th class="text-end">Fee (sat)</th>
-                    <th>Description / hash</th>
+                    <th>Details</th>
                     <th></th>
                 </tr>
             </thead>
             <tbody>
-                @foreach (var p in Model.Payments)
+                @foreach (var row in Model.Rows)
                 {
-                    <tr>
-                        <td>@p.Timestamp.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) UTC</td>
+                    var e = row.Entry;
+                    var rowId = "ledger-" + e.Id;
+                    var isCredit = SparkLedgerQueryService.IsCredit(e.EntryType);
+                    var amtSat = e.AmountMsat / 1000;
+                    var feeSat = e.FeeMsat   / 1000;
+
+                    var stableAmt = e.StablecoinPaidBaseUnits is not null
+                        ? SparkLedgerQueryService.FormatStablecoinAmount(
+                            e.StablecoinPaidBaseUnits, e.StablecoinAsset, e.StablecoinChain,
+                            row.StablecoinDecimals ?? 6)
+                        : null;
+
+                    var stableTxUrl = SparkLedgerQueryService.GetExplorerUrl(
+                        e.StablecoinExternalTxHash, e.StablecoinChain);
+
+                    <tr data-bs-toggle="collapse" data-bs-target="#@rowId" role="button" style="cursor:pointer">
                         <td>
-                            @if (p.Direction == SparkPaymentDirection.Receive)
+                            <span class="spark-ts-utc" data-utc="@e.OccurredAt.ToString("O")">
+                                @e.OccurredAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) UTC
+                            </span>
+                            <small class="d-block text-secondary spark-ts-local" data-utc="@e.OccurredAt.ToString("O")"></small>
+                        </td>
+                        <td>
+                            @switch (e.EntryType)
                             {
-                                <span class="text-success">Received</span>
-                            }
-                            else
-                            {
-                                <span>Sent</span>
+                                case SparkLedgerEntryType.LightningReceive:
+                                    <span class="badge bg-primary-subtle text-primary-emphasis">Lightning</span>
+                                    break;
+                                case SparkLedgerEntryType.StablecoinReceive:
+                                    <span class="badge bg-info-subtle text-info-emphasis">Stablecoin</span>
+                                    break;
+                                case SparkLedgerEntryType.OnchainDeposit:
+                                    <span class="badge bg-warning-subtle text-warning-emphasis">On-chain</span>
+                                    break;
+                                case SparkLedgerEntryType.Send:
+                                    <span class="badge bg-secondary-subtle text-secondary-emphasis">Send</span>
+                                    break;
+                                case SparkLedgerEntryType.Sweep:
+                                    <span class="badge bg-secondary-subtle text-secondary-emphasis">Sweep</span>
+                                    break;
+                                case SparkLedgerEntryType.UnilateralExit:
+                                    <span class="badge bg-danger-subtle text-danger-emphasis">Exit</span>
+                                    break;
                             }
                         </td>
-                        <td class="text-end font-monospace">@p.AmountSats.ToString("N0", CultureInfo.InvariantCulture)</td>
-                        <td class="text-end font-monospace">@p.FeeSats.ToString("N0", CultureInfo.InvariantCulture)</td>
                         <td>
-                            @if (!string.IsNullOrEmpty(p.Description))
+                            @if (isCredit)
                             {
-                                <span>@p.Description</span>
-                            }
-                            else if (p.PaymentHash is { } h)
-                            {
-                                <vc:truncate-center text="@h" classes="truncate-center-id" />
+                                <span class="text-success">&#8595; IN</span>
                             }
                             else
                             {
-                                <span class="text-secondary">-</span>
+                                <span class="text-danger">&#8593; OUT</span>
+                            }
+                        </td>
+                        <td class="text-end font-monospace">@amtSat.ToString("N0", CultureInfo.InvariantCulture)</td>
+                        <td class="text-end font-monospace">@feeSat.ToString("N0", CultureInfo.InvariantCulture)</td>
+                        <td>
+                            @if (stableAmt is not null)
+                            {
+                                <span>@stableAmt</span>
+                                @if (!string.IsNullOrEmpty(e.Description))
+                                {
+                                    <small class="d-block text-secondary">@e.Description</small>
+                                }
+                            }
+                            else if (!string.IsNullOrEmpty(e.Description))
+                            {
+                                <span>@e.Description</span>
+                            }
+                            else if (!string.IsNullOrEmpty(e.PaymentHash))
+                            {
+                                <vc:truncate-center text="@e.PaymentHash" classes="truncate-center-id" />
                             }
                         </td>
                         <td class="text-end text-nowrap">
-                            @if (!string.IsNullOrEmpty(p.Bolt11))
+                            @if (stableTxUrl is not null)
                             {
-                                <button type="button" class="btn btn-link btn-sm p-0 text-secondary"
-                                        data-clipboard="@p.Bolt11"
-                                        title="Copy BOLT11 invoice">
-                                    <span class="fa fa-copy"></span>
-                                </button>
+                                <a href="@stableTxUrl" target="_blank" rel="noopener noreferrer"
+                                   class="btn btn-link btn-sm p-0 text-secondary" title="View transaction"
+                                   onclick="event.stopPropagation()">
+                                    <span class="fa fa-external-link" aria-hidden="true"></span>
+                                </a>
                             }
+                            <span class="fa @(isCredit ? "fa-angle-down" : "fa-angle-up") text-secondary ms-1"
+                                  aria-hidden="true"></span>
+                        </td>
+                    </tr>
+
+                    @* Expandable detail row *@
+                    <tr id="@rowId" class="collapse">
+                        <td colspan="7" class="pt-0">
+                            <div class="ps-2 border-start border-2 ms-1 small text-secondary">
+                                @if (!string.IsNullOrEmpty(e.SdkPaymentId))
+                                {
+                                    <div>SDK ID: <span class="font-monospace user-select-all">@e.SdkPaymentId</span></div>
+                                }
+                                @if (!string.IsNullOrEmpty(e.PaymentHash))
+                                {
+                                    <div>Payment hash: <span class="font-monospace user-select-all">@e.PaymentHash</span></div>
+                                }
+                                @if (!string.IsNullOrEmpty(e.BtcPayInvoiceId))
+                                {
+                                    <div>BTCPay invoice: <span class="font-monospace user-select-all">@e.BtcPayInvoiceId</span></div>
+                                }
+                                @if (e.StablecoinExternalTxHash is { } txHash && stableTxUrl is null)
+                                {
+                                    @* Hash present but chain unknown - show it without a link *@
+                                    <div>TX hash: <span class="font-monospace user-select-all">@txHash</span></div>
+                                }
+                                @if (e.InvoiceRateEur is { } rateEur)
+                                {
+                                    <div>
+                                        Rate at invoice: @rateEur.ToString("N0", CultureInfo.InvariantCulture) EUR/BTC
+                                        @if (e.InvoiceRateRon is { } rateRon)
+                                        {
+                                            <span>/ @rateRon.ToString("N0", CultureInfo.InvariantCulture) RON/BTC</span>
+                                        }
+                                        @if (e.InvoiceRateAt is { } rateAt)
+                                        {
+                                            <span class="ms-1">(<time class="spark-ts-utc" data-utc="@rateAt.ToString("O")">@rateAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) UTC</time>)</span>
+                                        }
+                                    </div>
+                                }
+                                @if (e.IsBackfill)
+                                {
+                                    <div class="text-warning">Backfilled entry</div>
+                                }
+                            </div>
                         </td>
                     </tr>
                 }
@@ -127,25 +253,70 @@ else
 
     <div class="d-flex justify-content-between align-items-center mt-2">
         <div class="form-text">
-            Showing @(Model.Skip + 1)-@(Model.Skip + Model.Payments.Count)@(Model.HasMore ? "+" : "").
+            Showing @(Model.Skip + 1)&ndash;@(Model.Skip + Model.Rows.Count)@(Model.HasMore ? "+" : "")
+            of @Model.TotalCount.ToString("N0", CultureInfo.InvariantCulture)
         </div>
         <div class="d-flex gap-2">
             @if (Model.Skip > 0)
             {
-                <a class="btn btn-sm btn-outline-secondary"
-                   asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-                   asp-route-direction="@dirParam" asp-route-period="@periodParam" asp-route-skip="@prevSkip">
-                    &larr; Previous
-                </a>
+                <a class="btn btn-sm btn-outline-secondary" href="@PageUrl(prevSkip)">&larr; Previous</a>
             }
             @if (Model.HasMore)
             {
-                <a class="btn btn-sm btn-outline-secondary"
-                   asp-action="WalletHistory" asp-route-storeId="@Model.StoreId"
-                   asp-route-direction="@dirParam" asp-route-period="@periodParam" asp-route-skip="@nextSkip">
-                    Next &rarr;
-                </a>
+                <a class="btn btn-sm btn-outline-secondary" href="@PageUrl(nextSkip)">Next &rarr;</a>
             }
         </div>
     </div>
 }
+
+@* ---- Pending stablecoin conversions ---- *@
+@if (Model.PendingQuotes.Count > 0)
+{
+    <h5 class="mt-4 mb-2">Pending stablecoin conversions</h5>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead>
+                <tr>
+                    <th>Created</th>
+                    <th>Asset &amp; Chain</th>
+                    <th>Expected (est.)</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var q in Model.PendingQuotes)
+                {
+                    var dueStr = q.DueAmount.ToString("0.######", CultureInfo.InvariantCulture) +
+                                 " " + q.Asset.ToUpperInvariant() +
+                                 " · " + SparkLedgerQueryService.ChainDisplayName(q.Chain);
+                    <tr>
+                        <td>
+                            <span class="spark-ts-utc" data-utc="@q.CreatedAt.ToString("O")">
+                                @q.CreatedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) UTC
+                            </span>
+                        </td>
+                        <td>@dueStr <span class="badge bg-warning-subtle text-warning-emphasis ms-1">est.</span></td>
+                        <td>-</td>
+                        <td><span class="badge bg-warning-subtle text-warning-emphasis">Pending</span></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@* ---- Client-side: local time conversion ---- *@
+<script>
+    (function () {
+        // Show browser-local time in a small second line under each UTC timestamp.
+        document.querySelectorAll('.spark-ts-local[data-utc]').forEach(function (el) {
+            try {
+                var d = new Date(el.dataset.utc);
+                el.textContent = d.toLocaleString(undefined, {
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit'
+                });
+            } catch (e) { /* ignore */ }
+        });
+    })();
+</script>
