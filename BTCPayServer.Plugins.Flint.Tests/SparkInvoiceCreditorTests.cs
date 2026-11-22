@@ -337,7 +337,7 @@ public class SparkInvoiceCreditorTests
     {
         // The ledger entry for a BTCPay-invoice receive should copy the BOLT11 'd' field so an operator
         // can read the purpose of a payment without opening BTCPay. SparkInvoiceCreditor has the invoice
-        // record directly — no lookup needed.
+        // record directly -- no lookup needed.
         var store = new InMemoryInvoiceRecordStore();
         var credits = new FakeInvoiceCreditGateway();
         var ledger = new InMemorySparkLedgerStore();
@@ -355,5 +355,53 @@ public class SparkInvoiceCreditorTests
         var entry = Assert.Single(ledger.All);
         Assert.Equal(description, entry.Description);
         Assert.Equal(SparkLedgerEntryType.LightningReceive, entry.EntryType);
+    }
+
+    [Fact]
+    public async Task Invoice_rates_are_captured_in_the_ledger_entry()
+    {
+        // RON invoice: SparkInvoiceCreditor must write InvoiceRateEur, InvoiceRateRon,
+        // InvoiceRateSource="btcpay_invoice", and InvoiceRateAt from the match.
+        var store = new InMemoryInvoiceRecordStore();
+        var credits = new FakeInvoiceCreditGateway();
+        var ledger = new InMemorySparkLedgerStore();
+        var creditor = new SparkInvoiceCreditor(
+            credits, store, ledger, NullLogger<SparkInvoiceCreditor>.Instance);
+
+        var record = Settled(store);
+        credits.Mint(Hash, InvoiceId, StoreId);
+        var rateAt = new DateTimeOffset(2026, 11, 22, 10, 0, 0, TimeSpan.Zero);
+        credits.WithRates(Hash, rateEur: 43652.25m, rateRon: 220000m, rateAt: rateAt);
+
+        await creditor.CreditAsync(record, Ct);
+
+        var entry = Assert.Single(ledger.All);
+        Assert.Equal(43652.25m, entry.InvoiceRateEur);
+        Assert.Equal(220000m, entry.InvoiceRateRon);
+        Assert.Equal("btcpay_invoice", entry.InvoiceRateSource);
+        Assert.Equal(rateAt, entry.InvoiceRateAt);
+    }
+
+    [Fact]
+    public async Task Invoice_rates_are_null_for_SATS_denominated_invoice()
+    {
+        // A SATS invoice (like a manual test payment) has no fiat rates -- InvoiceRate* must stay null.
+        var store = new InMemoryInvoiceRecordStore();
+        var credits = new FakeInvoiceCreditGateway();
+        var ledger = new InMemorySparkLedgerStore();
+        var creditor = new SparkInvoiceCreditor(
+            credits, store, ledger, NullLogger<SparkInvoiceCreditor>.Instance);
+
+        var record = Settled(store);
+        credits.Mint(Hash, InvoiceId, StoreId);
+        // WithRates not called -- rates stay null (SATS invoice has no fiat rates)
+
+        await creditor.CreditAsync(record, Ct);
+
+        var entry = Assert.Single(ledger.All);
+        Assert.Null(entry.InvoiceRateEur);
+        Assert.Null(entry.InvoiceRateRon);
+        Assert.Null(entry.InvoiceRateSource);
+        Assert.Null(entry.InvoiceRateAt);
     }
 }

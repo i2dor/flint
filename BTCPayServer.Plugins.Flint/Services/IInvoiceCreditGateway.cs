@@ -21,11 +21,17 @@ namespace BTCPayServer.Plugins.Flint.Services;
 /// True when the invoice already carries a payment for this hash, which is the normal case: BTCPay's own
 /// Lightning listener usually gets there first.
 /// </param>
+/// <param name="RateEur">BTC/EUR rate snapped from the invoice's rate blob, or null if unavailable.</param>
+/// <param name="RateRon">BTC/RON rate snapped from the invoice's rate blob, or null if unavailable.</param>
+/// <param name="RateAt">Timestamp of the invoice, used as the rate snapshot time.</param>
 public sealed record SparkInvoiceCreditMatch(
     string InvoiceId,
     string StoreId,
     string PaymentMethodId,
-    bool AlreadyHasPayment);
+    bool AlreadyHasPayment,
+    decimal? RateEur = null,
+    decimal? RateRon = null,
+    DateTimeOffset? RateAt = null);
 
 /// <summary>One settlement, in the shape BTCPay needs to record a payment for it.</summary>
 /// <param name="Preimage">

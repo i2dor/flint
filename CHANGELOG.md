@@ -7,6 +7,36 @@ All notable changes to this plugin are recorded here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0.2] — 2026-11-22
+
+Wallet History UI polish and two correctness fixes on the live write path.
+
+### Added
+
+- **Wallet History page** (`WalletHistory.cshtml`, `SparkLedgerQueryService`, `SparkController`):
+  - Asset and chain filter buttons derived from entries present in the store; filters compose with the
+    existing period and direction filters.
+  - Stablecoin received totals per asset/chain combination, shown below the sat totals row.
+  - WooCommerce order ID in expandable row details, fetched from the linked BTCPay invoice
+    (`invoice.Metadata.OrderId`) via `InvoiceRepository` -- one batch fetch per page load.
+  - Conversion status badge in expandable details for `StablecoinReceive` rows: Completed (green) when
+    `SdkPaymentId` is set, Pending (yellow) otherwise. Known limitation: Failed/Refunded states are not
+    distinguished (noted in PR).
+  - Timestamps shown as UTC with local time below, converted in-browser by a nonce-guarded inline script.
+  - Pending `StablecoinReceive` amounts labeled "(estimate)" to signal the quote has not settled.
+  - CSV export button, gated on `CanModifyStoreSettings` policy.
+
+- **Invoice rate capture** (`SparkInvoiceCreditor`, `BTCPayInvoiceCreditGateway`): live
+  `LightningReceive` ledger entries now capture `InvoiceRateEur`, `InvoiceRateRon`,
+  `InvoiceRateSource = "btcpay_invoice"`, and `InvoiceRateAt` from the matched BTCPay invoice's rate
+  blob. SATS-denominated invoices correctly produce null rates. Two new tests cover both cases.
+
+### Fixed
+
+- **CSP inline-script violation**: the local-time `<script>` block was outside any `@section` and
+  therefore rendered without a nonce, causing a Content-Security-Policy blocked-inline-script error on
+  every page load. Moved to `@section PageFootContent` so the layout's nonce applies.
+
 ## [1.4.0.1] — 2026-11-21
 
 Upstream 1.4.0 (Breez Spark SDK 0.28.4, cooperative recovery, BTCPay Server 2.4.7) with fork additions:
