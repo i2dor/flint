@@ -214,6 +214,8 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
     /// </summary>
     private readonly IExitStateBackupStore _exitStateBackupStore;
 
+    private readonly ISparkLedgerStore _ledger;
+
     /// <summary>
     /// The debounce/safety-net decisions for those backups, plus the per-store content hash that stops an
     /// unchanged state being rewritten. Singleton because the requests arrive on per-store event loops and
@@ -246,6 +248,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         ILoggerFactory loggerFactory,
         IExitStateBackupStore exitStateBackupStore,
         ExitStateBackupScheduler exitStateBackupScheduler,
+        ISparkLedgerStore ledger,
         ILogger<SparkService> logger) : base(eventAggregator, logger)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -273,6 +276,7 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
         _timeProvider = timeProvider;
         _exitStateBackupStore = exitStateBackupStore;
         _exitStateBackupScheduler = exitStateBackupScheduler;
+        _ledger = ledger;
     }
 
     #region Hosted service lifecycle
@@ -1850,6 +1854,25 @@ public class SparkService : EventHostedServiceBase, ISparkClientResolver, ISpark
                 "Store {StoreId}: Spark credited {AmountSats} sat from an on-chain deposit "
                 + "({FeeSats} sat claim fee, {Status})",
                 storeId, payment.AmountSats, payment.FeeSats, payment.Status);
+            // Write live; backfill gates on ExistsForSdkPaymentAsync so the entry is never duplicated.
+            if (!await _ledger.ExistsForSdkPaymentAsync(storeId, payment.SdkPaymentId, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                await _ledger.AppendAsync(new SparkLedgerEntry
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    StoreId = storeId,
+                    EntryType = SparkLedgerEntryType.OnchainDeposit,
+                    AmountMsat = payment.AmountMsat,
+                    FeeMsat = payment.FeeSats * 1000L,
+                    OccurredAt = payment.Timestamp,
+                    RecordedAt = DateTimeOffset.UtcNow,
+                    SdkPaymentId = payment.SdkPaymentId,
+                    Description = payment.Description,
+                    IsBackfill = false,
+                }, cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 

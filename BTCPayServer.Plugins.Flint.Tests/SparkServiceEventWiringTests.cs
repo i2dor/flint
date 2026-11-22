@@ -547,6 +547,45 @@ public class SparkServiceEventWiringTests
     /// asserts a positive one — but it is what keeps "it has not settled yet" from reading as "it will never
     /// settle".
     /// </remarks>
+    // -- Live ledger writes for on-chain deposits --------------------------------
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_claimed_deposit_writes_a_live_OnchainDeposit_ledger_entry()
+    {
+        // A Deposit event (on-chain autoclaim) has no BTCPay invoice: it must land in the ledger
+        // directly so the operator can see the funds, with IsBackfill=false.
+        using var h = await StartedAsync();
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-ledger-1"));
+
+        await Eventually.True(
+            () => h.Ledger.All.Any(e => e.SdkPaymentId == "dep-ledger-1"),
+            "the deposit ledger entry was never written");
+
+        var entry = h.Ledger.All.Single(e => e.SdkPaymentId == "dep-ledger-1");
+        Assert.Equal(SparkLedgerEntryType.OnchainDeposit, entry.EntryType);
+        Assert.Equal(StoreId, entry.StoreId);
+        Assert.False(entry.IsBackfill);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task A_claimed_deposit_is_not_duplicated_if_the_same_event_fires_twice()
+    {
+        // The idempotency guard on SdkPaymentId must prevent a second ledger row even if the
+        // SDK fires the event twice (reconnect replay).
+        using var h = await StartedAsync();
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-idempotent-1"));
+        await Eventually.True(
+            () => h.Ledger.All.Any(e => e.SdkPaymentId == "dep-idempotent-1"),
+            "first deposit entry never appeared");
+
+        Emit(h, StoreId, SparkEventKind.PaymentSucceeded, Deposit("dep-idempotent-1"));
+        await WaitForStable(() => h.Ledger.All.Count(e => e.SdkPaymentId == "dep-idempotent-1"));
+
+        Assert.Equal(1, h.Ledger.All.Count(e => e.SdkPaymentId == "dep-idempotent-1"));
+    }
+
     private static async Task WaitForStable<T>(Func<T> read)
     {
         var last = read();

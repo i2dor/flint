@@ -1,6 +1,7 @@
 using System.Linq;
 using BTCPayServer.Configuration;
 using BTCPayServer.Logging;
+using BTCPayServer.Plugins.Flint.Data;
 using BTCPayServer.Plugins.Flint.Sdk;
 using BTCPayServer.Plugins.Flint.Services;
 using Microsoft.AspNetCore.DataProtection;
@@ -52,7 +53,8 @@ public sealed class SparkServiceHarness : IDisposable
         SparkMnemonicProtector Protector,
         InMemoryInvoiceRecordStore Invoices,
         FakeInvoiceCreditGateway Credits,
-        StubBolt11Parser Bolt11);
+        StubBolt11Parser Bolt11,
+        InMemorySparkLedgerStore Ledger);
 
     private sealed record Deadlines(
         TimeSpan Connect,
@@ -115,6 +117,9 @@ public sealed class SparkServiceHarness : IDisposable
     /// registrations stand in for the invoices themselves, which of course outlive the process.
     /// </summary>
     public StubBolt11Parser Bolt11 => _durable.Bolt11;
+
+    /// <summary>The ledger store shared across the creditor, reconciler, and service.</summary>
+    public InMemorySparkLedgerStore Ledger => _durable.Ledger;
 
     /// <summary>What a settled invoice is announced on, which is what wakes BTCPay's listening session.</summary>
     public SparkSettlementBroadcaster Broadcaster { get; }
@@ -187,7 +192,8 @@ public sealed class SparkServiceHarness : IDisposable
                 new SparkMnemonicProtector(new EphemeralDataProtectionProvider()),
                 new InMemoryInvoiceRecordStore(),
                 new FakeInvoiceCreditGateway(),
-                new StubBolt11Parser()),
+                new StubBolt11Parser(),
+                new InMemorySparkLedgerStore()),
             new Deadlines(
                 connectDeadline ?? TimeSpan.FromMilliseconds(250),
                 confirmStatusDeadline ?? Constants.SdkCallDeadline,
@@ -245,7 +251,8 @@ public sealed class SparkServiceHarness : IDisposable
             invoices,
             broadcaster,
             new SparkInvoiceCreditor(
-                durable.Credits, invoices, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+                durable.Credits, invoices, durable.Ledger, NullLogger<SparkInvoiceCreditor>.Instance),
+            durable.Ledger,
             NullLogger<SparkSettlementReconciler>.Instance);
         var wiring = new SparkLightningWiring(lightning, NullLogger<SparkLightningWiring>.Instance);
 
@@ -298,6 +305,7 @@ public sealed class SparkServiceHarness : IDisposable
             NullLoggerFactory.Instance,
             exitStateBackups,
             backupScheduler,
+            durable.Ledger,
             log);
 
         stablecoins = new StablecoinHarness(service);
@@ -397,11 +405,12 @@ public sealed class SparkServiceHarness : IDisposable
             ILoggerFactory loggerFactory,
             IExitStateBackupStore exitStateBackupStore,
             ExitStateBackupScheduler exitStateBackupScheduler,
+            ISparkLedgerStore ledger,
             ILogger<SparkService> logger)
             : base(eventAggregator, storeRepository, dataDirectories, networkProvider, sdkClientFactory,
                 invoiceStore, outgoingStore, reconciler, broadcaster, mnemonicProtector, lightningWiring,
                 bolt11Parser, timeProvider, stablecoinsFactory, loggerFactory,
-                exitStateBackupStore, exitStateBackupScheduler, logger)
+                exitStateBackupStore, exitStateBackupScheduler, ledger, logger)
         {
             _connectDeadline = connectDeadline;
             _confirmStatusDeadline = confirmStatusDeadline;

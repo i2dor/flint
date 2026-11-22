@@ -94,6 +94,7 @@ public class SparkFundedRegtestTests
             // whole while leaving crediting to the tests that own it.
             new SparkInvoiceCreditor(
                 new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+            new InMemorySparkLedgerStore(),
             NullLogger<SparkSettlementReconciler>.Instance);
         var client = new SparkLightningClient(
             _wallet.StoreId,

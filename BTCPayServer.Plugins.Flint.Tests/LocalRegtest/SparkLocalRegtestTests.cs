@@ -501,6 +501,7 @@ public class SparkLocalRegtestTests
             broadcaster,
             new SparkInvoiceCreditor(
                 new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+            new InMemorySparkLedgerStore(),
             NullLogger<SparkSettlementReconciler>.Instance);
 
         return new SparkLightningClient(

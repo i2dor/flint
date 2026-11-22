@@ -54,8 +54,24 @@ public class SparkSettlementReconcilerTests
             store,
             broadcaster,
             new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+            new InMemorySparkLedgerStore(),
             log);
         return (reconciler, store, broadcaster, log, credits);
+    }
+
+    private static (SparkSettlementReconciler Reconciler, InMemorySparkLedgerStore Ledger) CreateWithLedger()
+    {
+        var store = new InMemoryInvoiceRecordStore();
+        var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
+        var credits = new FakeInvoiceCreditGateway();
+        var ledger = new InMemorySparkLedgerStore();
+        var reconciler = new SparkSettlementReconciler(
+            store,
+            broadcaster,
+            new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+            ledger,
+            NullLogger<SparkSettlementReconciler>.Instance);
+        return (reconciler, ledger);
     }
 
     /// <summary>
@@ -77,6 +93,7 @@ public class SparkSettlementReconcilerTests
             store,
             new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
             new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), creditLog),
+            new InMemorySparkLedgerStore(),
             NullLogger<SparkSettlementReconciler>.Instance);
         return (reconciler, store, credits, creditLog);
     }
@@ -941,6 +958,87 @@ public class SparkSettlementReconcilerTests
         Assert.NotNull(store.Records[Hash].CreditedAt);
     }
 
+    // -- Live ledger writes for unattributable receives (NotFound path) ----------
+
+    [Fact]
+    public async Task An_unattributable_receive_writes_a_live_LightningReceive_entry()
+    {
+        // A payment that arrives with no matching BTCPay invoice (Flint Receive page, Lightning Address)
+        // must be recorded in the ledger so the operator can see the funds arrived.
+        var (reconciler, ledger) = CreateWithLedger();
+        var payment = Receive(sdkPaymentId: "sdk-notfound-1", amountSats: 250);
+
+        var result = await reconciler.ApplyAsync(StoreId, payment, Ct);
+
+        Assert.Equal(InvoiceSettlementOutcome.NotFound, result.Outcome);
+
+        var entry = Assert.Single(ledger.All);
+        Assert.Equal(SparkLedgerEntryType.LightningReceive, entry.EntryType);
+        Assert.Equal(StoreId, entry.StoreId);
+        Assert.Equal(payment.SdkPaymentId, entry.SdkPaymentId);
+        Assert.Equal(payment.AmountMsat, entry.AmountMsat);
+        Assert.Equal(0, entry.FeeMsat);
+        Assert.Equal(payment.PaymentHash, entry.PaymentHash);
+        Assert.Equal(payment.Description, entry.Description);
+        Assert.False(entry.IsBackfill);
+    }
+
+    [Fact]
+    public async Task Idempotency_guard_prevents_duplicate_live_entry_for_same_SdkPaymentId()
+    {
+        // The same payment arriving twice (e.g. reconnect event replay) must not produce two entries.
+        var (reconciler, ledger) = CreateWithLedger();
+        var payment = Receive(sdkPaymentId: "sdk-idempotent-1");
+
+        await reconciler.ApplyAsync(StoreId, payment, Ct);
+        await reconciler.ApplyAsync(StoreId, payment, Ct);
+
+        Assert.Equal(1, await ledger.CountAsync(StoreId));
+    }
+
+    [Fact]
+    public async Task A_backfill_after_a_live_reconciler_write_does_not_create_a_duplicate()
+    {
+        // Live write happens first (reconciler NotFound), then backfill runs over the same SDK
+        // payment list -> exactly one ledger entry must remain.
+        var ledger = new InMemorySparkLedgerStore();
+        var invoiceStore = new InMemoryInvoiceRecordStore();
+        var broadcaster = new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance);
+        var credits = new FakeInvoiceCreditGateway();
+        var reconciler = new SparkSettlementReconciler(
+            invoiceStore,
+            broadcaster,
+            new SparkInvoiceCreditor(credits, invoiceStore, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+            ledger,
+            NullLogger<SparkSettlementReconciler>.Instance);
+
+        // Step 1: live write via reconciler (NotFound - no matching BTCPay invoice).
+        var payment = Receive(sdkPaymentId: "sdk-mixed-1", amountSats: 500, hash: "aaaa1234");
+        var liveResult = await reconciler.ApplyAsync(StoreId, payment, Ct);
+        Assert.Equal(InvoiceSettlementOutcome.NotFound, liveResult.Outcome);
+        Assert.Equal(1, await ledger.CountAsync(StoreId));
+
+        // Step 2: backfill runs with the same payment in the SDK list.
+        var sdk = new FakeSparkSdkClient();
+        sdk.Seed(payment);
+        var runtime = new FakeSparkStoreRuntime();
+        runtime.Clients[StoreId] = sdk;
+
+        var backfill = new SparkLedgerBackfillService(
+            null!, ledger, runtime,
+            NullLogger<SparkLedgerBackfillService>.Instance);
+
+        var backfillResult = await backfill.BackfillFromSdkAsync(StoreId, dryRun: false, CancellationToken.None);
+
+        // The live entry must survive and backfill must not create a second one.
+        Assert.Equal(0, backfillResult.Created);
+        Assert.Equal(1, backfillResult.Skipped);
+        Assert.Equal(1, await ledger.CountAsync(StoreId));
+
+        var entry = Assert.Single(ledger.All);
+        Assert.False(entry.IsBackfill, "the live entry must not have been overwritten by a backfill entry");
+    }
+
     /// <summary>
     /// Decorator that fails one specific point lookup and delegates everything else.
     /// </summary>
@@ -1150,6 +1248,7 @@ public class SparkReconcileStoresTests
                 store,
                 new SparkSettlementBroadcaster(NullLogger<SparkSettlementBroadcaster>.Instance),
                 new SparkInvoiceCreditor(credits, store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+                new InMemorySparkLedgerStore(),
                 NullLogger<SparkSettlementReconciler>.Instance),
             store,
             credits);

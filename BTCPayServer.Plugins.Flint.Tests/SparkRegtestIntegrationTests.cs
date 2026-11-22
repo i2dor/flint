@@ -71,6 +71,7 @@ public class SparkRegtestIntegrationTests
                     broadcaster,
                     new SparkInvoiceCreditor(
                         new FakeInvoiceCreditGateway(), store, new InMemorySparkLedgerStore(), NullLogger<SparkInvoiceCreditor>.Instance),
+                    new InMemorySparkLedgerStore(),
                     NullLogger<SparkSettlementReconciler>.Instance),
                 broadcaster,
                 new NBitcoinBolt11Parser(Network.RegTest, NullLogger<NBitcoinBolt11Parser>.Instance),

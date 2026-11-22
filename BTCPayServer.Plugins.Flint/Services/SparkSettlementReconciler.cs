@@ -117,6 +117,7 @@ public class SparkSettlementReconciler
     private readonly IInvoiceRecordStore _invoiceStore;
     private readonly SparkSettlementBroadcaster _broadcaster;
     private readonly SparkInvoiceCreditor _creditor;
+    private readonly ISparkLedgerStore _ledger;
     private readonly ILogger<SparkSettlementReconciler> _logger;
 
     /// <summary>
@@ -129,11 +130,13 @@ public class SparkSettlementReconciler
         IInvoiceRecordStore invoiceStore,
         SparkSettlementBroadcaster broadcaster,
         SparkInvoiceCreditor creditor,
+        ISparkLedgerStore ledger,
         ILogger<SparkSettlementReconciler> logger)
     {
         _invoiceStore = invoiceStore;
         _broadcaster = broadcaster;
         _creditor = creditor;
+        _ledger = ledger;
         _logger = logger;
     }
 
@@ -242,6 +245,27 @@ public class SparkSettlementReconciler
                     "Store {StoreId}: received {AmountSats} sat for payment hash {PaymentHash}, which this "
                     + "plugin has no record of creating. The funds are in the Spark balance",
                     storeId, payment.AmountSats, paymentHash);
+                // Write a live ledger entry so the receipt appears immediately — not at the next backfill.
+                // Idempotent: backfill gates on ExistsForSdkPaymentAsync and will skip this entry.
+                if (!await _ledger.ExistsForSdkPaymentAsync(storeId, payment.SdkPaymentId, cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    await _ledger.AppendAsync(new SparkLedgerEntry
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        StoreId = storeId,
+                        EntryType = SparkLedgerEntryType.LightningReceive,
+                        AmountMsat = payment.AmountMsat,
+                        FeeMsat = 0,
+                        OccurredAt = payment.Timestamp,
+                        RecordedAt = DateTimeOffset.UtcNow,
+                        SdkPaymentId = payment.SdkPaymentId,
+                        PaymentHash = payment.PaymentHash,
+                        Description = payment.Description,
+                        IsBackfill = false,
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
         }
 
